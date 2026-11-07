@@ -28,7 +28,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它目前用假資料、還沒接上服務，已有實例直列、頻道、Goal 與任務面板、Artifact 編輯、Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
 
-下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（記憶、電腦、project 移交）是預定的位置。手機欄位只是配置目標。
+下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（記憶、電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
 
 ## 前端
 
@@ -36,7 +36,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-markdown-editor/latest)：區塊式所見即所得，直接以 Markdown 讀寫，支援標題、巢狀清單、待辦、表格、程式碼區塊、跨區塊選取與輸入法。評估用的原型在 [`prototypes/gpui-editor/`](../prototypes/gpui-editor/)，已在 macOS 實測中文輸入法可用；選型過程見[已決定事項](roadmap-and-decisions.md#已決定事項)。
 
-手機與 Web 客戶端的形式尚未決定（見[待確認事項](roadmap-and-decisions.md#已決定事項)）。下表的手機欄位是配置目標，不代表已選定實作方式。
+手機客戶端是原生 Android app（Kotlin 加 Jetpack Compose），在 [`android/`](../android/)，推播經 ntfy（見[手機推播](approvals-and-notifications.md#手機推播)）。它和桌面客戶端走同一套即時協定與 HTTP API。下表的手機欄位對應 Android 客戶端的配置。
 
 ### 介面配置
 

@@ -10,7 +10,14 @@
 
 - [gpui-kit-markdown-editor（docs.rs）](https://docs.rs/crate/gpui-kit-markdown-editor/latest)
 
-- [gpui-mobile](https://github.com/itsbalamurali/gpui-mobile)：GPUI 的 iOS／Android 平台層（實驗中）
+- [gpui-mobile](https://github.com/itsbalamurali/gpui-mobile)：GPUI 的 iOS／Android 平台層（實驗中；評估後未採用，手機端改用原生 Android）
+
+## 手機推播
+
+- [UnifiedPush](https://unifiedpush.org/)：Android 的開放推播協定，app 向 distributor 登記取得 endpoint。
+- [UnifiedPush Android 規格](https://unifiedpush.org/developers/spec/android/)：登記流程、VAPID 公鑰與訊息廣播。
+- [ntfy 作為 UnifiedPush distributor](https://unifiedpush.org/users/distributors/ntfy/)：使用 ntfy.sh 或自架 ntfy 伺服器。
+- [ntfy](https://ntfy.sh/)：開源推播服務，可自架。
 
 - 專案內的 [`prototypes/gpui-editor/`](../prototypes/gpui-editor/)：Artifact 編輯器與中文輸入法測試原型
 

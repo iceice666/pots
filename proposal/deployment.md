@@ -19,11 +19,11 @@ Pots 有兩種部署形態，兩者長期並存，桌面版不是搬上伺服器
 | 網路 | 只綁 loopback | 私有網路（例如 `tailscale serve`）或反向代理加 TLS | 反向代理加 TLS |
 | Pots 存取與登入 | 啟動時產生的本機 token，免登入；模型 provider 仍須另行授權 | passkey 或 forward-auth；原生客戶端用可撤銷的裝置 token；不取代模型 provider 授權 | 同左 |
 | 外部事件 | 輪詢與 IMAP IDLE（GitHub 用 PAT 或 `gh` 的登入） | 輪詢；有公開網址時優先用 webhook | 各來源優先用 webhook，輪詢作備援 |
-| 通知 | 作業系統桌面通知 | 手機推播（方式待定，候選為 Web Push）；已連線的桌面客戶端顯示原生通知 | 同左 |
+| 通知 | 作業系統桌面通知 | Android 推播（UnifiedPush，經 ntfy）；已連線的桌面客戶端顯示原生通知 | 同左 |
 | 憑證 | 靜態 API key 存在受保護設定或 OS keychain；會輪替的 OAuth token 存在可寫入的持久 secret store | 靜態 API key 用 secret 檔等方式注入；會輪替的 OAuth token 存在可寫入的持久 secret store | 同左 |
 | Worker 沙箱 | 本機 Docker/Podman | 伺服器上的 Docker/Podman | 同左 |
 
-表中三欄是三組預設組合，不是寫死的模式。各項後端可以獨立選擇，例如家裡 NAS 上跑「SQLite 加 passkey 加 Web Push」就是合理的多設備版，不必為了多設備就上 Postgres。不合理的組合在啟動時直接拒絕，規則見[設定驗證](#設定驗證)。
+表中三欄是三組預設組合，不是寫死的模式。各項後端可以獨立選擇，例如家裡 NAS 上跑「SQLite 加 passkey 加 ntfy 推播」就是合理的多設備版，不必為了多設備就上 Postgres。不合理的組合在啟動時直接拒絕，規則見[設定驗證](#設定驗證)。
 
 ### 桌面版：app 內嵌服務
 
@@ -62,7 +62,7 @@ pub struct Config {
     pub store:  StoreConfig,            // Sqlite { path } | Postgres { url }
     pub listen: ListenConfig,           // Loopback | Bind { addr, public_url: Option<Url> }
     pub auth:   AuthConfig,             // LocalToken | Passkey | ForwardAuth { trusted_proxy }
-    pub notify: Vec<NotifyConfig>,      // Desktop | WebPush { vapid } | ConnectedClients
+    pub notify: Vec<NotifyConfig>,      // Desktop | UnifiedPush { vapid } | ConnectedClients
     pub ingest: Prefer,                 // Poll | Push
     pub sources: Vec<SourceConfig>,     // 各 connector 的非秘密設定
     pub nodes:  Option<NodeListener>,   // node 專用 listener
@@ -98,7 +98,7 @@ impl Backends {
 
 - 只要 `listen` 不是 loopback，`auth` 就不可為 `LocalToken`；即使是私有網路，非本機連線也必須登入。node 專用 listener 不受此限，因為它只接受 node 簽章。
 - passkey 需要 HTTPS 與固定網域：私有網路可以用 `tailscale serve` 的憑證，對外則透過反向代理。
-- `ingest = Push` 和 Web Push 都需要 `public_url`，否則啟動時報錯；沒有公開網址的實例一律輪詢。
+- `ingest = Push` 需要 `public_url`，否則啟動時報錯；沒有公開網址的實例一律輪詢。UnifiedPush 推播只需要能連出到 ntfy 伺服器，不需要 `public_url`；但手機收到推播後要能連回實例，所以 `listen` 是 loopback 時不能啟用。
 - `ForwardAuth` 必須設定 `trusted_proxy`，只接受來自該代理的身分標頭。
 - SQLite 只能搭配單一 runner；要多個 runner 就必須用 Postgres。
 

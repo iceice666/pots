@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart TB
-    human["人類（GPUI 桌面客戶端，可同時連多個實例）<br/>對話、核准、看進度<br/>手機客戶端待定"]
+    human["人類（GPUI 桌面客戶端，可同時連多個實例）<br/>對話、核准、看進度<br/>Android 客戶端（ntfy 推播）"]
     sources["外部來源<br/>GitHub、GitLab、郵件、狀態頁"]
 
     subgraph service["單一 Rust 服務（桌面版內嵌或獨立部署）"]
@@ -131,7 +131,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `approvals` | 核准請求 | `id` , `task_id` , `action jsonb` , `action_hash` , `state` , `expires_at` , `decided_by` |
 | `om_raw` | rig 寫入的原始訊息（含工具呼叫） | `project_id` , `seq` , `message jsonb` , `tokens` , `observed bool` |
 | `om_observations` | Observer 產出的觀察 | `project_id` , `generation` , `seq` , `date` , `priority` , `text` , `pinned` |
-| `push_subscriptions` | Web Push 訂閱（候選方案，推播方式待定） | `user_id` , `endpoint` , `p256dh` , `auth` |
+| `push_subscriptions` | Android 裝置的 UnifiedPush 訂閱（ntfy endpoint 與 Web Push 加密金鑰） | `user_id` , `device_id` , `endpoint` , `p256dh` , `auth` |
 | `artifacts` | 人與 agent 共同編輯的文件（spec、brief、ledger、 report） | `id, project_id, goal_id?, kind, title, rev, body_md` |
 | `artifact_revisions` | 每次修改的版本與作者，用於 diff 與還原 | `artifact_id, rev, author, body_md, at` |
 | `schedules` | agent 自己設定的單次或週期喚醒 | `id, owner, spec, prompt, next_at, expires_at, enabled` |
@@ -157,7 +157,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | JSON Schema | `schemars` | 工具參數定義 |
 | GitHub API | `octocrab` | GitHub App 認證與 REST |
 | Webhook 驗簽 | `hmac` + `sha2` |  |
-| Web Push | `web-push` | VAPID；手機推播候選方案 |
+| 手機推播 | `web-push` | VAPID 與 RFC 8291 加密，送到 UnifiedPush（ntfy）的 endpoint |
 | 登入 | `webauthn-rs` | passkey |
 | ID | `uuid` （v7） | 時間有序 |
 | 可觀測性 | `tracing` 、`tracing-opentelemetry` |  |

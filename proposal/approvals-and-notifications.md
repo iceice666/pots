@@ -47,7 +47,14 @@
 
 ### 手機推播
 
-手機客戶端的形式尚未決定（見[待確認事項](roadmap-and-decisions.md#已決定事項)），推播方式隨之確定。候選方案是輕量 Web 核准頁做成 PWA，用 Web Push 加 VAPID 金鑰發通知，不需要 APNs 或 FCM 的開發者憑證；iOS 16.4 起支援已安裝到主畫面的 PWA 收推播。若改採原生 Android 客戶端，則改用原生通知。
+手機客戶端是原生 Android app（[`android/`](../android/)），推播走 [UnifiedPush](https://unifiedpush.org/)，用 [ntfy](https://ntfy.sh/) 當 distributor，不需要 FCM 與 Google 帳號（見[已決定事項](roadmap-and-decisions.md#已決定事項)）。
+
+- **登記。** 手機上裝 ntfy app，伺服器可以是公開的 ntfy.sh 或自架的 ntfy。Pots app 透過 UnifiedPush 向 ntfy 登記，拿到一個 endpoint URL，連同 Web Push 的 `p256dh`、`auth` 金鑰送給 Pots 實例，存進 `push_subscriptions`。每台裝置、每個實例各自登記一次；裝置 token 被撤銷時，該裝置的訂閱一併刪除。
+- **發送。** 實例用 VAPID 簽章，把內容依 RFC 8291 加密後 POST 到 endpoint。ntfy 只轉送密文，看不到內容；即使用公開的 ntfy.sh，topic 名稱外流也只會收到看不懂的訊息。實例只需要能連出到 ntfy 伺服器，不需要對外網址。
+- **內容。** 推播只帶 ID 與一句摘要，例如核准 ID、project 名稱與動作標題；diff、程式碼與秘密一律不放。Android app 收到後自己產生系統通知，點擊開 `pots://approval/{id}`，再向實例拉取完整內容。
+- **失效。** endpoint 回 404 或 410 時刪除該筆訂閱，並在實例的「裝置」頁標示需要重新登記；ntfy 沒有安裝或沒有選為 distributor 時，app 在設定頁提示。
+
+iOS 不在 v1 範圍。
 
 通知上的動作按鈕並非所有平台都支援，所以不依賴它：點擊通知一律開到該筆核准的專頁，頁面上就是大的「核准」與「拒絕」按鈕，一次點擊完成。支援動作按鈕的平台再額外加上。
 

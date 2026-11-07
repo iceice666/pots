@@ -2,7 +2,7 @@
 
 Pots 手機客戶端（Kotlin + Jetpack Compose）。目前只有 UI，資料是假的，還沒接上任何服務。畫面依「Pots 手機端 UI」設計稿實作，配置依 [`proposal/ux-and-frontend.md`](../proposal/ux-and-frontend.md) 的手機欄位。
 
-手機客戶端的形式還沒定案（見 [`proposal/roadmap-and-decisions.md`](../proposal/roadmap-and-decisions.md)），這是原生 Android 方案的試作，方便和 PWA、gpui-mobile 比較。
+手機端已定案用原生 Android，推播走 UnifiedPush，由 ntfy 當 distributor（見 [`proposal/approvals-and-notifications.md`](../proposal/approvals-and-notifications.md#手機推播)）。推播與服務連線在 M8 接上。
 
 ## 執行
 
