@@ -114,10 +114,10 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `project_transfers` | project 移交紀錄（移出、移入、取回） | `id` , `project_id` , `direction` , `peer_instance` , `peer_url` , `state` , `at` |
 | `client_devices` | 客戶端裝置 token，可撤銷 | `id` , `user_id` , `name` , `token_hash` , `last_seen` , `revoked_at` |
 | `stream_items` | UI 顯示的完整對話流 | `id` , `project_id` , `thread_of` , `author` , `kind` , `body jsonb` , `status` |
-| `goals` | 人類意圖的根節點 | `id` , `project_id` , `title` , `state` , `brief, budget_tokens` , `spent_tokens` |
+| `goals` | 人類意圖的根節點；Brief 是掛在 Goal 上的 artifact | `id` , `project_id` , `title` , `kind` , `state` （`active` ｜ `done` ｜ `cancelled`）, `outcome` , `planner_note` , `budget_tokens` , `spent_tokens` |
 | `tasks` | 任務樹節點 | `id` , `goal_id` , `parent_id` , `assignee` , `state jsonb` , `attempts` , `spent_tokens` |
 | `task_events` | 任務狀態變化的只增日誌（稽核與重播） | `task_id` , `seq` , `from` , `to` , `cause` |
-| `agent_runs` | agent 執行佇列（`FOR UPDATE SKIP LOCKED` ） | `id` , `agent` , `task_id?` , `trigger` , `state` , `lease_until` |
+| `agent_runs` | agent 執行佇列（Postgres 用 `FOR UPDATE SKIP LOCKED`；SQLite 由單一 runner 在寫入 transaction 裡挑選） | `id` , `agent` , `goal_id?` , `task_id?` , `trigger` , `state` （`queued` ｜ `running` ｜ `done` ｜ `failed` ｜ `cancelled`）, `lease_until` , `attempts` |
 | `model_connections` | 設定視窗新增的 API provider（OpenAI／Anthropic 相容）的非秘密設定；內建的 ChatGPT 不是一列 | `id, user_id, kind, name, base_url, model, secret_ref, created_at, updated_at` |
 | `instance_settings` | 實例層級的設定（使用中的 provider、ChatGPT 的模型） | `key, value` |
 | `worker_sessions` | 外部 runtime 的續接與 run 對應 | `id, user_id, task_id, run_id, backend, external_session_id, state_ref, worktree_ref` |
@@ -136,6 +136,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `push_subscriptions` | Android 裝置的 UnifiedPush 訂閱（ntfy endpoint 與 Web Push 加密金鑰） | `user_id` , `device_id` , `endpoint` , `p256dh` , `auth` |
 | `artifacts` | 人與 agent 共同編輯的文件（spec、brief、ledger、 report） | `id, project_id, goal_id?, kind, title, rev, body_md` |
 | `artifact_revisions` | 每次修改的版本與作者，用於 diff 與還原 | `artifact_id, rev, author, body_md, at` |
+| `artifact_reads` | 每個 agent 上次讀到哪一版，`read_artifact` 據此附上之後人類的修改 | `artifact_id, reader, rev` |
 | `schedules` | agent 自己設定的單次或週期喚醒 | `id, owner, spec, prompt, next_at, expires_at, enabled` |
 | `listeners` | 符合條件的外部事件自動開 Goal 的規則 | `id, project_id, filter, action, budget_per_trigger, max_per_hour, enabled` |
 | `team_posts` | Goal 內 team 成員的短訊（發現、問題、決定、阻礙、交接） | `id, goal_id, author_task?, kind, to_task?, body, at` |

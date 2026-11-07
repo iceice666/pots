@@ -58,11 +58,11 @@ pub async fn run_agent(
 
 Gate 實作 pots-llm 的 `Hook`（`before_turn`、`before_tool` 回 `ToolDecision`、`after_tool`），負責所有「不能靠 prompt」的規則：
 
-- 授權。 工具不在 profile 內就拒絕（`Deny`，理由當作工具結果送回模型）；scope 也在這裡檢查，例如 worker 只能讀寫自己的 worktree。
+- 授權。 不在 profile 內的工具根本不交給模型（`toolset` 只組 profile 列出的），模型亂叫的名稱由 loop 直接回錯誤，所以不需要再 `Deny`。scope 由工具本身檢查並以文字錯誤回給模型，例如 Planner 只能動自己的 Goal、`write_artifact` 只能寫 profile 允許的種類、worker 只能讀寫自己的 worktree。
 
 - 預算與取消。 每輪開始前（`before_turn`）檢查預算與 steer 事件，有就乾淨結束；取消走 loop 的 cancellation token，在每個 await 點生效。
 
-- 工具類別。 Suspend 類回 `AllowThenStop`，執行後結束本輪；Effect 類回 `Stop`，不執行，改建核准請求後結束本輪。
+- 工具類別。 Suspend 類回 `AllowThenStop`，執行後結束本輪；Effect 類回 `Stop`，不執行，改建核准請求後結束本輪。M2 的 `complete_goal` 也回 `AllowThenStop`：Goal 結束了，Planner 這一輪不該再做事。
 
 - 追蹤。 每次呼叫寫進 trace（`after_tool`）。
 
@@ -80,7 +80,7 @@ Gate 實作 pots-llm 的 `Hook`（`before_turn`、`before_tool` 回 `ToolDecisio
 | explorer | 無狀態 | 無 | 不可 |
 | reviewer | 無狀態 | 無（只回傳審查意見） | 不可 |
 
-Profile 存成設定檔（例如 `profiles/*.toml` ），新增一種 agent 只需新增一個檔案，不用改程式碼。
+Profile 存成設定檔（`crates/pots-server/profiles/*.toml`，編進執行檔）：名稱、記憶模式、`max_turns`、唯讀基礎集之外的工具、`write_artifact` 可寫的種類與 role prompt。資料目錄的 `profiles/<name>.toml` 可以整份取代內建的；工具與種類依 agent 檢查（例如 chat 不能拿 `create_task`），不合法時服務不啟動。M2 的執行期只認得 chat 與 planner，新增一種 agent 仍要加它的觸發與 scope；之後的 profile 也照這個格式。
 
 ### 唯讀基礎工具
 

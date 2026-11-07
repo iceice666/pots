@@ -47,6 +47,15 @@ pub fn write(a: &Artifact, base_rev: u32, edits: Vec<Edit>) -> WriteResult {
 
 - 版本。 每次修改寫入 `artifact_revisions` ，可以看 diff、還原到任一版。
 
+### M2 的實作
+
+- 寫入在 `crates/pots-server/src/artifacts.rs`，和 `ArtifactChanged` 事件在同一個 transaction。agent 的編輯是 `replace_section`、`append_section`、`replace_all`（只能在新建時用）；`body_md` 裡不能再有 `## ` 標題。`base_rev` 不是目前版本時回衝突，附上 `base_rev` 到目前的 diff 與「有沒有人類的修改」。
+- `read_artifact` 依 `artifact_reads` 附上「這個 agent 上次讀取之後人類的修改」；agent 自己寫完、Planner 被叫醒時拿到的 Brief／Ledger 也算讀過。
+- 你的編輯先是桌面版的草稿，按「儲存」才帶著開始編輯時的版本送出（`SaveArtifact`）。期間 agent 改過時以 `##` 區段做三方合併：你改的區段套到目前版本上，同一段兩邊改得不一樣時拒絕，草稿留在客戶端。內容有變的區段記進 `human_edits`（「你在 HH:MM 改過」）。
+- 寫入都是單一 transaction，沒有「寫到一半」的狀態，所以 `agent_writing` 目前一律是空的；區段鎖定留給之後串流寫入時用。
+- 版本紀錄是 `ArtifactHistory`（只回給問的連線，每一版附和前一版的 unified diff）；`RestoreArtifact` 新增一個內容等於舊版的版本。
+- 你儲存或還原進行中 Goal 的 Brief 時，Planner 被 steer（正在跑的那輪中斷、重新排一個）。Project Notes 的提案流程還沒做。
+
 ### 和對話、記憶的關係
 
 - 對話流裡只出現 `Card::Artifact` （建立、重大更新），點開在側邊面板編輯。

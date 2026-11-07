@@ -26,7 +26,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 ## 桌面客戶端現況
 
-桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）。`--mock` 模式用假資料展示其他畫面：實例直列、Goal 與任務面板、Artifact 編輯、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
+桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）。`--mock` 模式用假資料展示其他畫面：實例直列、Team 貼文與任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
 
 下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
 
@@ -81,6 +81,9 @@ pub enum ServerEvent {
     Providers     { seq: u64, providers: ProvidersView },  // provider 設定與使用中的那個；不含 key
     ProviderTest  { request: u64, result: Result<Vec<ModelOption>, String> }, // 只回給測試的連線；不記日誌
     Memory        { seq: u64, project: ProjectId, memory: MemoryView }, // project 的記憶整份替換
+    GoalChanged   { seq: u64, project: ProjectId, goal: GoalView },     // Goal 連同任務樹整筆替換
+    ArtifactChanged { seq: u64, project: ProjectId, artifact: ArtifactView }, // 整筆替換
+    ArtifactHistory { artifact: ArtifactId, revisions: Vec<ArtifactRevisionView> }, // 只回給問的連線；不記日誌
     Error         { message: String },                  // 指令被拒絕或失敗；不記日誌
 }
 #[derive(Serialize, Deserialize)]
@@ -103,12 +106,17 @@ pub enum ClientCommand {
     PinObservation    { project: ProjectId, id: ObservationId, pinned: bool },
     EditObservation   { project: ProjectId, id: ObservationId, text: String }, // 舊內容保留作稽核
     DeleteObservation { project: ProjectId, id: ObservationId },
+    SaveArtifact      { artifact: ArtifactId, base_rev: u32, body: String }, // base_rev 過期時以區段合併
+    ArtifactHistory   { artifact: ArtifactId },     // 伺服器回 ArtifactHistory
+    RestoreArtifact   { artifact: ArtifactId, rev: u32 }, // 新增一個內容等於舊版的版本
 }
 ```
 
 - 事件日誌：帶 `seq` 的事件寫進事件日誌，`Resume` 時依序補送；`Delta`、`StreamingText`、`LoginUrl`、`ProviderTest`、`Error` 只對當下的連線有意義，不記日誌。API key 只會從客戶端送到服務（`SaveProvider`、`TestProvider`），任何事件都不帶 key，只帶末四碼。登入網址可能帶 `id_token_hint`，所以日誌裡的 `ModelAuth { Pending }` 不存網址，客戶端開瀏覽器只依 `LoginUrl`。
 
 - 記憶：快照裡每個 project 帶著 `MemoryView`；Observer、Reflector 或你的修改讓記憶變了就送一筆 `Memory` 整份替換。觀察的修改被拒絕時，除了 `Error` 也重送一次目前的 `Memory`，客戶端先改的內容會被蓋回去。
+
+- 任務樹與 artifact：快照裡每個 project 帶著所有 Goal（含任務樹與 Brief 全文）與 artifact；任何變化都送一筆 `GoalChanged` 或 `ArtifactChanged` 整筆替換，客戶端不用自己拼狀態。Planner 的里程碑是對話流裡的 `Card::Milestone`。`SaveArtifact` 被拒絕（同一段兩邊都改過）時只回 `Error`，草稿留在客戶端；`Cancel { task }` 取消一個還沒結束的任務。
 
 - 訊息狀態：人類訊息進入 agent 歷史時（被某一輪接手，或被「停止」清掉），伺服器記一筆 `ItemUpdated`，客戶端據此收掉「排隊中」。
 

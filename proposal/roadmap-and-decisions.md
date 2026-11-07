@@ -16,6 +16,8 @@ M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種�
 
 3. M2 任務樹：`goals` 、`tasks` 、`task_events` 、`agent_runs` 佇列；`create_goal` 、 `create_task` 、`get_status` 工具；Planner 與 Goal brief 交接；Artifact（Spec、 Brief、Ledger、Report）與編輯面板；狀態面板與 Goal 卡片。
 
+   狀態：已實作於 `crates/pots-server` 的 `tasks.rs`、`artifacts.rs`、`planner.rs`、`tools.rs`、`profiles.rs`（加上 `0004_task_tree.sql` 與 `profiles/*.toml`）、協定 v4，以及桌面版的 Goal 卡片、Goal 面板、Artifacts 分頁與編輯器（儲存、區段合併、版本紀錄與還原）。和你確認過的範圍：還沒有 worker，任務停在 Planned，Planner 只在 Goal 建立、steer 與你改 Brief 時醒來；只有 Planner 的 run 走持久化佇列，對話仍用記憶體 lane；不在 profile 裡的工具不交給模型。以假模型的整合測試驗證（`tests/tasks.rs`：開 Goal 交接、steer 中斷重規劃、你的編輯合併與還原、取消與完成、衝突與重啟後接著跑）與桌面版的 live 截圖流程；對真的模型的 Planner 品質待使用者手動驗證。
+
 4. M3 Watcher 與等待：connector 介面與事件管線，GitHub 為第一個 connector （webhook 與輪詢備援）、`subscriptions` 、`wait_for` 、喚醒與 sweeper；自我排程與 listener（桌面版以輪詢實作）。
 
 5. M4 Coding worker：接 Claude Code adapter（內建 worker 為備援），原版 CLI 由使用者官方登入，在容器與 worktree 裡改 code、跑測試、開 PR；MCP 回報與平台端授權、串流事件、中斷、重建容器後續接為驗收項目。session ID 與官方 session 資料一併持久化；不做 Codex adapter。CI 失敗自動修，最多 3 次；quick_fix 快速通道、subagent、team 貼文。

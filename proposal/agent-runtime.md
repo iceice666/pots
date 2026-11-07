@@ -175,6 +175,10 @@ M1 起對話 agent 的歷史由 OM 組成：記憶區塊加上 `om_raw` 裡還�
 
 4. 喚醒時建立新的 run，帶入「你在等什麼、結果是什麼」作為觸發訊息。
 
+M2 先把 Planner 的 run 改走持久化佇列（`crates/pots-server/src/planner.rs`）：觸發和改狀態寫在同一個 transaction，同一個 Goal 已有排隊中的 run 時把觸發併進去；每個 Goal 同時最多一個 `running`，整個實例最多並行 4 個。SQLite 沒有 `SKIP LOCKED`，由單一 runner 在 `BEGIN IMMEDIATE` 的 transaction 裡挑選並標記。steer 中斷這個 Goal 正在跑的 run；服務關閉時被中斷的 run 回到 `queued`（不算一次重試），當掉留下的 `running` 在下次啟動時放回佇列，取走超過 3 次就標成失敗。對話 agent 仍由記憶體裡的 lane 排程（每個 project 一個），只在開始時寫一列 `running`。
+
+Planner 的里程碑不寫進對話 agent 的 `om_raw`：寫成使用者訊息會讓 Observer 誤認成使用者說的話，寫在 run 進行中也會拆散工具呼叫與結果。改成對話 agent 每次 run 的 instructions 帶著「進行中的 Goal」與「最近 5 張里程碑」，它在下一輪就看得到並轉述；細節仍以 `get_status` 為準。
+
 ### ChatGPT Plan provider：內建 agent 的模型推論後端
 
 pots 採開源、本機或使用者自行架設的模式。透過官方 **Sign in with ChatGPT（SIWC）** 取得 ChatGPT plan usage 授權，直接呼叫 Responses API；不讀取 Codex 的 `auth.json`、不使用 ChatGPT 網頁 cookie，也不依賴 Codex CLI 或 app-server。這不授予存取使用者既有 ChatGPT 對話的權限。收費或平台代管服務不在本次範圍，若改變產品模式需重新確認資格。
