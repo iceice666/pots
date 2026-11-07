@@ -43,7 +43,7 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 | 區塊 | 桌面 | 手機 | 內容 |
 | --- | --- | --- | --- |
 | 實例直列 | 最左側窄欄，只連一個實例時隱藏 | Projects 分頁頂端的切換器，只連一個實例時隱藏 | 全域 Inbox、各實例圖示（待處理徽章、離線警示）、加入實例 |
-| 左欄 | 目前實例 | 底部分頁「Projects」 | 頂端是實例名稱與形態，點下去是實例選單；接著是總管、這個實例的 Inbox、專案列表、自動化（排程、Listener）與電腦。每個 project 一列，標示待核准數、「需要你」或未讀；已移交的 project 顯示新位置 |
+| 左欄 | 目前實例 | 底部分頁「Projects」 | 頂端是實例名稱與形態，點下去是實例選單；接著是總管、這個實例的 Inbox、專案列表、自動化（排程、Listener）與電腦，最下方是「設定」。每個 project 一列，標示待核准數、「需要你」或未讀；已移交的 project 顯示新位置 |
 | 對話流 | 中欄，project 頻道的「對話」分頁 | 點進 project | 連續對話 + 內嵌卡片，頂端顯示 agent 狀態、本週預算與「停止」 |
 
 | 區塊 | 桌面 | 手機 | 內容 |
@@ -55,6 +55,7 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 | 總管 | 左欄入口的獨立畫面，和對話流一樣佔中欄，右欄是專案概況與記憶；任何畫面都可用快捷鍵切過去 | 底部分頁「總管」 | 同一個實例內跨 project 的永久對話，依目前選取的實例切換 |
 | 自動化 | 左欄「排程」「Listener」進入的實例層級畫面，佔中欄，可依專案篩選；project 頻道的「自動化」分頁只看這個 project。點一列在右欄看細節 | 同左 | 排程與 listener 列表、批次暫停狀態；可停用、刪除、看條件與觸發紀錄，待核准的 listener 可以直接核准 |
 | 電腦 | 左欄入口的實例層級畫面，佔中欄 | 同左 | 託管電腦的連線狀態、lease 持有者、即時縮圖、權限檢查；「接手」、「交還」與「停止」 |
+| 設定 | 左欄最下方的入口，實例層級畫面，佔中欄 | 「設定」分頁 | 模型 provider：內建的 ChatGPT 方案（登入、登出、模型）與新增的 OpenAI／Anthropic 相容 API（base URL、API key、模型、測試連線），選一個「使用中」。還沒有使用中的 provider 時，Inbox 有一筆「設定模型 provider」指向這裡 |
 
 ### 即時協定
 
@@ -77,6 +78,8 @@ pub enum ServerEvent {
     Inbox         { seq: u64, pending: u32 },
     ModelAuth     { seq: u64, state: ModelAuthView },  // SignedOut | Pending { url } | SignedIn | Error
     LoginUrl      { url: String },                      // 只回給按下登入的連線；不記日誌
+    Providers     { seq: u64, providers: ProvidersView },  // provider 設定與使用中的那個；不含 key
+    ProviderTest  { request: u64, result: Result<Vec<ModelOption>, String> }, // 只回給測試的連線；不記日誌
     Error         { message: String },                  // 指令被拒絕或失敗；不記日誌
 }
 #[derive(Serialize, Deserialize)]
@@ -91,10 +94,14 @@ pub enum ClientCommand {
     StartModelLogin,                      // 伺服器回 LoginUrl，並廣播 ModelAuth { Pending }
     CancelModelLogin,
     ModelLogout,
+    SaveProvider      { draft: ProviderDraft },     // 新增或修改；api_key 為 None 時沿用已存的 key
+    DeleteProvider    { id: ProviderId },
+    SetActiveProvider { id: ProviderId },
+    TestProvider      { request: u64, draft: ProviderDraft }, // 列出模型驗證設定，不儲存
 }
 ```
 
-- 事件日誌：帶 `seq` 的事件寫進事件日誌，`Resume` 時依序補送；`Delta`、`StreamingText`、`LoginUrl`、`Error` 只對當下的連線有意義，不記日誌。登入網址可能帶 `id_token_hint`，所以日誌裡的 `ModelAuth { Pending }` 不存網址，客戶端開瀏覽器只依 `LoginUrl`。
+- 事件日誌：帶 `seq` 的事件寫進事件日誌，`Resume` 時依序補送；`Delta`、`StreamingText`、`LoginUrl`、`ProviderTest`、`Error` 只對當下的連線有意義，不記日誌。API key 只會從客戶端送到服務（`SaveProvider`、`TestProvider`），任何事件都不帶 key，只帶末四碼。登入網址可能帶 `id_token_hint`，所以日誌裡的 `ModelAuth { Pending }` 不存網址，客戶端開瀏覽器只依 `LoginUrl`。
 
 - 訊息狀態：人類訊息進入 agent 歷史時（被某一輪接手，或被「停止」清掉），伺服器記一筆 `ItemUpdated`，客戶端據此收掉「排隊中」。
 

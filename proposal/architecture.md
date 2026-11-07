@@ -118,7 +118,8 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `tasks` | 任務樹節點 | `id` , `goal_id` , `parent_id` , `assignee` , `state jsonb` , `attempts` , `spent_tokens` |
 | `task_events` | 任務狀態變化的只增日誌（稽核與重播） | `task_id` , `seq` , `from` , `to` , `cause` |
 | `agent_runs` | agent 執行佇列（`FOR UPDATE SKIP LOCKED` ） | `id` , `agent` , `task_id?` , `trigger` , `state` , `lease_until` |
-| `model_connections` | 模型授權連線的非秘密 metadata | `id, user_id, kind, issuer, subject, client_id, host_id, scopes, status, secret_ref` |
+| `model_connections` | 設定頁新增的 API provider（OpenAI／Anthropic 相容）的非秘密設定；內建的 ChatGPT 不是一列 | `id, user_id, kind, name, base_url, model, secret_ref, created_at, updated_at` |
+| `instance_settings` | 實例層級的設定（使用中的 provider、ChatGPT 的模型） | `key, value` |
 | `worker_sessions` | 外部 runtime 的續接與 run 對應 | `id, user_id, task_id, run_id, backend, external_session_id, state_ref, worktree_ref` |
 | `nodes` | 託管電腦的註冊、能力、政策與狀態 | `id, user_id, name, os, capabilities, pubkey, policy, status, last_seen` |
 | `node_leases` | node 的 display 等資源由誰持有 | `node_id, resource, holder, until` |
@@ -139,7 +140,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `team_posts` | Goal 內 team 成員的短訊（發現、問題、決定、阻礙、交接） | `id, goal_id, author_task?, kind, to_task?, body, at` |
 | `sources` | 外部來源的設定、輪詢進度與健康狀態 | `id, kind, config, trust, ingest, cursor, health, enabled` |
 
-`model_connections` 不儲存 OAuth token 或 API key；`secret_ref` 指向受保護憑證層，host ID 依持久執行環境保存。`worker_sessions.state_ref` 指向官方 session 儲存，不是 Claude token 匯入欄位。以上為待實作的概念 schema，帳號／workspace 註冊與 user 所有權須隔離。
+`model_connections` 不儲存 OAuth token 或 API key；`secret_ref` 指向資料目錄裡的秘密檔（`auth/providers/<id>.json`），host ID 依持久執行環境保存。`worker_sessions.state_ref` 指向官方 session 儲存，不是 Claude token 匯入欄位。以上為待實作的概念 schema，帳號／workspace 註冊與 user 所有權須隔離。
 
 `stream_items` 給人看，`om_raw` 給 agent 用，兩者以 `run_id` 關聯。這樣 UI 可以保留完整歷史，OM 也可以自由壓縮，互不干擾。
 
@@ -169,7 +170,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | MCP | `rmcp` | M4 供 Claude Code adapter 存取平台工具，伺服器端執行授權 |
 | Git 操作 | `tokio::process` 呼叫 `git` | worktree 等操作直接用 CLI 最穩 |
 | 桌面通知 | `notify-rust` | macOS、Linux、Windows 原生通知；桌面版由服務發出，遠端實例的通知由已連線的客戶端顯示 |
-| 憑證儲存（桌面版與客戶端） | `keyring` | API key 與遠端實例的裝置 token；不接管 Claude CLI 登入。ChatGPT SIWC 憑證在 M0 是資料目錄裡的 `auth/chatgpt-credentials.json`（`0600`，原子寫入），不放 keyring，也對應 SIWC 官方自架 VM 匯入時傳送憑證檔的做法 |
+| 憑證儲存（客戶端） | `keyring` | 遠端實例的裝置 token；不接管 Claude CLI 登入。服務端的秘密目前都是資料目錄裡 `0600`、原子寫入的檔案：ChatGPT SIWC 憑證在 `auth/chatgpt-credentials.json`（也對應 SIWC 官方自架 VM 匯入時傳送憑證檔的做法），API provider 的 key 在 `auth/providers/<id>.json` |
 | 排程 | `croner` | 解析 cron 字串、計算下一次觸發 |
 | Artifact diff | `similar` | 產生「人類修改」的文字 diff |
 | GitLab API | `reqwest` | 直接呼叫 REST，涵蓋自架實例 |

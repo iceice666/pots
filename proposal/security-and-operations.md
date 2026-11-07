@@ -10,7 +10,7 @@
 
 - 身分驗證：桌面版只綁 loopback，免登入，但客戶端必須帶啟動時產生的本機 token（檔案權限 `0600`），服務也會檢查 `Host` 與 `Origin`，擋下瀏覽器跨站請求與 DNS rebinding。只要接受非本機連線就一定要登入，私有網路也一樣；唯一例外是 node 專用 listener，它只接受已配對 node 的簽章。v1 多設備版為單人使用，用 passkey （WebAuthn）登入，不存密碼；原生客戶端先在瀏覽器登入，再換得可撤銷的裝置 token（伺服器只存 hash）。也可以關閉內建登入，改接反向代理的 forward-auth （Authelia、Authentik 等）：代理驗證後以 Remote-User 等標頭傳入身分，服務只信任來自代理的請求（只綁內網位址或驗證代理來源），WebSocket 升級請求同樣經過 forward-auth。GitHub webhook 路徑須在代理設定為略過，改由 HMAC 驗簽保護。
 
-- 憑證隔離：API key、ChatGPT SIWC token 與 GitHub App 私鑰只在受保護的 keychain／secret store 中（SIWC 憑證在 M0 是資料目錄裡 `0600` 的檔案，原子寫入）；API key 可由環境變數提供。秘密不進 prompt、log、trace、任務資料、一般 export 或 project 移交包；每個實例各自持有自己的憑證，不跨實例共用。worker 拿到的 GitHub token 只限該任務的 repo，且有效期短。Claude Code 登入狀態由官方 CLI 管理，不由 pots 匯入或作為內建 agent 的 provider 憑證。
+- 憑證隔離：API key、ChatGPT SIWC token 與 GitHub App 私鑰只在受保護的 keychain／secret store 中（SIWC 憑證與設定頁輸入的 API key 目前都是資料目錄裡 `0600` 的檔案，原子寫入；客戶端只看得到 key 的末四碼）；API key 可由環境變數提供。秘密不進 prompt、log、trace、任務資料、一般 export 或 project 移交包；每個實例各自持有自己的憑證，不跨實例共用。worker 拿到的 GitHub token 只限該任務的 repo，且有效期短。Claude Code 登入狀態由官方 CLI 管理，不由 pots 匯入或作為內建 agent 的 provider 憑證。
 
 - ChatGPT 授權：這是模型用量授權，不是 pots 的 passkey／forward-auth 登入。驗證 OAuth／PKCE、state、OIDC nonce、ID token 與 granted scopes；帳號／workspace 註冊分開儲存，未完成驗證不得覆蓋目前帳號。每個註冊由單一 refresh owner 協調更新，access token、輪替的 refresh token 與期限原子寫入；檔案採 owner-only 權限（Unix `0600`），多 runner 也必須共用更新鎖或專責程序。撤銷／登出後停止使用該連線並清除本機憑證；上游授權撤銷依官方流程處理，不把刪除本機檔案當作上游撤銷。
 
