@@ -128,11 +128,13 @@ mod shots {
         live_screens();
     }
 
-    /// 連到真正的服務（腳本化的模型），走一次「建立 project → 傳訊息 → 收到串流回覆」。
+    /// 連到真正的服務（腳本化的模型）：還沒設定 provider → 在設定頁新增 OpenAI 相容 API
+    /// → 測試連線 → 儲存 → 建立 project → 傳訊息 → 收到串流回覆。
     fn live_screens() {
         use pots_desktop::connection::{Endpoint, Target};
         use pots_desktop::model::*;
         use pots_llm::testing::{ScriptedProvider, ScriptedTurn};
+        use pots_llm::{LlmError, ModelProvider};
 
         struct Fixed(Target);
         impl Endpoint for Fixed {
@@ -141,23 +143,56 @@ mod shots {
             }
         }
 
+        /// 每個 API provider 都接到同一個腳本化的模型。
+        struct ScriptedApi(Arc<ScriptedProvider>);
+
+        #[async_trait::async_trait]
+        impl pots_server::ApiProviderFactory for ScriptedApi {
+            fn build(
+                &self,
+                _: ProviderKind,
+                _: &url::Url,
+                _: &str,
+            ) -> Result<Arc<dyn ModelProvider>, String> {
+                Ok(self.0.clone())
+            }
+
+            async fn list_models(
+                &self,
+                _: ProviderKind,
+                _: &url::Url,
+                _: &str,
+            ) -> Result<Vec<ModelOption>, LlmError> {
+                Ok(["gpt-4.1", "gpt-4.1-mini", "o4-mini"]
+                    .into_iter()
+                    .map(|m| ModelOption {
+                        id: m.into(),
+                        display_name: m.into(),
+                    })
+                    .collect())
+            }
+        }
+
         let dir = tempfile::tempdir().expect("tempdir");
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("runtime");
+        let model = ScriptedProvider::new([ScriptedTurn::new().text_deltas([
+            "收到！",
+            "這是接上本機服務後的第一則回覆，",
+            "用的是設定頁新增的 OpenAI 相容 provider。",
+        ])]);
+        let deps = pots_server::Deps::new(
+            ScriptedProvider::new(Vec::<ScriptedTurn>::new()),
+            "auto",
+            Arc::new(pots_server::FakeModelAuth::signed_out()),
+        )
+        .with_api_providers(Arc::new(ScriptedApi(model)));
         let handle = runtime
             .block_on(pots_server::start(
                 pots_server::Config::desktop(dir.path()),
-                pots_server::Deps {
-                    provider: ScriptedProvider::new([ScriptedTurn::new().text_deltas([
-                        "收到！",
-                        "這是接上本機服務後的第一則回覆，",
-                        "串流與事件日誌都走真的 WebSocket。",
-                    ])]),
-                    model: "scripted".into(),
-                    model_auth: Arc::new(pots_server::FakeModelAuth::signed_out()),
-                },
+                deps,
             ))
             .expect("start server");
         let target = Target {
@@ -166,11 +201,40 @@ mod shots {
         };
 
         let mut s = Shooter::with(move |window, cx| PotsApp::new_live(Fixed(target), window, cx));
-        s.wait_until("快照與登入提示", |app| {
+        s.wait_until("快照與設定提示", |app| {
             app.current_instance().connection == ConnectionState::Connected
                 && app.store.pending(None) == 1
         });
-        s.shot("11-live-signed-out");
+        s.shot("11-live-needs-provider");
+
+        // Inbox 的「開啟設定」→ 新增 OpenAI 相容 API → 測試連線。
+        s.update(|app, window, cx| {
+            let id = pots_desktop::sync::model_login_item_id(app.instance);
+            app.act(id, InboxAction::OpenSettings, window, cx);
+            app.edit_provider(None, ProviderKind::OpenAiCompatible, window, cx);
+            let editor = app.provider_editor.as_ref().expect("表單已開啟");
+            editor
+                .api_key
+                .update(cx, |state, cx| state.set_value("sk-test-1234", window, cx));
+            app.test_provider(cx);
+        });
+        s.wait_until("測試連線結果", |app| {
+            app.provider_editor
+                .as_ref()
+                .is_some_and(|e| matches!(e.test, pots_desktop::app::ProviderTest::Ok(_)))
+        });
+        s.update(|app, window, cx| app.pick_model("gpt-4.1".into(), window, cx));
+        s.shot("12-live-settings-editor");
+
+        s.update(|app, _, cx| app.save_provider(cx));
+        s.wait_until("儲存並設為使用中", |app| {
+            app.current_instance()
+                .providers
+                .active()
+                .is_some_and(|p| p.kind == ProviderKind::OpenAiCompatible)
+                && app.store.pending(None) == 0
+        });
+        s.shot("13-live-settings");
 
         s.update(|app, _, cx| {
             let instance = app.instance;
@@ -202,7 +266,7 @@ mod shots {
                     })
             })
         });
-        s.shot("12-live-chat");
+        s.shot("14-live-chat");
 
         handle.shutdown();
         runtime.block_on(handle.wait()).expect("shutdown");
@@ -331,5 +395,8 @@ mod shots {
             app.open_panel(Some(Panel::Schedule(schedule)), cx);
         });
         s.shot("10-channel-automations");
+
+        s.update(|app, _, cx| app.open_settings(cx));
+        s.shot("10b-settings");
     }
 }

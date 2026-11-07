@@ -6,6 +6,23 @@ const fn at(h: i64, m: i64) -> Timestamp {
     Timestamp(h * 3600 + m * 60)
 }
 
+/// 內建的 ChatGPT（使用中），可以再加一個 API provider。
+fn mock_providers(extra: Option<ProviderView>) -> ProvidersView {
+    let mut items = vec![ProviderView {
+        id: ProviderId::CHATGPT,
+        kind: ProviderKind::ChatGpt,
+        name: "ChatGPT".into(),
+        base_url: String::new(),
+        model: String::new(),
+        key_hint: None,
+    }];
+    items.extend(extra);
+    ProvidersView {
+        active: Some(ProviderId::CHATGPT),
+        items,
+    }
+}
+
 struct Ids(u64);
 
 impl Ids {
@@ -1022,6 +1039,10 @@ pub fn store() -> Store {
             schedules: vec![],
             listeners: vec![],
             automation_pause: None,
+            providers: mock_providers(None),
+            model_auth: ModelAuthView::SignedIn {
+                account: Some("you@example.com".into()),
+            },
         },
         InstanceView {
             id: home,
@@ -1040,6 +1061,17 @@ pub fn store() -> Store {
                 until_short: "週一".into(),
                 by: "由總管在 09:20 依你的要求暫停".into(),
             }),
+            providers: mock_providers(Some(ProviderView {
+                id: ProviderId::from_u64(2),
+                kind: ProviderKind::AnthropicCompatible,
+                name: "Anthropic".into(),
+                base_url: "https://api.anthropic.com".into(),
+                model: "claude-sonnet-4-5".into(),
+                key_hint: Some("…9f2c".into()),
+            })),
+            model_auth: ModelAuthView::SignedIn {
+                account: Some("you@example.com".into()),
+            },
         },
     ];
 

@@ -26,6 +26,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 pots-llm = { path = "../pots-llm", features = ["test-util"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+async-trait = "0.1"
+url = "2"
 
 # 用離屏 renderer 把主要畫面存成 PNG：
 #   cargo test -p pots-desktop --test screenshots

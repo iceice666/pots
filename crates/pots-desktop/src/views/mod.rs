@@ -8,5 +8,6 @@ mod nav;
 mod overlay;
 mod overseer;
 mod panel;
+mod settings;
 mod stream;
 mod widgets;

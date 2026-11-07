@@ -19,7 +19,11 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 
 - 資料目錄預設是系統的應用程式資料目錄下的 `pots`（macOS：`~/Library/Application Support/pots`），可用 `POTS_DATA_DIR` 或 `--data-dir` 覆寫。
 - app 讀資料目錄的 `server.json` 找服務；連不上就用 `--serve` 啟動自己當子行程（獨立的 process group），日誌寫到資料目錄的 `server.log`。關掉視窗後服務繼續跑，用 `kill` 或 ctrl-c 結束；目前還沒有系統匣或選單列。
-- 第一次使用：Inbox 會出現「登入 ChatGPT」，按「開始登入」開瀏覽器完成授權。模型預設取帳號可用清單的第一個，`POTS_CHAT_MODEL` 可以指定。
+- 第一次使用：Inbox 會出現「設定模型 provider」，按「開啟設定」（或左下角「設定」）選一個：
+  - **ChatGPT 方案**：按「登入」開瀏覽器授權，再「設為使用中」。模型留空就用帳號清單的第一個。
+  - **OpenAI 相容 API**：base URL 到 `/v1` 為止（OpenAI、OpenRouter、Ollama 的 `http://localhost:11434/v1` 等），本機服務可以不填 key。
+  - **Anthropic 相容 API**：base URL 例如 `https://api.anthropic.com`，需要 key。
+  「測試連線」會列出可用的模型，點一個填入。API key 只送給本機服務、存在資料目錄，畫面只顯示末四碼。
 - 左欄「新增專案」建立 project，之後就能在頻道對話。斷線時自動重連，重連後補上錯過的事件。
 
 ### Live 模式目前有的
@@ -28,7 +32,8 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | --- | --- |
 | 實例與 project | 本機實例、建立 project、project 列表 |
 | 頻道對話 | 傳訊息（排隊／改方向）、串流回覆、工具摘要、停止 |
-| Inbox | ChatGPT 登入狀態 |
+| Inbox | 還沒設定 provider、ChatGPT 需要登入時的提示 |
+| 設定 | 左下角進入：模型 provider 的新增、編輯、測試連線、刪除、切換使用中；ChatGPT 登入與登出 |
 | 其他 | Goal、任務、Artifact、自動化、總管在 live 模式是空的，等之後的里程碑 |
 
 ## 已有的畫面（`--mock` 假資料）
@@ -53,7 +58,7 @@ Artifact 的編輯與自動化的開關、刪除、恢復只改本地狀態：�
 
 - `src/model.rs`：客戶端的整體狀態 `Store`；view model 與即時協定在 [`pots-proto`](../pots-proto/)。使用者動作把要送出的指令記在 `Store::outbox`，live 模式下每次重繪前送給服務。
 - `src/connection.rs`：一個實例的 WebSocket 連線，跑在自己的執行緒與 tokio runtime；斷線自動重連並帶 `Resume { last_seq }`。
-- `src/sync.rs`：把 `ServerEvent` 套用到 `Store`（快照換掉暫用的實例 ID、串流文字、登入狀態轉成 Inbox 項目、UTC 轉本地時間）。
+- `src/sync.rs`：把 `ServerEvent` 套用到 `Store`（快照換掉暫用的實例 ID、串流文字、provider 與登入狀態轉成 Inbox 提示、UTC 轉本地時間）。
 - `src/mock.rs`：假資料。
 - `src/app.rs`：根視圖 `PotsApp`，持有 `Store` 與 UI 狀態（目前畫面、右欄、篩選、輸入框）。
 - `src/views/`：各區塊的 render；`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`widgets.rs` 是手刻的小元件，`theme.rs` 是色票。
@@ -66,7 +71,7 @@ cargo test -p pots-desktop --test screenshots    # 用離屏 renderer 輸出主�
 cargo run -p pots-desktop --example probe -- <資料目錄> project 名稱 send 你好   # 不開視窗直接和服務說話
 ```
 
-截圖裡的 `11-live-*`、`12-live-*` 會在背景起一個真的服務（模型換成腳本），走一次建立 project、傳訊息、收到串流回覆。
+截圖裡的 `11-live-*` 到 `14-live-*` 會在背景起一個真的服務（模型換成腳本），走一次「還沒設定 provider → 設定頁新增 OpenAI 相容 API、測試連線、儲存 → 建立 project → 傳訊息 → 收到串流回覆」。
 
 截圖寫到 `target/tmp/screenshots/`，需要 Metal（macOS）或 WGPU（Linux）。這只是產生圖檔方便檢查版面，不是 golden-image 比對。
 

@@ -16,6 +16,10 @@ pub struct Applied {
     pub login_url: Option<String>,
     /// 新增的 project（例如自己剛建立的），app 可以切過去。
     pub project_added: Option<ProjectId>,
+    /// provider 設定有變（`Providers` 事件或快照）。
+    pub providers_changed: bool,
+    /// `TestProvider` 的結果：請求編號與可用模型或錯誤。
+    pub provider_test: Option<(u64, Result<Vec<ModelOption>, String>)>,
 }
 
 /// 本地時區相對 UTC 的秒數。
@@ -43,10 +47,12 @@ pub fn placeholder_instance(id: InstanceId, name: &str) -> InstanceView {
         schedules: vec![],
         listeners: vec![],
         automation_pause: None,
+        providers: ProvidersView::default(),
+        model_auth: ModelAuthView::SignedOut,
     }
 }
 
-/// 模型登入狀態在 Inbox 裡的那一筆用固定 ID：直接沿用實例的 UUID。
+/// 「設定 provider／登入 ChatGPT」在 Inbox 裡的那一筆用固定 ID：直接沿用實例的 UUID。
 pub fn model_login_item_id(instance: InstanceId) -> ApprovalId {
     ApprovalId(instance.0)
 }
@@ -113,6 +119,9 @@ impl Sync {
                 view.host = "這台電腦".into();
                 view.connection = ConnectionState::Connected;
                 view.projects = projects;
+                view.providers = snap.providers;
+                view.model_auth = snap.model_auth;
+                out.providers_changed = true;
                 if new_id != instance {
                     for item in store.inbox.iter_mut().filter(|i| i.instance == instance) {
                         item.instance = new_id;
@@ -122,7 +131,7 @@ impl Sync {
                     out.rekeyed = Some((instance, new_id));
                     instance = new_id;
                 }
-                self.set_model_auth(store, instance, &snap.model_auth);
+                refresh_setup_prompt(store, instance);
             }
             ServerEvent::ProjectAdded { project, .. } => {
                 if let Some(view) = store.instance_mut(instance)
@@ -198,7 +207,20 @@ impl Sync {
                 }
             }
             ServerEvent::ModelAuth { state, .. } => {
-                self.set_model_auth(store, instance, &state);
+                if let Some(view) = store.instance_mut(instance) {
+                    view.model_auth = state;
+                }
+                refresh_setup_prompt(store, instance);
+            }
+            ServerEvent::Providers { providers, .. } => {
+                if let Some(view) = store.instance_mut(instance) {
+                    view.providers = providers;
+                }
+                out.providers_changed = true;
+                refresh_setup_prompt(store, instance);
+            }
+            ServerEvent::ProviderTest { request, result } => {
+                out.provider_test = Some((request, result));
             }
             ServerEvent::Error { message } => out.toast = Some(message),
             // M0 還沒有任務樹與核准。
@@ -211,47 +233,87 @@ impl Sync {
         }
         out
     }
+}
 
-    /// 模型沒登入或授權失效時，在 Inbox 放一筆「需要你處理」；登入後收掉。
-    fn set_model_auth(&self, store: &mut Store, instance: InstanceId, state: &ModelAuthView) {
-        let id = model_login_item_id(instance);
-        let (title, detail) = match state {
-            ModelAuthView::SignedIn { .. } => {
-                if let Some(item) = store.inbox.iter_mut().find(|i| i.id == id) {
-                    item.decision = Decision::Resolved("已登入 ChatGPT".into());
-                }
-                return;
+/// 還不能和 agent 對話時，在 Inbox 放一筆「需要你處理」：沒有使用中的 provider 就請你去
+/// 設定；用 ChatGPT 但還沒登入就請你登入。可以對話後收掉。
+pub fn refresh_setup_prompt(store: &mut Store, instance: InstanceId) {
+    let Some(view) = store.instance(instance) else {
+        return;
+    };
+    let id = model_login_item_id(instance);
+    let active = view.providers.active().map(|p| p.kind);
+    let (title, detail, actions): (&str, String, Vec<InboxAction>) = match (active, &view.model_auth)
+    {
+        (None, _) => (
+            "設定模型 provider 才能和 agent 對話",
+            "到「設定」新增 OpenAI 或 Anthropic 相容的 API，或改用 ChatGPT 方案登入。".into(),
+            vec![InboxAction::OpenSettings],
+        ),
+        (Some(ProviderKind::ChatGpt), ModelAuthView::SignedOut) => (
+            "登入 ChatGPT 才能和 agent 對話",
+            "使用中的 provider 是 ChatGPT 方案。按「開始登入」會開瀏覽器，用 ChatGPT 帳號授權這個實例；也可以到「設定」改用 API。".into(),
+            vec![InboxAction::StartLogin, InboxAction::OpenSettings],
+        ),
+        // 網址只經由 `LoginUrl` 回給按下登入的那條連線，這裡不開瀏覽器。
+        (Some(ProviderKind::ChatGpt), ModelAuthView::Pending { .. }) => (
+            "在瀏覽器完成 ChatGPT 登入",
+            "已開啟瀏覽器；完成授權後這筆會自動收掉。瀏覽器沒有開啟的話，再按一次「開始登入」。".into(),
+            vec![InboxAction::StartLogin],
+        ),
+        (Some(ProviderKind::ChatGpt), ModelAuthView::Error { message }) => (
+            "ChatGPT 授權需要重新登入",
+            message.clone(),
+            vec![InboxAction::StartLogin, InboxAction::OpenSettings],
+        ),
+        // 使用中的 API provider 還缺東西，送出訊息一定會失敗。
+        (Some(kind), _) if incomplete(view.providers.active(), kind).is_some() => (
+            "完成模型 provider 設定",
+            incomplete(view.providers.active(), kind)
+                .unwrap_or_default()
+                .to_string(),
+            vec![InboxAction::OpenSettings],
+        ),
+        (Some(_), _) => {
+            if let Some(item) = store.inbox.iter_mut().find(|i| i.id == id && i.is_open()) {
+                item.decision = Decision::Resolved("模型 provider 已就緒".into());
             }
-            ModelAuthView::SignedOut => (
-                "登入 ChatGPT 才能和 agent 對話",
-                "Pots 用你的 ChatGPT 方案額度推論。按「開始登入」會開瀏覽器，用 ChatGPT 帳號授權這個實例。",
-            ),
-            // 網址只經由 `LoginUrl` 回給按下登入的那條連線，這裡不開瀏覽器。
-            ModelAuthView::Pending { .. } => (
-                "在瀏覽器完成 ChatGPT 登入",
-                "已開啟瀏覽器；完成授權後這筆會自動收掉。瀏覽器沒有開啟的話，再按一次「開始登入」。",
-            ),
-            ModelAuthView::Error { message } => ("ChatGPT 授權需要重新登入", message.as_str()),
-        };
-        let item = InboxItem {
-            id,
-            instance,
-            project: None,
-            context: String::new(),
-            kind: InboxKind::NeedsYou,
-            title: title.into(),
-            detail: detail.into(),
-            facts: vec![],
-            actions: vec![InboxAction::StartLogin],
-            at: store.now,
-            expiry: None,
-            decision: Decision::Pending,
-        };
-        match store.inbox.iter_mut().find(|i| i.id == id) {
-            Some(existing) => *existing = item,
-            None => store.inbox.insert(0, item),
+            return;
         }
+    };
+    let item = InboxItem {
+        id,
+        instance,
+        project: None,
+        context: String::new(),
+        kind: InboxKind::NeedsYou,
+        title: title.into(),
+        detail,
+        facts: vec![],
+        actions,
+        at: store.now,
+        expiry: None,
+        decision: Decision::Pending,
+    };
+    match store.inbox.iter_mut().find(|i| i.id == id) {
+        Some(existing) => *existing = item,
+        None => store.inbox.insert(0, item),
     }
+}
+
+/// 使用中的 API provider 缺了什麼（沒選模型、Anthropic 沒有 key）；齊全時是 `None`。
+fn incomplete(provider: Option<&ProviderView>, kind: ProviderKind) -> Option<&'static str> {
+    let provider = provider?;
+    if kind == ProviderKind::ChatGpt {
+        return None;
+    }
+    if provider.model.trim().is_empty() {
+        return Some("使用中的 provider 還沒選模型。到「設定」編輯它，用「測試連線」挑一個模型。");
+    }
+    if kind == ProviderKind::AnthropicCompatible && provider.key_hint.is_none() {
+        return Some("使用中的 Anthropic 相容 API 沒有 API key。到「設定」編輯它並填入 key。");
+    }
+    None
 }
 
 /// 有同 ID 就替換，沒有就加到尾端。`keep_queued` 時保留客戶端標的「排隊中」。
@@ -338,8 +400,105 @@ mod tests {
                     items: vec![],
                 }],
                 model_auth: auth,
+                providers: chatgpt_active(),
             },
         }
+    }
+
+    fn chatgpt_active() -> ProvidersView {
+        ProvidersView {
+            active: Some(ProviderId::CHATGPT),
+            items: vec![ProviderView {
+                id: ProviderId::CHATGPT,
+                kind: ProviderKind::ChatGpt,
+                name: "ChatGPT".into(),
+                base_url: String::new(),
+                model: String::new(),
+                key_hint: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn setup_prompt_follows_active_provider() {
+        let inst = InstanceId::from_u64(1);
+        let mut store = empty_store(inst);
+        let sync = Sync::new(0);
+        let mut snap = snapshot(inst, ProjectId::from_u64(2), ModelAuthView::SignedOut);
+        if let ServerEvent::Snapshot { instance, .. } = &mut snap {
+            instance.providers.active = None;
+        }
+        sync.apply(&mut store, inst, snap);
+        let item = store.approval(model_login_item_id(inst)).unwrap();
+        assert_eq!(item.actions, vec![InboxAction::OpenSettings]);
+
+        // 新增 API provider 並設為使用中：不用登入 ChatGPT，提示收掉。
+        let mut providers = chatgpt_active();
+        let api = ProviderId::from_u64(5);
+        providers.items.push(ProviderView {
+            id: api,
+            kind: ProviderKind::OpenAiCompatible,
+            name: "OpenAI".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-4.1".into(),
+            key_hint: Some("…abcd".into()),
+        });
+        providers.active = Some(api);
+        sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::Providers {
+                seq: 4,
+                providers: providers.clone(),
+            },
+        );
+        assert_eq!(store.pending(Some(inst)), 0);
+
+        // 沒選模型：提示補上。
+        let mut no_model = providers.clone();
+        no_model.items[1].model.clear();
+        sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::Providers {
+                seq: 40,
+                providers: no_model,
+            },
+        );
+        let item = store.approval(model_login_item_id(inst)).unwrap();
+        assert!(item.is_open());
+        assert_eq!(item.actions, vec![InboxAction::OpenSettings]);
+        sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::Providers {
+                seq: 41,
+                providers: providers.clone(),
+            },
+        );
+        assert_eq!(store.pending(Some(inst)), 0);
+        assert_eq!(store.instance(inst).unwrap().providers.active, Some(api));
+
+        // 改回 ChatGPT，但還沒登入：要求登入。
+        providers.active = Some(ProviderId::CHATGPT);
+        sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::Providers { seq: 5, providers },
+        );
+        let item = store.approval(model_login_item_id(inst)).unwrap();
+        assert!(item.is_open());
+        assert_eq!(item.actions[0], InboxAction::StartLogin);
+
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::ProviderTest {
+                request: 7,
+                result: Err("連不上".into()),
+            },
+        );
+        assert_eq!(out.provider_test, Some((7, Err("連不上".into()))));
     }
 
     fn text_of(store: &Store, instance: InstanceId, project: ProjectId, item: ItemId) -> String {

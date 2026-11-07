@@ -192,9 +192,9 @@ impl PotsApp {
             Some(pid) => instance
                 .and_then(|i| i.projects.iter().find(|p| p.id == pid))
                 .map_or("# ?".to_string(), |p| format!("# {}", p.name)),
-            // 模型登入那筆屬於整個實例，不是總管發的。
+            // 設定 provider／登入那筆屬於整個實例，不是總管發的。
             None if item.id == crate::sync::model_login_item_id(item.instance) => {
-                "ChatGPT 授權".to_string()
+                "模型 provider".to_string()
             }
             None => "總管".to_string(),
         };

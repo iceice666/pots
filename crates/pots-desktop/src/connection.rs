@@ -340,6 +340,7 @@ mod tests {
                     items: vec![StreamItemView { id: b, ..echo }],
                 }],
                 model_auth: ModelAuthView::SignedOut,
+                providers: ProvidersView::default(),
             },
         });
         assert!(state.unacked.is_empty());

@@ -8,7 +8,7 @@ use gpui_kit::{
     SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 
-use super::widgets::{Tip as _, avatar, count_badge, icon};
+use super::widgets::{Tip as _, count_badge, icon};
 use crate::app::{AutomationSection, PotsApp, Screen};
 use crate::model::*;
 use crate::theme;
@@ -124,19 +124,22 @@ fn sidebar_frame() -> Div {
         .py(px(16.))
 }
 
-fn user_footer(subtitle: impl Into<SharedString>) -> Div {
+/// 左欄最下方：設定入口，旁邊是目前實例的連線狀態等小字。
+fn settings_footer(active: bool, subtitle: impl Into<SharedString>) -> Stateful<Div> {
     div()
+        .id("nav-settings")
         .mt_auto()
         .flex()
         .items_center()
         .gap(px(10.))
         .px(px(10.))
-        .pt(px(12.))
-        .pb(px(4.))
-        .border_t_1()
-        .border_color(theme::sidebar_active())
-        .child(avatar("你", theme::accent(), 28.))
-        .child(div().text_color(theme::white()).child("你"))
+        .py(px(8.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .when(active, |d| d.bg(theme::sidebar_active()))
+        .hover(|s| s.bg(theme::sidebar_hover()))
+        .child(icon(IconName::Settings, 18., theme::text_on_dark()))
+        .child(div().text_color(theme::white()).child("設定"))
         .child(dim(subtitle.into()))
 }
 
@@ -371,7 +374,17 @@ impl PotsApp {
                     this.open_automations(AutomationSection::Listeners, cx)
                 })),
             )
-            .child(user_footer(inst.host.clone()))
+            .child(
+                div()
+                    .mt_auto()
+                    .pt(px(8.))
+                    .border_t_1()
+                    .border_color(theme::sidebar_active())
+                    .child(
+                        settings_footer(self.screen == Screen::Settings, inst.host.clone())
+                            .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
+                    ),
+            )
     }
 
     /// 全域 Inbox 的左欄：依實例篩選。
@@ -429,6 +442,16 @@ impl PotsApp {
             .iter()
             .filter(|i| i.connection == ConnectionState::Connected)
             .count();
-        nav.child(user_footer(format!("{connected} 個實例已連線")))
+        nav.child(
+            div()
+                .mt_auto()
+                .pt(px(8.))
+                .border_t_1()
+                .border_color(theme::sidebar_active())
+                .child(
+                    settings_footer(false, format!("{connected} 個實例已連線"))
+                        .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
+                ),
+        )
     }
 }

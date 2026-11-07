@@ -49,6 +49,35 @@ pub enum Screen {
     Overseer,
     /// 目前實例的排程與 listener。
     Automations,
+    /// 目前實例的設定（模型 provider）。
+    Settings,
+}
+
+/// 設定頁正在新增或修改的 provider。
+pub struct ProviderEditor {
+    /// `None` 是新增。
+    pub id: Option<ProviderId>,
+    pub kind: ProviderKind,
+    pub name: Entity<InputState>,
+    pub base_url: Entity<InputState>,
+    /// 遮蔽輸入；修改時留空表示沿用已存的 key。
+    pub api_key: Entity<InputState>,
+    pub model: Entity<InputState>,
+    pub test: ProviderTest,
+    /// 已送出 `SaveProvider`、等服務回覆；成功（收到 `Providers`）就收起表單。
+    pub saving: bool,
+    /// 服務拒絕儲存的原因，顯示在表單裡，打過的內容不會不見。
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderTest {
+    Idle,
+    /// 等伺服器回 `ProviderTest`，帶請求編號。
+    Running(u64),
+    /// 連線成功，可用的模型。
+    Ok(Vec<ModelOption>),
+    Err(String),
 }
 
 /// 左欄「自動化」下的兩列都進自動化頁，分別捲到各自的區塊。
@@ -140,6 +169,8 @@ pub struct PotsApp {
     pub goal_note: Entity<InputState>,
     pub worker_note: Entity<InputState>,
     pub overseer_input: Entity<TextareaState>,
+    pub provider_editor: Option<ProviderEditor>,
+    next_test_request: u64,
     /// 左欄「新增專案」的輸入框；`None` 時顯示按鈕。
     pub new_project: Option<(Entity<InputState>, Subscription)>,
     pub stream_scroll: ScrollHandle,
@@ -235,6 +266,8 @@ impl PotsApp {
             worker_note,
             overseer_input,
             new_project: None,
+            provider_editor: None,
+            next_test_request: 0,
             stream_scroll: ScrollHandle::new(),
             overseer_scroll: ScrollHandle::new(),
             automations_scroll: ScrollHandle::new(),
@@ -305,6 +338,18 @@ impl PotsApp {
         let instance = live.instance;
         match event {
             ConnEvent::State(state) => {
+                // 斷線時等不到回覆了。
+                if state != ConnectionState::Connected
+                    && let Some(editor) = &mut self.provider_editor
+                {
+                    if matches!(editor.test, ProviderTest::Running(_)) {
+                        editor.test = ProviderTest::Idle;
+                    }
+                    if editor.saving {
+                        editor.saving = false;
+                        editor.error = Some("連線中斷，請再儲存一次".into());
+                    }
+                }
                 if let Some(i) = self.store.instance_mut(instance) {
                     i.connection = state;
                     i.host = match state {
@@ -332,7 +377,35 @@ impl PotsApp {
                     cx.open_url(&url);
                 }
                 if let Some(toast) = applied.toast {
-                    self.toast = Some(toast);
+                    // 儲存 provider 被拒絕：原因顯示在表單裡。
+                    match &mut self.provider_editor {
+                        Some(editor) if editor.saving => {
+                            editor.saving = false;
+                            editor.error = Some(toast);
+                        }
+                        _ => self.toast = Some(toast),
+                    }
+                }
+                if applied.providers_changed
+                    && let Some(editor) = &self.provider_editor
+                {
+                    let gone = editor.id.is_some_and(|id| {
+                        self.store
+                            .instance(live.instance)
+                            .is_none_or(|i| i.providers.get(id).is_none())
+                    });
+                    if editor.saving || gone {
+                        self.provider_editor = None;
+                    }
+                }
+                if let Some((request, result)) = applied.provider_test
+                    && let Some(editor) = &mut self.provider_editor
+                    && editor.test == ProviderTest::Running(request)
+                {
+                    editor.test = match result {
+                        Ok(models) => ProviderTest::Ok(models),
+                        Err(message) => ProviderTest::Err(message),
+                    };
                 }
                 let created = applied.project_added.filter(|p| {
                     let name = self
@@ -425,6 +498,196 @@ impl PotsApp {
         cx.notify();
     }
 
+    // ---- 設定 ---------------------------------------------------------------
+
+    pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Settings;
+        self.panel = None;
+        cx.notify();
+    }
+
+    /// 設定頁的動作在假資料模式下沒有服務可以存，只提示。回傳是否送出。
+    fn settings_command(
+        &mut self,
+        command: ClientCommand,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.live.is_none() {
+            self.notify_unimplemented(label, cx);
+            return false;
+        }
+        self.store.outbox.push((self.instance, command));
+        cx.notify();
+        true
+    }
+
+    /// 開啟 provider 編輯表單：`id` 為 `None` 時新增一個 `kind` 的 provider。
+    pub fn edit_provider(
+        &mut self,
+        id: Option<ProviderId>,
+        kind: ProviderKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = id.and_then(|id| self.current_instance().providers.get(id).cloned());
+        let (name, base_url, model) = match &existing {
+            Some(p) => (p.name.clone(), p.base_url.clone(), p.model.clone()),
+            None => (
+                match kind {
+                    ProviderKind::ChatGpt => "ChatGPT",
+                    ProviderKind::OpenAiCompatible => "OpenAI",
+                    ProviderKind::AnthropicCompatible => "Anthropic",
+                }
+                .to_string(),
+                kind.default_base_url().to_string(),
+                String::new(),
+            ),
+        };
+        let input = |value: String,
+                     placeholder: &str,
+                     masked: bool,
+                     window: &mut Window,
+                     cx: &mut Context<Self>| {
+            let placeholder = placeholder.to_string();
+            cx.new(|cx| {
+                let mut state = InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .masked(masked);
+                state.set_value(value, window, cx);
+                state
+            })
+        };
+        let key_placeholder = if existing.as_ref().is_some_and(|p| p.key_hint.is_some()) {
+            "留空沿用已存的 key"
+        } else if kind == ProviderKind::OpenAiCompatible {
+            "貼上 API key；本機服務（例如 Ollama）可以留空"
+        } else {
+            "貼上 API key"
+        };
+        let model_placeholder = match kind {
+            ProviderKind::ChatGpt => "留空自動選帳號清單的第一個",
+            _ => "例如 gpt-4.1、claude-sonnet-4-5；可先「測試連線」再從清單挑",
+        };
+        self.provider_editor = Some(ProviderEditor {
+            id,
+            kind,
+            name: input(name, "名稱", false, window, cx),
+            base_url: input(base_url, kind.default_base_url(), false, window, cx),
+            api_key: input(String::new(), key_placeholder, true, window, cx),
+            model: input(model, model_placeholder, false, window, cx),
+            test: ProviderTest::Idle,
+            saving: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    pub fn cancel_provider_edit(&mut self, cx: &mut Context<Self>) {
+        self.provider_editor = None;
+        cx.notify();
+    }
+
+    fn provider_draft(&self, cx: &App) -> Option<ProviderDraft> {
+        let e = self.provider_editor.as_ref()?;
+        let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
+        let key = value(&e.api_key);
+        Some(ProviderDraft {
+            id: e.id,
+            kind: e.kind,
+            name: value(&e.name),
+            base_url: value(&e.base_url),
+            model: value(&e.model),
+            api_key: (!key.is_empty()).then_some(key),
+        })
+    }
+
+    pub fn test_provider(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.provider_draft(cx) else {
+            return;
+        };
+        self.next_test_request += 1;
+        let request = self.next_test_request;
+        let sent = self.settings_command(
+            ClientCommand::TestProvider { request, draft },
+            "測試連線",
+            cx,
+        );
+        if let Some(editor) = &mut self.provider_editor {
+            editor.test = if sent {
+                ProviderTest::Running(request)
+            } else {
+                ProviderTest::Err("沒有連到服務，不能測試".into())
+            };
+        }
+    }
+
+    pub fn save_provider(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.provider_draft(cx) else {
+            return;
+        };
+        if draft.name.is_empty() {
+            self.set_editor_error("請填名稱", cx);
+            return;
+        }
+        // OpenAI 相容的本機服務（例如 Ollama）不需要 key。
+        if draft.id.is_none()
+            && draft.kind == ProviderKind::AnthropicCompatible
+            && draft.api_key.is_none()
+        {
+            self.set_editor_error("新增 Anthropic 相容 API 需要 API key", cx);
+            return;
+        }
+        // 表單留著等服務回覆：收到 `Providers` 才收起來，被拒絕時把原因顯示在表單裡。
+        let sent =
+            self.settings_command(ClientCommand::SaveProvider { draft }, "儲存 provider", cx);
+        if let Some(editor) = &mut self.provider_editor {
+            editor.saving = sent;
+            editor.error = None;
+        }
+    }
+
+    fn set_editor_error(&mut self, message: &str, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.provider_editor {
+            editor.error = Some(message.into());
+            editor.saving = false;
+        }
+        cx.notify();
+    }
+
+    /// 從「測試連線」的模型清單挑一個填進表單。
+    pub fn pick_model(&mut self, model: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.provider_editor {
+            editor
+                .model
+                .update(cx, |s, cx| s.set_value(model, window, cx));
+        }
+        cx.notify();
+    }
+
+    pub fn set_active_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        self.settings_command(ClientCommand::SetActiveProvider { id }, "切換 provider", cx);
+    }
+
+    pub fn delete_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
+        if self
+            .provider_editor
+            .as_ref()
+            .is_some_and(|e| e.id == Some(id))
+        {
+            self.provider_editor = None;
+        }
+        self.settings_command(ClientCommand::DeleteProvider { id }, "刪除 provider", cx);
+    }
+
+    pub fn chatgpt_login(&mut self, cx: &mut Context<Self>) {
+        self.settings_command(ClientCommand::StartModelLogin, "登入 ChatGPT", cx);
+    }
+
+    pub fn chatgpt_logout(&mut self, cx: &mut Context<Self>) {
+        self.settings_command(ClientCommand::ModelLogout, "登出 ChatGPT", cx);
+    }
+
     // ---- 查詢 ---------------------------------------------------------------
 
     pub fn current_instance(&self) -> &InstanceView {
@@ -436,13 +699,17 @@ impl PotsApp {
     pub fn current_project(&self) -> Option<&ProjectView> {
         match self.screen {
             Screen::Project(p) => self.store.project(self.instance, p),
-            Screen::Inbox(_) | Screen::Overseer | Screen::Automations => None,
+            Screen::Inbox(_) | Screen::Overseer | Screen::Automations | Screen::Settings => None,
         }
     }
 
     // ---- 導覽 ---------------------------------------------------------------
 
     pub fn select_instance(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
+        // provider 設定屬於實例：換實例時丟掉打到一半的表單（可能含 API key）。
+        if id != self.instance {
+            self.provider_editor = None;
+        }
         self.instance = id;
         // 在總管或自動化畫面切換實例時，留在新實例的同一個畫面。
         match self.screen {
@@ -453,6 +720,10 @@ impl PotsApp {
             Screen::Automations => {
                 self.automation_filter = None;
                 self.open_automations(self.automation_section, cx);
+                return;
+            }
+            Screen::Settings => {
+                self.open_settings(cx);
                 return;
             }
             _ => {}
@@ -715,6 +986,12 @@ impl PotsApp {
                 }
                 self.open_overseer(window, cx);
             }
+            InboxAction::OpenSettings => {
+                if let Some(item) = self.store.approval(id) {
+                    self.instance = item.instance;
+                }
+                self.open_settings(cx);
+            }
             InboxAction::ViewDiff | InboxAction::EditConditions => {
                 self.notify_unimplemented(action.label(), cx);
             }
@@ -827,6 +1104,7 @@ impl Render for PotsApp {
             Screen::Project(_) => self.render_channel(window, cx).into_any_element(),
             Screen::Overseer => self.render_overseer(cx).into_any_element(),
             Screen::Automations => self.render_automations_page(cx).into_any_element(),
+            Screen::Settings => self.render_settings(cx).into_any_element(),
         };
         // 總管畫面的右欄固定是專案概況與記憶；其他畫面是狀態面板。
         let panel = match self.screen {

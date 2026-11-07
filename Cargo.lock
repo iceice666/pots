@@ -5705,6 +5705,7 @@ dependencies = [
 name = "pots-desktop"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "dirs 6.0.0",
  "futures",
@@ -5720,6 +5721,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
+ "url",
 ]
 
 [[package]]
