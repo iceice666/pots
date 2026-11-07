@@ -2,6 +2,8 @@
 //!
 //! - [`provider`]：與模型無關的請求、串流事件與 [`ModelProvider`] trait。
 //! - [`responses`]：OpenAI Responses API 的 provider，給 ChatGPT Plan（SIWC）用。
+//! - [`openai_compat`]：OpenAI 相容的 Chat Completions provider（API key；OpenAI、OpenRouter、Ollama 等）。
+//! - [`anthropic`]：Anthropic Messages API provider（API key）。
 //! - [`siwc`]：Sign in with ChatGPT 的登入、憑證儲存與單一 refresh owner。
 //! - [`agent`]：所有 agent profile 共用的多輪工具迴圈。
 //! - `testing`（feature `test-util`）：給其他 crate 測試用的腳本化 provider 與工具。
@@ -10,6 +12,9 @@
 //! 用自有的 provider 介面與 loop 比較好控制。之後要換 provider 只需實作 [`ModelProvider`]。
 
 pub mod agent;
+pub mod anthropic;
+mod api_common;
+pub mod openai_compat;
 pub mod provider;
 pub mod responses;
 pub mod siwc;

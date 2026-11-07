@@ -122,6 +122,12 @@ pub enum LlmError {
     Interrupted(String),
     #[error("已取消")]
     Cancelled,
+    /// 還沒設定（或選擇）模型 provider。
+    #[error("還沒設定模型 provider")]
+    NotConfigured,
+    /// API key 無效、過期或沒有權限（API provider 的 401／403）。
+    #[error("API key 無效或沒有權限：{0}")]
+    InvalidCredentials(String),
     #[error("{0}")]
     Other(String),
 }

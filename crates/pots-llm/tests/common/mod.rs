@@ -1,6 +1,8 @@
 //! 整合測試共用的假 OIDC 與假 Responses server（axum，綁 127.0.0.1:0）。
 #![allow(dead_code)]
 
+pub mod api;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
