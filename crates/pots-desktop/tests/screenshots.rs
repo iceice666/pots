@@ -113,7 +113,7 @@ mod shots {
                 .and_then(|p| p.goals.first())
                 .and_then(|g| g.tasks.first())
                 .map(|t| t.id)
-                .unwrap_or(TaskId(0));
+                .unwrap_or(TaskId::from_u64(0));
             app.open_panel(Some(Panel::Task(task)), cx);
         });
         s.shot("02-task-thread");

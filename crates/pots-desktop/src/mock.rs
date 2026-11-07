@@ -16,7 +16,7 @@ impl Ids {
 
     fn item(&mut self, at: Timestamp, kind: StreamItemKind) -> StreamItemView {
         StreamItemView {
-            id: ItemId(self.next()),
+            id: ItemId::from_u64(self.next()),
             at,
             kind,
         }
@@ -218,19 +218,19 @@ const INFRA_NOTES: &str = "\
 
 pub fn store() -> Store {
     let mut ids = Ids(0);
-    let laptop = InstanceId(1);
-    let home = InstanceId(2);
+    let laptop = InstanceId::from_u64(1);
+    let home = InstanceId::from_u64(2);
 
     // ---- 家用伺服器 · auth-service ---------------------------------------
-    let auth = ProjectId(ids.next());
-    let oauth_goal = GoalId(ids.next());
-    let pr42 = ApprovalId(ids.next());
-    let spec = ArtifactId(ids.next());
-    let infra_report = ArtifactId(ids.next());
-    let infra_listener_approval = ApprovalId(ids.next());
+    let auth = ProjectId::from_u64(ids.next());
+    let oauth_goal = GoalId::from_u64(ids.next());
+    let pr42 = ApprovalId::from_u64(ids.next());
+    let spec = ArtifactId::from_u64(ids.next());
+    let infra_report = ArtifactId::from_u64(ids.next());
+    let infra_listener_approval = ApprovalId::from_u64(ids.next());
 
     let callback_task = TaskView {
-        id: TaskId(ids.next()),
+        id: TaskId::from_u64(ids.next()),
         goal: oauth_goal,
         title: "後端 OAuth callback".into(),
         assignee: "worker · Claude Code".into(),
@@ -270,7 +270,7 @@ pub fn store() -> Store {
         ],
     };
     let button_task = TaskView {
-        id: TaskId(ids.next()),
+        id: TaskId::from_u64(ids.next()),
         goal: oauth_goal,
         title: "前端登入按鈕".into(),
         assignee: "worker · rig".into(),
@@ -292,7 +292,7 @@ pub fn store() -> Store {
         thread: vec![],
     };
     let integration_task = TaskView {
-        id: TaskId(ids.next()),
+        id: TaskId::from_u64(ids.next()),
         goal: oauth_goal,
         title: "整合測試".into(),
         assignee: "worker · Claude Code".into(),
@@ -316,7 +316,7 @@ pub fn store() -> Store {
         thread: vec![],
     };
     let review_task = TaskView {
-        id: TaskId(ids.next()),
+        id: TaskId::from_u64(ids.next()),
         goal: oauth_goal,
         title: "Spec 審查".into(),
         assignee: "reviewer subagent".into(),
@@ -450,7 +450,7 @@ pub fn store() -> Store {
                 )
             },
             doc(
-                ArtifactId(ids.next()),
+                ArtifactId::from_u64(ids.next()),
                 ArtifactKind::Brief,
                 "OAuth 登入遷移",
                 "Goal 交接 · v1",
@@ -459,7 +459,7 @@ pub fn store() -> Store {
                 OAUTH_BRIEF,
             ),
             doc(
-                ArtifactId(ids.next()),
+                ArtifactId::from_u64(ids.next()),
                 ArtifactKind::Ledger,
                 "OAuth 登入遷移",
                 "Planner 維護 · 4 個任務",
@@ -468,7 +468,7 @@ pub fn store() -> Store {
                 OAUTH_LEDGER,
             ),
             doc(
-                ArtifactId(ids.next()),
+                ArtifactId::from_u64(ids.next()),
                 ArtifactKind::Report,
                 "Spec 審查",
                 "reviewer subagent · 沒有阻擋意見",
@@ -479,7 +479,7 @@ pub fn store() -> Store {
             ArtifactView {
                 proposals: 1,
                 ..doc(
-                    ArtifactId(ids.next()),
+                    ArtifactId::from_u64(ids.next()),
                     ArtifactKind::ProjectNotes,
                     "Project Notes",
                     "1 個待核准的提案",
@@ -492,9 +492,9 @@ pub fn store() -> Store {
     };
 
     // ---- 家用伺服器 · 其他 project ----------------------------------------
-    let web = ProjectId(ids.next());
-    let checkout_goal = GoalId(ids.next());
-    let flaky_task = TaskId(ids.next());
+    let web = ProjectId::from_u64(ids.next());
+    let checkout_goal = GoalId::from_u64(ids.next());
+    let flaky_task = TaskId::from_u64(ids.next());
     let web_app = ProjectView {
         id: web,
         name: "web-app".into(),
@@ -528,7 +528,7 @@ pub fn store() -> Store {
             planner_note: "Planner · 2 個任務".into(),
             budget_used_pct: 71,
             tasks: vec![TaskView {
-                id: TaskId(flaky_task.0),
+                id: flaky_task,
                 goal: checkout_goal,
                 title: "修正 e2e/checkout.spec.ts".into(),
                 assignee: "worker · Claude Code".into(),
@@ -560,7 +560,7 @@ pub fn store() -> Store {
         }],
         artifacts: vec![
             doc(
-                ArtifactId(ids.next()),
+                ArtifactId::from_u64(ids.next()),
                 ArtifactKind::Spec,
                 "結帳頁改版",
                 "v2",
@@ -570,7 +570,7 @@ pub fn store() -> Store {
                  ## 範圍\n\n- 新版地址表單\n- 付款步驟改成獨立頁面\n",
             ),
             doc(
-                ArtifactId(ids.next()),
+                ArtifactId::from_u64(ids.next()),
                 ArtifactKind::Brief,
                 "結帳頁改版",
                 "Goal 交接 · v1",
@@ -579,7 +579,7 @@ pub fn store() -> Store {
                 "# 結帳頁改版\n\n## 完成條件\n\n- e2e 測試全部通過\n- 合併到 main\n",
             ),
             doc(
-                ArtifactId(ids.next()),
+                ArtifactId::from_u64(ids.next()),
                 ArtifactKind::Ledger,
                 "結帳頁改版",
                 "Planner 維護 · CI 卡住",
@@ -592,7 +592,7 @@ pub fn store() -> Store {
     };
 
     let infra = ProjectView {
-        id: ProjectId(ids.next()),
+        id: ProjectId::from_u64(ids.next()),
         name: "infra".into(),
         agent_name: "infra agent".into(),
         agent_state: AgentState::Idle,
@@ -624,7 +624,7 @@ pub fn store() -> Store {
                 INFRA_500_REPORT,
             ),
             doc(
-                ArtifactId(ids.next()),
+                ArtifactId::from_u64(ids.next()),
                 ArtifactKind::ProjectNotes,
                 "Project Notes",
                 "v2",
@@ -637,7 +637,7 @@ pub fn store() -> Store {
     let infra_id = infra.id;
 
     let docs = ProjectView {
-        id: ProjectId(ids.next()),
+        id: ProjectId::from_u64(ids.next()),
         name: "docs-site".into(),
         agent_name: "docs-site agent".into(),
         agent_state: AgentState::Idle,
@@ -649,7 +649,7 @@ pub fn store() -> Store {
         items: vec![],
         goals: vec![],
         artifacts: vec![doc(
-            ArtifactId(ids.next()),
+            ArtifactId::from_u64(ids.next()),
             ArtifactKind::ProjectNotes,
             "Project Notes",
             "v1",
@@ -771,9 +771,9 @@ pub fn store() -> Store {
     };
 
     // ---- 我的筆電 ----------------------------------------------------------
-    let dotfiles_id = ProjectId(ids.next());
-    let pr9 = ApprovalId(ids.next());
-    let shell_goal = GoalId(ids.next());
+    let dotfiles_id = ProjectId::from_u64(ids.next());
+    let pr9 = ApprovalId::from_u64(ids.next());
+    let shell_goal = GoalId::from_u64(ids.next());
     let mut dotfiles_reply = agent(
         "dotfiles agent",
         AgentRole::Project,
@@ -804,7 +804,7 @@ pub fn store() -> Store {
             planner_note: "Planner · 1 個任務".into(),
             budget_used_pct: 12,
             tasks: vec![TaskView {
-                id: TaskId(ids.next()),
+                id: TaskId::from_u64(ids.next()),
                 goal: shell_goal,
                 title: "合併 alias 與 PATH".into(),
                 assignee: "worker · Claude Code".into(),
@@ -825,7 +825,7 @@ pub fn store() -> Store {
             brief: "合併重複的 alias，移除過期的 PATH 設定。".into(),
         }],
         artifacts: vec![doc(
-            ArtifactId(ids.next()),
+            ArtifactId::from_u64(ids.next()),
             ArtifactKind::Brief,
             "整理 shell 設定",
             "Goal 交接 · v1",
@@ -834,7 +834,7 @@ pub fn store() -> Store {
             "# 整理 shell 設定\n\n## 目標\n\n合併重複的 alias，移除過期的 PATH 設定。\n",
         )],
     };
-    let side_id = ProjectId(ids.next());
+    let side_id = ProjectId::from_u64(ids.next());
     let side = ProjectView {
         id: side_id,
         name: "side-project".into(),
@@ -863,7 +863,7 @@ pub fn store() -> Store {
     // ---- 家用伺服器 · 自動化 -------------------------------------------------
     let home_schedules = vec![
         ScheduleView {
-            id: ScheduleId(ids.next()),
+            id: ScheduleId::from_u64(ids.next()),
             project: Some(infra_id),
             prompt: "整理前一天失敗的 CI".into(),
             note: "30 天後過期".into(),
@@ -882,7 +882,7 @@ pub fn store() -> Store {
             ],
         },
         ScheduleView {
-            id: ScheduleId(ids.next()),
+            id: ScheduleId::from_u64(ids.next()),
             project: Some(auth_id),
             prompt: "提醒移除 legacy_login feature flag".into(),
             note: "單次".into(),
@@ -894,7 +894,7 @@ pub fn store() -> Store {
             history: vec![],
         },
         ScheduleView {
-            id: ScheduleId(ids.next()),
+            id: ScheduleId::from_u64(ids.next()),
             project: Some(docs_id),
             prompt: "檢查文件站建置與壞掉的連結".into(),
             note: "30 天後過期".into(),
@@ -912,7 +912,7 @@ pub fn store() -> Store {
     ];
     let home_listeners = vec![
         ListenerView {
-            id: ListenerId(ids.next()),
+            id: ListenerId::from_u64(ids.next()),
             project: Some(auth_id),
             condition: "issue 加上 agent label".into(),
             action: "開 Goal".into(),
@@ -945,7 +945,7 @@ pub fn store() -> Store {
             ],
         },
         ListenerView {
-            id: ListenerId(ids.next()),
+            id: ListenerId::from_u64(ids.next()),
             project: None,
             condition: "上游 LLM 狀態頁出現重大事故".into(),
             action: "通知對話".into(),
@@ -970,7 +970,7 @@ pub fn store() -> Store {
             )],
         },
         ListenerView {
-            id: ListenerId(ids.next()),
+            id: ListenerId::from_u64(ids.next()),
             project: Some(infra_id),
             condition: "main 分支 CI 失敗".into(),
             action: "開 Goal 修復".into(),
@@ -1111,7 +1111,7 @@ pub fn store() -> Store {
             decision: Decision::Pending,
         },
         InboxItem {
-            id: ApprovalId(ids.next()),
+            id: ApprovalId::from_u64(ids.next()),
             instance: home,
             project: Some(web),
             context: "結帳頁改版".into(),
@@ -1130,7 +1130,7 @@ pub fn store() -> Store {
             decision: Decision::Pending,
         },
         InboxItem {
-            id: ApprovalId(ids.next()),
+            id: ApprovalId::from_u64(ids.next()),
             instance: laptop,
             project: Some(side_id),
             context: "匯出功能".into(),
@@ -1145,7 +1145,7 @@ pub fn store() -> Store {
             decision: Decision::Pending,
         },
         InboxItem {
-            id: ApprovalId(ids.next()),
+            id: ApprovalId::from_u64(ids.next()),
             instance: home,
             project: None,
             context: String::new(),
@@ -1165,7 +1165,6 @@ pub fn store() -> Store {
         now: at(11, 7),
         instances,
         inbox,
-        next_id: ids.0,
         outbox: vec![],
     }
 }
@@ -1207,7 +1206,7 @@ mod tests {
     fn approving_updates_counts_and_outbox() {
         let mut store = store();
         assert_eq!(store.pending(None), 6);
-        let home = InstanceId(2);
+        let home = InstanceId::from_u64(2);
         let first = store.inbox[0].id;
         assert!(store.act(first, InboxAction::Approve));
         assert!(
@@ -1247,7 +1246,7 @@ mod tests {
 
     #[test]
     fn listener_follows_its_approval() {
-        let home = InstanceId(2);
+        let home = InstanceId::from_u64(2);
         let pending = |store: &Store| {
             store
                 .instance(home)
@@ -1278,7 +1277,7 @@ mod tests {
     #[test]
     fn queued_while_busy() {
         let mut store = store();
-        let home = InstanceId(2);
+        let home = InstanceId::from_u64(2);
         let auth = store.instances[1].projects[0].id;
         store.send_to_project(home, auth, "加上 GitHub 登入".into(), SendMode::Queue);
         let p = store.project(home, auth).unwrap();

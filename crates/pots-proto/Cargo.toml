@@ -1,0 +1,13 @@
+[package]
+name = "pots-proto"
+version = "0.1.0"
+description = "Pots 客戶端與服務共用的 view model 與即時協定"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

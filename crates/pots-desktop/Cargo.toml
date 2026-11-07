@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true
+pots-proto.workspace = true
 gpui-kit-markdown-editor.workspace = true
 serde.workspace = true
 

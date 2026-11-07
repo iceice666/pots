@@ -5492,8 +5492,18 @@ dependencies = [
  "gpui-kit",
  "gpui-kit-markdown-editor",
  "image",
+ "pots-proto",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "pots-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
