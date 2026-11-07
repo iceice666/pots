@@ -15,6 +15,16 @@ const MAX_PROJECT_NAME: usize = 100;
 
 pub(crate) async fn handle(app: &App, text: &str, reply: &mpsc::Sender<ServerEvent>) {
     let result = match serde_json::from_str::<ClientCommand>(text) {
+        Ok(ClientCommand::TestProvider { request, draft }) => {
+            // 要連網（最多十幾秒），另開 task，不擋住這條連線之後的指令。
+            let providers = app.providers.clone();
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let ev = crate::providers::test(&providers, request, draft).await;
+                let _ = reply.send(ev).await;
+            });
+            return;
+        }
         Ok(cmd) => run(app, cmd).await,
         Err(_) => Err("無法解析指令".to_string()),
     };
@@ -66,6 +76,10 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             .logout()
             .await
             .map_err(|e| format!("無法登出：{e}")),
+        ClientCommand::SaveProvider { draft } => crate::providers::save(app, draft).await,
+        ClientCommand::DeleteProvider { id } => crate::providers::delete(app, id).await,
+        ClientCommand::SetActiveProvider { id } => crate::providers::set_active(app, id).await,
+        ClientCommand::TestProvider { .. } => unreachable!("在 handle 處理"),
     }
 }
 

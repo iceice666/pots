@@ -4,8 +4,10 @@
 //! [`start`] 取得 [`ServerHandle`]）；多設備版是獨立的 `pots-server` binary。兩者走同一條
 //! 程式路徑，差別只在 [`Config`]（`proposal/deployment.md`）。
 //!
-//! 模型與授權由組裝端注入（[`Deps`]）：`ModelProvider` 負責推論，[`ModelAuthControl`]
-//! 負責登入狀態。伺服器不知道背後是不是 SIWC。
+//! 模型與授權由組裝端注入（[`Deps`]）：`ModelProvider` 負責內建 ChatGPT 方案的推論，
+//! [`ModelAuthControl`] 負責登入狀態，[`ApiProviderFactory`] 建立使用者在設定新增的
+//! API provider。伺服器不知道背後是不是 SIWC。使用中的 provider 由伺服器保存與路由
+//! （見 `providers` 模組）。
 
 mod commands;
 pub mod config;
@@ -13,6 +15,7 @@ mod datadir;
 mod gateway;
 mod hub;
 pub mod model_auth;
+mod providers;
 mod runs;
 pub mod service;
 mod store;
@@ -33,9 +36,11 @@ use tokio_util::sync::CancellationToken;
 pub use config::{AuthConfig, Config, ListenConfig, StoreConfig};
 pub use datadir::{ConnectionInfo, LocalToken, read_connection_info};
 pub use model_auth::{FakeModelAuth, ModelAuthControl};
+pub use providers::{ApiProviderFactory, NoApiProviders};
 pub use runs::{AgentProfile, CHAT_PROFILE};
 
 use crate::hub::{Hub, InstanceInfo};
+use crate::providers::{ProviderRegistry, ProviderRouter};
 use crate::runs::Runs;
 use crate::store::{ItemStatus, Store};
 
@@ -67,10 +72,35 @@ pub enum Error {
 /// 由組裝端注入的模型與授權。
 #[derive(Clone)]
 pub struct Deps {
+    /// 內建 ChatGPT 方案的推論。
     pub provider: Arc<dyn ModelProvider>,
-    /// chat profile 用的模型 ID。
+    /// ChatGPT 方案沒有在設定指定模型時用的模型 ID（正式版是
+    /// [`service::AUTO_MODEL`]，由 provider 自己決定）。
     pub model: String,
     pub model_auth: Arc<dyn ModelAuthControl>,
+    /// 建立使用者新增的 API provider（OpenAI／Anthropic 相容）。
+    pub api_providers: Arc<dyn ApiProviderFactory>,
+}
+
+impl Deps {
+    /// 只有 ChatGPT 方案、不支援 API provider（[`NoApiProviders`]）的組合。
+    pub fn new(
+        provider: Arc<dyn ModelProvider>,
+        model: impl Into<String>,
+        model_auth: Arc<dyn ModelAuthControl>,
+    ) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+            model_auth,
+            api_providers: Arc::new(NoApiProviders),
+        }
+    }
+
+    pub fn with_api_providers(mut self, factory: Arc<dyn ApiProviderFactory>) -> Self {
+        self.api_providers = factory;
+        self
+    }
 }
 
 /// 各個 handler 共用的狀態。
@@ -78,6 +108,7 @@ pub(crate) struct App {
     pub hub: Arc<Hub>,
     pub store: Store,
     pub runs: Runs,
+    pub providers: Arc<ProviderRegistry>,
     pub model_auth: Arc<dyn ModelAuthControl>,
     pub shutdown: CancellationToken,
     pub agent_name: String,
@@ -183,6 +214,19 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
 
     let auth_rx = deps.model_auth.status();
     let initial_auth = auth_rx.borrow().clone();
+    // 還沒選過 provider：用設定的預設值；沒有預設但 ChatGPT 已登入（升級前的使用者）就選 ChatGPT。
+    let fallback = config.default_provider.or_else(|| {
+        matches!(initial_auth, pots_proto::ModelAuthView::SignedIn { .. })
+            .then_some(pots_proto::ProviderId::CHATGPT)
+    });
+    let loaded = ProviderRegistry::load(
+        &store,
+        &config.data_dir,
+        deps.api_providers.clone(),
+        fallback,
+    )
+    .await?;
+    let registry = Arc::new(loaded.registry);
     let hub = Arc::new(
         Hub::new(
             store.clone(),
@@ -192,18 +236,31 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
                 kind: config.kind,
             },
             initial_auth.clone(),
+            registry.view(),
         )
         .await?,
     );
     recover(&hub).await?;
     // 授權狀態可能在服務沒跑的時候變了；每次啟動都記一筆，讓重連的客戶端拿到最新狀態。
     hub.set_model_auth(initial_auth, true).await?;
+    // provider 設定也記一筆（第一次啟動時順便寫入初始的選擇）。
+    {
+        let mut txn = hub.begin().await?;
+        if let Some(id) = loaded.initial_active {
+            store::Store::set_setting(txn.conn(), providers::SETTING_ACTIVE, &id.to_string())
+                .await?;
+        }
+        let providers = registry.view();
+        txn.push(|seq| ServerEvent::Providers { seq, providers })
+            .await?;
+        txn.commit().await?;
+    }
 
+    let router = ProviderRouter::new(registry.clone(), deps.provider, deps.model);
     let runs = Runs::new(
         hub.clone(),
         store.clone(),
-        deps.provider,
-        deps.model,
+        Arc::new(router),
         deps.model_auth.status(),
     );
     let shutdown = CancellationToken::new();
@@ -211,6 +268,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         hub: hub.clone(),
         store: store.clone(),
         runs: runs.clone(),
+        providers: registry,
         model_auth: deps.model_auth,
         shutdown: shutdown.clone(),
         agent_name: config.agent_name.clone(),
@@ -428,11 +486,7 @@ mod tests {
         let provider = pots_llm::testing::ScriptedProvider::new([]);
         let handle = start(
             config.clone(),
-            Deps {
-                provider: provider.clone(),
-                model: "m".into(),
-                model_auth: Arc::new(FakeModelAuth::signed_out()),
-            },
+            Deps::new(provider.clone(), "m", Arc::new(FakeModelAuth::signed_out())),
         )
         .await
         .unwrap();

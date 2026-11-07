@@ -6,7 +6,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use pots_proto::InstanceKind;
+use pots_proto::{InstanceKind, ProviderId};
 
 use crate::Error;
 
@@ -27,6 +27,10 @@ pub struct Config {
     pub agent_name: String,
     /// 實例名稱；`None` 時用主機名稱，取不到就是「本機」。只在第一次初始化時寫入。
     pub instance_name: Option<String>,
+    /// 資料庫還沒記錄過使用中的 provider 時（第一次啟動）要選的 provider。
+    /// 桌面版是 `None`：使用者到設定自己選；但 ChatGPT 在啟動時已登入的話會選 ChatGPT，
+    /// 讓升級前就登入的使用者照常可用。之後一律以資料庫為準。
+    pub default_provider: Option<ProviderId>,
 }
 
 #[derive(Clone, Debug)]
@@ -79,7 +83,13 @@ impl Config {
             event_retention: DEFAULT_EVENT_RETENTION,
             agent_name: "Pots".into(),
             instance_name: None,
+            default_provider: None,
         }
+    }
+
+    pub fn with_default_provider(mut self, id: ProviderId) -> Self {
+        self.default_provider = Some(id);
+        self
     }
 
     pub fn with_port(mut self, port: u16) -> Self {

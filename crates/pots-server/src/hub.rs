@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use pots_proto::{
-    AgentState, InstanceSnapshot, ItemId, ModelAuthView, ProjectId, ProjectSnapshot, ServerEvent,
-    StreamItemKind, StreamScope, Timestamp,
+    AgentState, InstanceSnapshot, ItemId, ModelAuthView, ProjectId, ProjectSnapshot, ProvidersView,
+    ServerEvent, StreamItemKind, StreamScope, Timestamp,
 };
 use sqlx::sqlite::SqliteConnection;
 use tokio::sync::{MutexGuard, broadcast};
@@ -49,6 +49,8 @@ pub enum Envelope {
 pub struct HubState {
     head: u64,
     pub model_auth: ModelAuthView,
+    /// 最後一筆 `Providers` 事件的內容，快照用。
+    pub providers: ProvidersView,
     agent_states: HashMap<ProjectId, AgentState>,
 }
 
@@ -95,6 +97,7 @@ impl Hub {
         store: Store,
         instance: InstanceInfo,
         model_auth: ModelAuthView,
+        providers: ProvidersView,
     ) -> Result<Self, Error> {
         let head = store.event_bounds().await?.map_or(0, |(_, hi)| hi);
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -105,6 +108,7 @@ impl Hub {
             state: tokio::sync::Mutex::new(HubState {
                 head,
                 model_auth,
+                providers,
                 agent_states: HashMap::new(),
             }),
             streaming: Mutex::new(HashMap::new()),
@@ -207,6 +211,7 @@ impl Hub {
             kind: self.instance.kind,
             projects,
             model_auth: state.model_auth.clone(),
+            providers: state.providers.clone(),
         })
     }
 
@@ -287,6 +292,9 @@ impl LogTxn<'_> {
                 }
                 ServerEvent::ModelAuth { state, .. } => {
                     self.state.model_auth = state.clone();
+                }
+                ServerEvent::Providers { providers, .. } => {
+                    self.state.providers = providers.clone();
                 }
                 ServerEvent::Item { scope, item, .. } => {
                     if let StreamItemKind::Agent(msg) = &item.kind

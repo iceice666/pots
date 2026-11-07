@@ -103,11 +103,11 @@ async fn access_checks() {
 async fn second_start_on_same_dir_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let srv = TestServer::start(tmp.path(), []).await;
-    let deps = pots_server::Deps {
-        provider: pots_llm::testing::ScriptedProvider::new([]),
-        model: "m".into(),
-        model_auth: Arc::new(FakeModelAuth::signed_out()),
-    };
+    let deps = pots_server::Deps::new(
+        pots_llm::testing::ScriptedProvider::new([]),
+        "m",
+        Arc::new(FakeModelAuth::signed_out()),
+    );
     match pots_server::start(pots_server::Config::desktop(tmp.path()), deps.clone()).await {
         Err(Error::AlreadyRunning(Some(info))) => {
             assert_eq!(info.addr, srv.addr());

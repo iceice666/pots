@@ -1,30 +1,34 @@
-//! 正式組裝：ChatGPT Plan（SIWC 授權）加 Responses provider。
+//! 正式組裝：ChatGPT Plan（SIWC 授權）加 Responses provider，以及使用者在設定新增的
+//! API provider（[`HttpApiProviders`]：OpenAI／Anthropic 相容）。
 //!
 //! `pots-server` bin 與桌面 app 的 `--serve` 都從這裡啟動，測試則直接呼叫 [`start`]
 //! 注入假的 provider。資料目錄裡和授權有關的檔案：
 //!
 //! - `host-id`：這個 runtime 安裝實例的 SIWC host ID，跟憑證分開保存，登出也不刪。
 //! - `auth/chatgpt-credentials.json`：issued client ID 與 token（`0600`）。
+//! - `auth/providers/<id>.json`：API provider 的 key（`0600`，由伺服器管理）。
 //!
-//! 模型：環境變數 `POTS_CHAT_MODEL` 指定 slug；沒指定時登入後取帳號可用模型清單的
-//! 第一個（伺服器排序），快取到授權狀態改變為止。
+//! ChatGPT 的模型：設定裡指定的優先；其次是環境變數 `POTS_CHAT_MODEL`；都沒有時登入後取
+//! 帳號可用模型清單的第一個（伺服器排序），快取到授權狀態改變為止。
 //!
 //! [`start`]: crate::start
 
 use std::path::Path;
 use std::sync::Arc;
 
+use pots_llm::anthropic::AnthropicProvider;
+use pots_llm::openai_compat::OpenAiCompatProvider;
 use pots_llm::responses::{DEFAULT_BASE_URL, ResponsesProvider};
 use pots_llm::siwc::{
     AuthStatus, FileCredentialStore, SiwcAuth, SiwcConfig, load_or_create_host_id,
 };
 use pots_llm::{EventStream, LlmError, ModelProvider, ModelRequest};
-use pots_proto::ModelAuthView;
+use pots_proto::{ModelAuthView, ModelOption, ProviderKind};
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{Config, Deps, Error, ModelAuthControl};
+use crate::{ApiProviderFactory, Config, Deps, Error, ModelAuthControl};
 
 /// [`Deps::model`] 用這個值時，由 [`AutoModel`] 在第一次推論前決定實際的模型。
 pub const AUTO_MODEL: &str = "auto";
@@ -42,13 +46,14 @@ pub async fn chatgpt_deps(data_dir: &Path, model: Option<String>) -> Result<Deps
         .await
         .map_err(|e| Error::Config(format!("無法載入 ChatGPT 授權：{e}")))?;
     let base = Url::parse(DEFAULT_BASE_URL).map_err(|e| Error::Config(e.to_string()))?;
-    let provider = ResponsesProvider::new(base, auth.clone(), http);
+    let provider = ResponsesProvider::new(base, auth.clone(), http.clone());
     let control = SiwcControl::new(auth);
-    let auto = AutoModel::new(provider, model.is_none(), control.status());
+    let auto = Arc::new(AutoModel::new(provider, model.is_none(), control.status()));
     Ok(Deps {
-        provider: Arc::new(auto),
+        provider: auto.clone(),
         model: model.unwrap_or_else(|| AUTO_MODEL.into()),
         model_auth: Arc::new(control),
+        api_providers: Arc::new(HttpApiProviders::new(http, Some(auto))),
     })
 }
 
@@ -202,6 +207,13 @@ impl AutoModel {
     }
 }
 
+impl AutoModel {
+    /// 帳號可用的模型（需要已登入）。
+    pub async fn list_models(&self) -> Result<Vec<pots_llm::responses::ModelInfo>, LlmError> {
+        self.inner.list_models().await
+    }
+}
+
 #[async_trait::async_trait]
 impl ModelProvider for AutoModel {
     fn name(&self) -> &str {
@@ -217,6 +229,82 @@ impl ModelProvider for AutoModel {
             request.model = self.resolve().await?;
         }
         self.inner.stream(request, cancel).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// 正式的 [`ApiProviderFactory`]：pots-llm 的 OpenAI／Anthropic 相容 provider，共用一個
+/// HTTP client。ChatGPT 的模型清單經由 [`AutoModel`]。
+pub struct HttpApiProviders {
+    http: pots_llm::reqwest::Client,
+    chatgpt: Option<Arc<AutoModel>>,
+}
+
+impl HttpApiProviders {
+    pub fn new(http: pots_llm::reqwest::Client, chatgpt: Option<Arc<AutoModel>>) -> Self {
+        Self { http, chatgpt }
+    }
+}
+
+fn model_options(models: Vec<pots_llm::responses::ModelInfo>) -> Vec<ModelOption> {
+    models
+        .into_iter()
+        .map(|m| ModelOption {
+            id: m.slug,
+            display_name: m.display_name,
+        })
+        .collect()
+}
+
+#[async_trait::async_trait]
+impl ApiProviderFactory for HttpApiProviders {
+    fn build(
+        &self,
+        kind: ProviderKind,
+        base_url: &Url,
+        api_key: &str,
+    ) -> Result<Arc<dyn ModelProvider>, String> {
+        let (base, key, http) = (base_url.clone(), api_key.to_string(), self.http.clone());
+        match kind {
+            ProviderKind::OpenAiCompatible => {
+                Ok(Arc::new(OpenAiCompatProvider::new(base, key, http)))
+            }
+            ProviderKind::AnthropicCompatible => {
+                Ok(Arc::new(AnthropicProvider::new(base, key, http)))
+            }
+            ProviderKind::ChatGpt => Err("ChatGPT 方案不是 API provider".into()),
+        }
+    }
+
+    async fn list_models(
+        &self,
+        kind: ProviderKind,
+        base_url: &Url,
+        api_key: &str,
+    ) -> Result<Vec<ModelOption>, LlmError> {
+        let (base, key, http) = (base_url.clone(), api_key.to_string(), self.http.clone());
+        let models = match kind {
+            ProviderKind::OpenAiCompatible => {
+                OpenAiCompatProvider::new(base, key, http)
+                    .list_models()
+                    .await?
+            }
+            ProviderKind::AnthropicCompatible => {
+                AnthropicProvider::new(base, key, http)
+                    .list_models()
+                    .await?
+            }
+            ProviderKind::ChatGpt => return self.chatgpt_models().await,
+        };
+        Ok(model_options(models))
+    }
+
+    async fn chatgpt_models(&self) -> Result<Vec<ModelOption>, LlmError> {
+        match &self.chatgpt {
+            Some(auto) => Ok(model_options(auto.list_models().await?)),
+            None => Err(LlmError::Unsupported("這個組裝沒有 ChatGPT 方案".into())),
+        }
     }
 }
 

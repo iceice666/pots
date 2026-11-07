@@ -50,6 +50,7 @@ macro_rules! id_type {
 
 id_type!(
     InstanceId, ProjectId, ItemId, GoalId, TaskId, ApprovalId, ArtifactId, ScheduleId, ListenerId,
+    ProviderId,
 );
 
 /// `$2`、`$1.40` 這類金額顯示。
@@ -132,6 +133,10 @@ pub struct InstanceView {
     pub listeners: Vec<ListenerView>,
     /// 批次暫停（`pause_automations`）；`None` 表示正常運作。
     pub automation_pause: Option<AutomationPause>,
+    /// 模型 provider 設定與使用中的 provider。
+    pub providers: ProvidersView,
+    /// 內建 ChatGPT provider 的登入狀態。
+    pub model_auth: ModelAuthView,
 }
 
 impl InstanceView {
@@ -781,6 +786,7 @@ pub enum InboxAction {
     StartLogin,
     OpenThread,
     OpenOverseer,
+    OpenSettings,
 }
 
 impl InboxAction {
@@ -795,6 +801,7 @@ impl InboxAction {
             Self::StartLogin => "開始登入",
             Self::OpenThread => "在頻道中查看",
             Self::OpenOverseer => "開啟總管",
+            Self::OpenSettings => "開啟設定",
         }
     }
 }
@@ -887,6 +894,110 @@ pub struct InstanceSnapshot {
     pub kind: InstanceKind,
     pub projects: Vec<ProjectSnapshot>,
     pub model_auth: ModelAuthView,
+    pub providers: ProvidersView,
+}
+
+// ---------------------------------------------------------------------------
+// 模型 provider 設定
+
+/// 模型 provider 的種類。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProviderKind {
+    /// ChatGPT 方案（SIWC 授權），內建一筆，ID 固定為 [`ProviderId::CHATGPT`]。
+    ChatGpt,
+    /// OpenAI 相容的 Chat Completions API（`POST {base_url}/chat/completions`）。
+    OpenAiCompatible,
+    /// Anthropic 相容的 Messages API（`POST {base_url}/v1/messages`）。
+    AnthropicCompatible,
+}
+
+impl ProviderKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ChatGpt => "ChatGPT 方案",
+            Self::OpenAiCompatible => "OpenAI 相容 API",
+            Self::AnthropicCompatible => "Anthropic 相容 API",
+        }
+    }
+
+    /// 新增時預填的 base URL。
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            Self::ChatGpt => "",
+            Self::OpenAiCompatible => "https://api.openai.com/v1",
+            Self::AnthropicCompatible => "https://api.anthropic.com",
+        }
+    }
+}
+
+impl ProviderId {
+    /// 內建的 ChatGPT 方案 provider。
+    pub const CHATGPT: Self = Self::from_u64(1);
+}
+
+/// 一個 provider 的設定。不含 API key。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderView {
+    pub id: ProviderId,
+    pub kind: ProviderKind,
+    pub name: String,
+    /// ChatGPT 是空字串。
+    pub base_url: String,
+    /// 對話 agent 用的模型 ID；ChatGPT 為空字串時自動選帳號清單的第一個。
+    pub model: String,
+    /// API key 的末四碼，例如 `…a1b2`；沒有 key 是 `None`。
+    pub key_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvidersView {
+    /// 目前對話用的 provider；`None` 表示還沒設定。
+    pub active: Option<ProviderId>,
+    /// 內建的 ChatGPT 一定在第一筆。
+    pub items: Vec<ProviderView>,
+}
+
+impl ProvidersView {
+    pub fn get(&self, id: ProviderId) -> Option<&ProviderView> {
+        self.items.iter().find(|p| p.id == id)
+    }
+
+    pub fn active(&self) -> Option<&ProviderView> {
+        self.active.and_then(|id| self.get(id))
+    }
+}
+
+/// 新增或修改 provider 時客戶端送出的內容。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDraft {
+    /// `None` 是新增。
+    pub id: Option<ProviderId>,
+    pub kind: ProviderKind,
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    /// `None` 表示沿用已存的 key；新增時必填（ChatGPT 除外）。
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderDraft")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| ".."))
+            .finish()
+    }
+}
+
+/// provider 可用的模型。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOption {
+    pub id: String,
+    pub display_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -992,6 +1103,17 @@ pub enum ServerEvent {
         seq: u64,
         state: ModelAuthView,
     },
+    /// provider 設定或使用中的 provider 有變，整份替換。
+    Providers {
+        seq: u64,
+        providers: ProvidersView,
+    },
+    /// 回給送出 `TestProvider` 的那條連線：成功時是可用的模型清單。不寫入事件日誌。
+    ProviderTest {
+        /// 對應 `TestProvider::request`。
+        request: u64,
+        result: Result<Vec<ModelOption>, String>,
+    },
     /// 回給按下「開始登入」的那條連線：要開啟的登入網址。不寫入事件日誌（網址可能
     /// 帶 `id_token_hint`），也不廣播給其他連線。
     LoginUrl {
@@ -1014,10 +1136,12 @@ impl ServerEvent {
             | Self::AgentState { seq, .. }
             | Self::TaskChanged { seq, .. }
             | Self::Inbox { seq, .. }
-            | Self::ModelAuth { seq, .. } => Some(*seq),
+            | Self::ModelAuth { seq, .. }
+            | Self::Providers { seq, .. } => Some(*seq),
             Self::Delta { .. }
             | Self::StreamingText { .. }
             | Self::LoginUrl { .. }
+            | Self::ProviderTest { .. }
             | Self::Error { .. } => None,
         }
     }
@@ -1056,6 +1180,23 @@ pub enum ClientCommand {
     StartModelLogin,
     CancelModelLogin,
     ModelLogout,
+    /// 新增或修改 provider；伺服器回 `Providers`。
+    SaveProvider {
+        draft: ProviderDraft,
+    },
+    /// 刪除 provider（內建的 ChatGPT 不能刪）。刪掉使用中的那個時，`active` 變成 `None`。
+    DeleteProvider {
+        id: ProviderId,
+    },
+    SetActiveProvider {
+        id: ProviderId,
+    },
+    /// 用這份設定列出模型，驗證 base URL 與 key；不儲存。`draft.api_key` 為 `None` 且
+    /// `draft.id` 有值時用已存的 key。伺服器回 `ProviderTest`。
+    TestProvider {
+        request: u64,
+        draft: ProviderDraft,
+    },
 }
 
 #[cfg(test)]

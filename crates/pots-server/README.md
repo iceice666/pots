@@ -8,17 +8,27 @@ Pots 服務：桌面版內嵌與多設備版共用的 gateway、儲存與 agent 
 cargo run -p pots-server -- [--data-dir <路徑>] [--port <port>]
 ```
 
-桌面 app 用 `pots-desktop --serve` 跑同一個服務（`service::run_blocking`）。模型用 ChatGPT 方案（SIWC 授權），`POTS_CHAT_MODEL` 可以指定模型 slug，沒指定就用帳號可用清單的第一個。`RUST_LOG` 調整日誌等級。
+桌面 app 用 `pots-desktop --serve` 跑同一個服務（`service::run_blocking`）。`RUST_LOG` 調整日誌等級。
+
+## 模型 provider
+
+對話用「使用中的 provider」，在設定裡切換（`SaveProvider`／`DeleteProvider`／`SetActiveProvider`／`TestProvider` 指令，狀態是快照與 `Providers` 事件裡的 `ProvidersView`）：
+
+- **ChatGPT 方案**（內建，ID 固定）：SIWC 授權。模型以設定指定的為準，其次是 `POTS_CHAT_MODEL`，都沒有就用帳號可用清單的第一個。
+- **OpenAI 相容／Anthropic 相容 API**：使用者自己新增，填 base URL、API key 與模型。OpenAI 相容的 key 可以不填（例如本機的 Ollama），Anthropic 相容的一定要填。
+
+第一次啟動時沒有使用中的 provider（要到設定選）；但如果 ChatGPT 已經登入，就直接選 ChatGPT。還沒選 provider 就傳訊息，回覆會失敗並提示到設定新增。
 
 ## 資料目錄
 
 | 檔案 | 內容 |
 | --- | --- |
-| `pots.db` | SQLite（WAL）：instance、projects、stream_items、events、agent_runs、om_raw |
+| `pots.db` | SQLite（WAL）：instance、projects、stream_items、events、agent_runs、om_raw、model_connections、instance_settings |
 | `pots.lock` | 執行期間持有的檔案鎖；同一個目錄只能有一個服務 |
 | `server.json` | 位址、啟動 token、pid、instance ID（`0600`）；正常結束時刪除 |
 | `host-id` | SIWC 的 host ID，登出也保留 |
 | `auth/chatgpt-credentials.json` | ChatGPT 授權（`0600`） |
+| `auth/providers/<id>.json` | API provider 的 key（`0600`）；不進資料庫、日誌與事件，事件只帶末四碼 |
 
 目錄本身是 `0700`。
 

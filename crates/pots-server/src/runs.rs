@@ -20,10 +20,10 @@ use std::time::Duration;
 
 use pots_llm::LlmError;
 use pots_llm::agent::{self, AgentEvent, Hook, RunConfig, RunOutcome, Tool, ToolError};
-use pots_llm::{Item, ModelProvider, ToolCall, ToolSpec};
+use pots_llm::{Item, ToolCall, ToolSpec};
 use pots_proto::{
-    AgentRole, AgentState, Author, ItemId, ModelAuthView, Msg, MsgStatus, ProjectId, ServerEvent,
-    StreamItemKind, StreamItemView, StreamScope, Timestamp, ToolSummary,
+    AgentRole, AgentState, Author, ItemId, ModelAuthView, Msg, MsgStatus, ProjectId, ProviderId,
+    ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp, ToolSummary,
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use crate::Error;
 use crate::hub::{Hub, LogTxn};
+use crate::providers::{ProviderRouter, Route};
 use crate::store::{ItemStatus, ProjectRow, RunState, Store};
 
 /// Agent profile。M0 只有 chat，之後改成設定檔（`profiles/*.toml`）。
@@ -87,8 +88,8 @@ struct Lane {
 struct Inner {
     hub: Arc<Hub>,
     store: Store,
-    provider: Arc<dyn ModelProvider>,
-    model: String,
+    /// 每個 run 開始時決定要用的 provider 與模型。
+    router: Arc<ProviderRouter>,
     /// 模型授權控制的狀態，用來在 run 成功後校正 hub 裡的授權狀態。
     auth_status: watch::Receiver<ModelAuthView>,
     lanes: Mutex<HashMap<ProjectId, Lane>>,
@@ -105,16 +106,14 @@ impl Runs {
     pub fn new(
         hub: Arc<Hub>,
         store: Store,
-        provider: Arc<dyn ModelProvider>,
-        model: String,
+        router: Arc<ProviderRouter>,
         auth_status: watch::Receiver<ModelAuthView>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 hub,
                 store,
-                provider,
-                model,
+                router,
                 auth_status,
                 lanes: Mutex::new(HashMap::new()),
                 tracker: TaskTracker::new(),
@@ -399,7 +398,13 @@ async fn run_chat(
         txn.commit().await?;
     }
 
-    let result = drive_loop(inner, &row, run_id, &mut reply, cancel).await;
+    // 整個 run 用同一個 provider 與模型，中途切換只影響下一個 run。
+    let route = inner.router.resolve();
+    let pinned = route.as_ref().ok().map(|r| r.id);
+    let result = match route {
+        Ok(route) => drive_loop(inner, &row, run_id, &mut reply, route, cancel).await,
+        Err(e) => Err(RunError::Llm(e)),
+    };
 
     let (status, item_status, run_state, error) = match &result {
         Ok(outcome) => {
@@ -450,6 +455,7 @@ async fn run_chat(
         inner,
         &reply,
         run_id,
+        pinned,
         &result,
         (status, item_status, run_state, error.as_deref()),
     )
@@ -462,10 +468,12 @@ async fn run_chat(
 }
 
 /// 記錄 run 結束：訊息最後內容、`agent_runs`、授權狀態校正、`AgentState { Idle }`。
+/// `pinned` 是這個 run 用的 provider；授權狀態的校正只在用 ChatGPT 時做。
 async fn finish(
     inner: &Inner,
     reply: &Reply,
     run_id: Uuid,
+    pinned: Option<ProviderId>,
     result: &Result<RunOutcome, RunError>,
     (status, item_status, run_state, error): (MsgStatus, ItemStatus, RunState, Option<&str>),
 ) -> Result<(), Error> {
@@ -481,7 +489,9 @@ async fn finish(
         item: view,
     })
     .await?;
-    if matches!(result, Err(RunError::Llm(LlmError::NeedsLogin)))
+    let chatgpt = pinned == Some(ProviderId::CHATGPT);
+    if chatgpt
+        && matches!(result, Err(RunError::Llm(LlmError::NeedsLogin)))
         && !matches!(
             txn.state().model_auth,
             ModelAuthView::SignedOut | ModelAuthView::Pending { .. } | ModelAuthView::Error { .. }
@@ -497,8 +507,8 @@ async fn finish(
         })
         .await?;
     }
-    if result.is_ok() {
-        // 推論成功代表授權可用：之前因 NeedsLogin 標成錯誤的話，改回授權控制的實際狀態。
+    if chatgpt && result.is_ok() {
+        // 用 ChatGPT 推論成功代表授權可用：之前因 NeedsLogin 標成錯誤的話，改回授權控制的實際狀態。
         let current = inner.auth_status.borrow().clone();
         if txn.state().model_auth != current {
             txn.push(|seq| ServerEvent::ModelAuth {
@@ -558,6 +568,7 @@ async fn drive_loop(
     project: &ProjectRow,
     run_id: Uuid,
     reply: &mut Reply,
+    route: Route,
     cancel: CancellationToken,
 ) -> Result<RunOutcome, RunError> {
     let history = inner
@@ -574,8 +585,8 @@ async fn drive_loop(
         instructions.push_str(project.instructions.trim());
     }
     let config = RunConfig {
-        provider: inner.provider.clone(),
-        model: inner.model.clone(),
+        provider: route.provider,
+        model: route.model,
         instructions: Some(instructions),
         tools: vec![Arc::new(GetStatus {
             inner: inner.clone(),
@@ -710,6 +721,13 @@ fn explain(e: &LlmError) -> String {
         LlmError::Unsupported(m) => format!("（模型不支援這個請求：{m}）"),
         LlmError::Interrupted(m) => format!("（回覆串流中斷，請再試一次：{m}）"),
         LlmError::Cancelled => "（已停止）".into(),
+        LlmError::NotConfigured => {
+            "（還沒設定模型 provider。請到左下角「設定」新增或選擇 provider，再傳一次訊息。）"
+                .into()
+        }
+        LlmError::InvalidCredentials(m) => {
+            format!("（模型 provider 的 API key 無效或沒有權限，請到「設定」檢查：{m}）")
+        }
         LlmError::Other(m) => format!("（回覆失敗：{m}）"),
     }
 }

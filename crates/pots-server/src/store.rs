@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use pots_llm::Item;
 use pots_proto::{
-    Author, InstanceId, ItemId, ProjectId, ServerEvent, StreamItemKind, StreamItemView, Timestamp,
+    Author, InstanceId, ItemId, ProjectId, ProviderId, ProviderKind, ServerEvent, StreamItemKind,
+    StreamItemView, Timestamp,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -32,6 +33,19 @@ pub struct ProjectRow {
     pub name: String,
     pub instructions: String,
     pub agent_name: String,
+    pub created_at: Timestamp,
+}
+
+/// `model_connections` 的一列。不含 API key。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionRow {
+    pub id: ProviderId,
+    pub kind: ProviderKind,
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    /// API key 檔案相對於資料目錄的路徑。
+    pub secret_ref: Option<String>,
     pub created_at: Timestamp,
 }
 
@@ -481,6 +495,111 @@ impl Store {
         .bind(run_id.map(|r| r.to_string()))
         .bind(to_json(item)?)
         .bind(Timestamp::now().0)
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // model_connections 與 instance_settings
+
+    /// 本機使用者的 API provider，依建立時間。
+    pub async fn list_connections(&self) -> Result<Vec<ConnectionRow>, Error> {
+        let rows = sqlx::query(
+            "SELECT id, kind, name, base_url, model, secret_ref, created_at FROM model_connections \
+             WHERE user_id = ? ORDER BY created_at, id",
+        )
+        .bind(LOCAL_USER_ID.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: String = row.try_get("id")?;
+            let kind: String = row.try_get("kind")?;
+            // 不認得的種類（例如較新版本寫的）略過，不讓整個服務起不來。
+            let kind = match serde_json::from_value(serde_json::Value::String(kind.clone())) {
+                Ok(k) if k != ProviderKind::ChatGpt => k,
+                _ => {
+                    tracing::warn!(%id, %kind, "略過不認得種類的 provider");
+                    continue;
+                }
+            };
+            out.push(ConnectionRow {
+                id: parse_id(id)?,
+                kind,
+                name: row.try_get("name")?,
+                base_url: row.try_get("base_url")?,
+                model: row.try_get("model")?,
+                secret_ref: row.try_get("secret_ref")?,
+                created_at: Timestamp(row.try_get("created_at")?),
+            });
+        }
+        Ok(out)
+    }
+
+    /// 新增或整列取代（保留原本的 `created_at`）。
+    pub async fn upsert_connection(
+        conn: &mut SqliteConnection,
+        row: &ConnectionRow,
+    ) -> Result<(), Error> {
+        let kind = match serde_json::to_value(row.kind)? {
+            serde_json::Value::String(s) => s,
+            other => return Err(Error::Corrupt(format!("provider 種類序列化錯誤：{other}"))),
+        };
+        sqlx::query(
+            "INSERT INTO model_connections \
+             (id, user_id, kind, name, base_url, model, secret_ref, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
+             base_url = excluded.base_url, model = excluded.model, \
+             secret_ref = excluded.secret_ref, updated_at = excluded.updated_at",
+        )
+        .bind(row.id.to_string())
+        .bind(LOCAL_USER_ID.to_string())
+        .bind(kind)
+        .bind(&row.name)
+        .bind(&row.base_url)
+        .bind(&row.model)
+        .bind(row.secret_ref.as_deref())
+        .bind(row.created_at.0)
+        .bind(Timestamp::now().0)
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_connection(
+        conn: &mut SqliteConnection,
+        id: ProviderId,
+    ) -> Result<(), Error> {
+        sqlx::query("DELETE FROM model_connections WHERE id = ? AND user_id = ?")
+            .bind(id.to_string())
+            .bind(LOCAL_USER_ID.to_string())
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn setting(&self, key: &str) -> Result<Option<String>, Error> {
+        Ok(
+            sqlx::query_scalar("SELECT value FROM instance_settings WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn set_setting(
+        conn: &mut SqliteConnection,
+        key: &str,
+        value: &str,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "INSERT INTO instance_settings (key, value) VALUES (?, ?) \
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
         .execute(conn)
         .await?;
         Ok(())

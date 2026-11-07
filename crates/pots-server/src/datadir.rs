@@ -112,19 +112,28 @@ impl DataDir {
     /// 原子寫入 `server.json`，權限 `0600`。
     pub(crate) fn write_connection_info(&self, info: &ConnectionInfo) -> Result<(), Error> {
         let json = serde_json::to_vec_pretty(info)?;
-        let tmp = self.path.join(format!("{INFO_FILE}.tmp"));
-        let _ = std::fs::remove_file(&tmp);
-        let mut file = private_file_options().open(&tmp)?;
-        file.write_all(&json)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, self.path.join(INFO_FILE))?;
+        write_private_file(&self.path.join(INFO_FILE), &json)?;
         Ok(())
     }
 
     pub(crate) fn remove_connection_info(&self) {
         let _ = std::fs::remove_file(self.path.join(INFO_FILE));
     }
+}
+
+/// 原子寫入只有自己能讀的檔案（`0600`）：先寫 `<name>.tmp`、fsync，再 rename 蓋掉。
+/// 上層目錄要已經存在。
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = private_file_options().open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 fn private_file_options() -> OpenOptions {
@@ -136,6 +145,17 @@ fn private_file_options() -> OpenOptions {
         opts.mode(0o600);
     }
     opts
+}
+
+/// 建立 `base` 底下的相對目錄 `rel`，中間每一層都設成 `0700`（例如 `auth/providers` 的 `auth/`）。
+/// `base` 本身不動。
+pub(crate) fn create_private_dirs_under(base: &Path, rel: &Path) -> std::io::Result<()> {
+    let mut dir = base.to_path_buf();
+    for part in rel.components() {
+        dir.push(part);
+        create_private_dir(&dir)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {

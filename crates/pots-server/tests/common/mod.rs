@@ -4,13 +4,16 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use pots_llm::testing::{ScriptedProvider, ScriptedTurn};
-use pots_proto::{ClientCommand, ItemId, ProjectId, SendMode, ServerEvent};
-use pots_server::{Config, Deps, FakeModelAuth, ServerHandle};
+use pots_llm::{LlmError, ModelProvider};
+use pots_proto::{
+    ClientCommand, ItemId, ModelOption, ProjectId, ProviderId, ProviderKind, SendMode, ServerEvent,
+};
+use pots_server::{ApiProviderFactory, Config, Deps, FakeModelAuth, ServerHandle};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -19,9 +22,94 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 一次 `build` 或 `list_models` 收到的參數。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiCall {
+    pub kind: ProviderKind,
+    pub base_url: String,
+    pub api_key: String,
+}
+
+/// 腳本化的 API provider 工廠：`build` 一律回同一個 [`ScriptedProvider`]；`list_models`
+/// 回固定清單，key 以 `sk-bad` 開頭時回 `InvalidCredentials`（訊息故意帶著 key）。
+pub struct ScriptedApi {
+    pub provider: Arc<ScriptedProvider>,
+    pub builds: Mutex<Vec<ApiCall>>,
+    pub lists: Mutex<Vec<ApiCall>>,
+}
+
+impl ScriptedApi {
+    pub fn new(turns: impl IntoIterator<Item = ScriptedTurn>) -> Arc<Self> {
+        Arc::new(Self {
+            provider: ScriptedProvider::named("scripted-api", turns),
+            builds: Mutex::new(Vec::new()),
+            lists: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn models() -> Vec<ModelOption> {
+        vec![
+            ModelOption {
+                id: "gpt-x".into(),
+                display_name: "GPT X".into(),
+            },
+            ModelOption {
+                id: "gpt-y".into(),
+                display_name: "GPT Y".into(),
+            },
+        ]
+    }
+
+    pub fn builds(&self) -> Vec<ApiCall> {
+        self.builds.lock().unwrap().clone()
+    }
+
+    pub fn lists(&self) -> Vec<ApiCall> {
+        self.lists.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ApiProviderFactory for ScriptedApi {
+    fn build(
+        &self,
+        kind: ProviderKind,
+        base_url: &url::Url,
+        api_key: &str,
+    ) -> Result<Arc<dyn ModelProvider>, String> {
+        self.builds.lock().unwrap().push(ApiCall {
+            kind,
+            base_url: base_url.to_string(),
+            api_key: api_key.into(),
+        });
+        Ok(self.provider.clone())
+    }
+
+    async fn list_models(
+        &self,
+        kind: ProviderKind,
+        base_url: &url::Url,
+        api_key: &str,
+    ) -> Result<Vec<ModelOption>, LlmError> {
+        self.lists.lock().unwrap().push(ApiCall {
+            kind,
+            base_url: base_url.to_string(),
+            api_key: api_key.into(),
+        });
+        if api_key.starts_with("sk-bad") {
+            return Err(LlmError::InvalidCredentials(format!(
+                "401：{api_key} 被拒絕"
+            )));
+        }
+        Ok(Self::models())
+    }
+}
+
 pub struct TestServer {
     pub handle: ServerHandle,
+    /// 內建 ChatGPT 方案的 provider。
     pub provider: Arc<ScriptedProvider>,
+    pub api: Arc<ScriptedApi>,
     pub auth: Arc<FakeModelAuth>,
 }
 
@@ -30,23 +118,37 @@ impl TestServer {
         Self::start_with(dir, turns, Arc::new(FakeModelAuth::signed_in())).await
     }
 
+    /// 預設使用 ChatGPT（`default_provider = CHATGPT`），沒有 API provider 的腳本。
     pub async fn start_with(
         dir: &Path,
         turns: impl IntoIterator<Item = ScriptedTurn>,
         auth: Arc<FakeModelAuth>,
     ) -> Self {
+        Self::launch(
+            Config::desktop(dir).with_default_provider(ProviderId::CHATGPT),
+            turns,
+            ScriptedApi::new([]),
+            auth,
+        )
+        .await
+    }
+
+    pub async fn launch(
+        config: Config,
+        turns: impl IntoIterator<Item = ScriptedTurn>,
+        api: Arc<ScriptedApi>,
+        auth: Arc<FakeModelAuth>,
+    ) -> Self {
         let provider = ScriptedProvider::new(turns);
-        let deps = Deps {
-            provider: provider.clone(),
-            model: "test-model".into(),
-            model_auth: auth.clone(),
-        };
-        let handle = pots_server::start(Config::desktop(dir), deps)
+        let deps =
+            Deps::new(provider.clone(), "test-model", auth.clone()).with_api_providers(api.clone());
+        let handle = pots_server::start(config, deps)
             .await
             .expect("服務啟動失敗");
         Self {
             handle,
             provider,
+            api,
             auth,
         }
     }
