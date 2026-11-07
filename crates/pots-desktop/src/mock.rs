@@ -60,6 +60,163 @@ fn day(text: &str) -> StreamItemKind {
     StreamItemKind::DayDivider(text.into())
 }
 
+fn doc(
+    id: ArtifactId,
+    kind: ArtifactKind,
+    title: &str,
+    note: &str,
+    rev: u32,
+    goal: Option<GoalId>,
+    body: &str,
+) -> ArtifactView {
+    ArtifactView {
+        id,
+        kind,
+        title: title.into(),
+        note: note.into(),
+        rev,
+        goal,
+        body: body.into(),
+        human_edits: vec![],
+        agent_writing: None,
+        proposals: 0,
+    }
+}
+
+fn trigger(title: &str, meta: &str, status: TriggerStatus) -> TriggerRecord {
+    TriggerRecord {
+        title: title.into(),
+        meta: meta.into(),
+        status,
+    }
+}
+
+const OAUTH_SPEC: &str = "\
+# OAuth 登入遷移
+
+## 目標
+
+以 Google OAuth 取代密碼登入。舊的密碼登入保留三個月後移除。
+
+## 範圍
+
+- 後端新增 OAuth callback 與 token 交換
+- 前端登入頁加上「使用 Google 登入」
+- 既有帳號以 email 綁定 Google 身分
+
+## Session 處理
+
+OAuth 登入後沿用現有的 session 機制，過期時間改為 14 天。登出時同時撤銷 Google token。
+
+## 測試計畫
+
+- [x] callback 成功與失敗路徑
+- [x] state 參數驗證（CSRF）
+- [ ] 舊的密碼登入仍可使用
+- [ ] session 過期後重新導向登入頁
+
+## 未決問題
+
+- 是否同時支援 GitHub 登入？目前不在範圍內。
+";
+
+const OAUTH_BRIEF: &str = "\
+# OAuth 登入遷移
+
+## 目標
+
+把登入改成 OAuth，先支援 Google。舊的密碼登入保留三個月，期間兩種方式並存。
+
+## 完成條件
+
+- 後端 callback、前端按鈕、整合測試都合併到 main
+- session 過期時間改為 14 天（見 Spec「Session 處理」）
+
+## 限制
+
+- 不改動既有的密碼登入流程
+- 不做 GitHub 登入（Spec 的未決問題）
+";
+
+const OAUTH_LEDGER: &str = "\
+# OAuth 登入遷移 · Ledger
+
+## 任務
+
+- [ ] 後端 OAuth callback（worker · Claude Code，進行中）
+- [ ] 前端登入按鈕（worker · rig，進行中）
+- [ ] 整合測試（等待 CI · PR #44）
+- [x] Spec 審查（reviewer subagent，沒有阻擋意見）
+
+## 決定
+
+- client id 用 `GOOGLE_CLIENT_ID`，並寫進 `.env.example`。
+- auth 的測試要先啟動 redis。
+
+## 花費
+
+目前 $1.81，預算已用 38%。
+";
+
+const OAUTH_REVIEW: &str = "\
+# Spec 審查
+
+## 結論
+
+沒有阻擋意見，可以開工。
+
+## 檢查項目
+
+- [x] session 機制與舊的密碼登入可以並存
+- [x] callback 的 state 參數有防 CSRF
+- [x] 登出時撤銷 Google token
+
+## 建議
+
+- 整合測試加上 session 過期後重新導向登入頁的案例。
+";
+
+const AUTH_NOTES: &str = "\
+# Project Notes
+
+## 開發環境
+
+- 跑測試前先 `docker compose up redis`。
+- 本機的 OAuth redirect 是 `http://localhost:8080/auth/callback`。
+
+## 慣例
+
+- 錯誤訊息用中文，log 用英文。
+- 每個 PR 只做一件事。
+";
+
+const INFRA_500_REPORT: &str = "\
+# API 偶發 500 調查
+
+## 結論
+
+資料庫連線池上限太小，尖峰時 request 等不到連線而逾時。已把上限從 10 調到 40。
+
+## 證據
+
+- 500 都發生在每天 09:00 與 14:00 的流量尖峰
+- 錯誤 log 是 `pool timed out while waiting for an open connection`
+- 調高上限後觀察三天沒有再發生
+
+## 後續
+
+- [ ] 替連線池使用率加上告警
+";
+
+const INFRA_NOTES: &str = "\
+# Project Notes
+
+## 部署
+
+- 正式環境只從 main 部署，由 CI 觸發。
+- 資料庫 migration 要先在 staging 跑過。
+";
+
 pub fn store() -> Store {
     let mut ids = Ids(0);
     let laptop = InstanceId(1);
@@ -70,6 +227,8 @@ pub fn store() -> Store {
     let oauth_goal = GoalId(ids.next());
     let pr42 = ApprovalId(ids.next());
     let spec = ArtifactId(ids.next());
+    let infra_report = ArtifactId(ids.next());
+    let infra_listener_approval = ApprovalId(ids.next());
 
     let callback_task = TaskView {
         id: TaskId(ids.next()),
@@ -203,7 +362,7 @@ pub fn store() -> Store {
             },
         ],
         brief: "把登入改成 OAuth，先支援 Google。舊的密碼登入保留三個月，期間兩種方式並存；\
-                session 過期改為滑動視窗（見 Spec v3「Session 處理」）。完成條件：\
+                session 過期時間改為 14 天（見 Spec「Session 處理」）。完成條件：\
                 後端 callback、前端按鈕、整合測試都合併到 main。"
             .into(),
     };
@@ -277,8 +436,60 @@ pub fn store() -> Store {
             ids.item(at(11, 6), StreamItemKind::Agent(streaming)),
         ],
         goals: vec![oauth],
-        artifact_count: 5,
-        automation_count: 3,
+        artifacts: vec![
+            ArtifactView {
+                human_edits: vec![("Session 處理".into(), at(10, 20))],
+                agent_writing: Some("測試計畫".into()),
+                ..doc(
+                    spec,
+                    ArtifactKind::Spec,
+                    "OAuth 登入遷移",
+                    "v4",
+                    4,
+                    None,
+                    OAUTH_SPEC,
+                )
+            },
+            doc(
+                ArtifactId(ids.next()),
+                ArtifactKind::Brief,
+                "OAuth 登入遷移",
+                "Goal 交接 · v1",
+                1,
+                Some(oauth_goal),
+                OAUTH_BRIEF,
+            ),
+            doc(
+                ArtifactId(ids.next()),
+                ArtifactKind::Ledger,
+                "OAuth 登入遷移",
+                "Planner 維護 · 4 個任務",
+                7,
+                Some(oauth_goal),
+                OAUTH_LEDGER,
+            ),
+            doc(
+                ArtifactId(ids.next()),
+                ArtifactKind::Report,
+                "Spec 審查",
+                "reviewer subagent · 沒有阻擋意見",
+                1,
+                Some(oauth_goal),
+                OAUTH_REVIEW,
+            ),
+            ArtifactView {
+                proposals: 1,
+                ..doc(
+                    ArtifactId(ids.next()),
+                    ArtifactKind::ProjectNotes,
+                    "Project Notes",
+                    "1 個待核准的提案",
+                    3,
+                    None,
+                    AUTH_NOTES,
+                )
+            },
+        ],
     };
 
     // ---- 家用伺服器 · 其他 project ----------------------------------------
@@ -348,8 +559,37 @@ pub fn store() -> Store {
             team: vec![],
             brief: "結帳頁改版：新版地址表單與付款步驟。".into(),
         }],
-        artifact_count: 3,
-        automation_count: 1,
+        artifacts: vec![
+            doc(
+                ArtifactId(ids.next()),
+                ArtifactKind::Spec,
+                "結帳頁改版",
+                "v2",
+                2,
+                None,
+                "# 結帳頁改版\n\n## 目標\n\n地址表單與付款拆成兩步，手機上不用橫向捲動。\n\n\
+                 ## 範圍\n\n- 新版地址表單\n- 付款步驟改成獨立頁面\n",
+            ),
+            doc(
+                ArtifactId(ids.next()),
+                ArtifactKind::Brief,
+                "結帳頁改版",
+                "Goal 交接 · v1",
+                1,
+                Some(checkout_goal),
+                "# 結帳頁改版\n\n## 完成條件\n\n- e2e 測試全部通過\n- 合併到 main\n",
+            ),
+            doc(
+                ArtifactId(ids.next()),
+                ArtifactKind::Ledger,
+                "結帳頁改版",
+                "Planner 維護 · CI 卡住",
+                5,
+                Some(checkout_goal),
+                "# 結帳頁改版 · Ledger\n\n## 任務\n\n\
+                 - [ ] 修正 e2e/checkout.spec.ts（CI 連續失敗 3 次，等你決定）\n",
+            ),
+        ],
     };
 
     let infra = ProjectView {
@@ -374,8 +614,26 @@ pub fn store() -> Store {
             ),
         ],
         goals: vec![],
-        artifact_count: 4,
-        automation_count: 2,
+        artifacts: vec![
+            doc(
+                infra_report,
+                ArtifactKind::Report,
+                "API 偶發 500 調查",
+                "11/2 · Goal 已完成",
+                2,
+                None,
+                INFRA_500_REPORT,
+            ),
+            doc(
+                ArtifactId(ids.next()),
+                ArtifactKind::ProjectNotes,
+                "Project Notes",
+                "v2",
+                2,
+                None,
+                INFRA_NOTES,
+            ),
+        ],
     };
     let infra_id = infra.id;
 
@@ -391,9 +649,18 @@ pub fn store() -> Store {
         unread: 0,
         items: vec![],
         goals: vec![],
-        artifact_count: 1,
-        automation_count: 1,
+        artifacts: vec![doc(
+            ArtifactId(ids.next()),
+            ArtifactKind::ProjectNotes,
+            "Project Notes",
+            "v1",
+            1,
+            None,
+            "# Project Notes\n\n## 建置\n\n- 文件站用 `mdbook build`，輸出在 `book/`。\n",
+        )],
     };
+    let docs_id = docs.id;
+    let auth_id = auth;
 
     let mut search_reply = agent(
         "總管",
@@ -408,7 +675,7 @@ pub fn store() -> Store {
         ],
     );
     search_reply.cards.push(Card::Artifact {
-        id: ArtifactId(ids.next()),
+        id: infra_report,
         kind: ArtifactKind::Report,
         title: "API 偶發 500 調查".into(),
         note: "# infra · 11/2".into(),
@@ -427,7 +694,10 @@ pub fn store() -> Store {
     pause_reply.cards.push(Card::Notice {
         title: "已暫停 3 個排程、2 個 listener".into(),
         body: "週一 09:00 自動恢復。暫停期間錯過的觸發不會補跑。".into(),
-        actions: vec!["查看清單".into(), "立即恢復".into()],
+        actions: vec![
+            NoticeAction::ViewAutomations,
+            NoticeAction::ResumeAutomations,
+        ],
     });
     let mut digest = agent("總管", AgentRole::Overseer, "");
     digest.cards.push(Card::Digest {
@@ -555,8 +825,15 @@ pub fn store() -> Store {
             team: vec![],
             brief: "合併重複的 alias，移除過期的 PATH 設定。".into(),
         }],
-        artifact_count: 1,
-        automation_count: 0,
+        artifacts: vec![doc(
+            ArtifactId(ids.next()),
+            ArtifactKind::Brief,
+            "整理 shell 設定",
+            "Goal 交接 · v1",
+            1,
+            Some(shell_goal),
+            "# 整理 shell 設定\n\n## 目標\n\n合併重複的 alias，移除過期的 PATH 設定。\n",
+        )],
     };
     let side_id = ProjectId(ids.next());
     let side = ProjectView {
@@ -581,9 +858,140 @@ pub fn store() -> Store {
             ),
         ],
         goals: vec![],
-        artifact_count: 0,
-        automation_count: 0,
+        artifacts: vec![],
     };
+
+    // ---- 家用伺服器 · 自動化 -------------------------------------------------
+    let home_schedules = vec![
+        ScheduleView {
+            id: ScheduleId(ids.next()),
+            project: Some(infra_id),
+            prompt: "整理前一天失敗的 CI".into(),
+            note: "30 天後過期".into(),
+            creator: ScheduleCreator::Chat,
+            cadence: "每天 08:00".into(),
+            next: "明天 08:00".into(),
+            next_after_pause: Some("週一 08:00".into()),
+            enabled: true,
+            history: vec![
+                trigger(
+                    "11/6 08:00 → 2 個失敗已整理",
+                    "花費 $0.12",
+                    TriggerStatus::Done,
+                ),
+                trigger("11/5 08:00 → 沒有失敗", "花費 $0.03", TriggerStatus::Done),
+            ],
+        },
+        ScheduleView {
+            id: ScheduleId(ids.next()),
+            project: Some(auth_id),
+            prompt: "提醒移除 legacy_login feature flag".into(),
+            note: "單次".into(),
+            creator: ScheduleCreator::Planner,
+            cadence: "單次".into(),
+            next: "11/10 10:00".into(),
+            next_after_pause: None,
+            enabled: true,
+            history: vec![],
+        },
+        ScheduleView {
+            id: ScheduleId(ids.next()),
+            project: Some(docs_id),
+            prompt: "檢查文件站建置與壞掉的連結".into(),
+            note: "30 天後過期".into(),
+            creator: ScheduleCreator::Chat,
+            cadence: "每晚 22:00".into(),
+            next: "今晚 22:00".into(),
+            next_after_pause: Some("週一 22:00".into()),
+            enabled: true,
+            history: vec![trigger(
+                "11/6 22:00 → 找到 1 個壞掉的連結",
+                "花費 $0.08",
+                TriggerStatus::Done,
+            )],
+        },
+    ];
+    let home_listeners = vec![
+        ListenerView {
+            id: ListenerId(ids.next()),
+            project: Some(auth_id),
+            condition: "issue 加上 agent label".into(),
+            action: "開 Goal".into(),
+            source: "GitHub".into(),
+            source_detail: "個人帳號".into(),
+            trust: TrustLevel::Members,
+            resource: "github.com/me/auth-service".into(),
+            event: "Issue 被加上 label".into(),
+            matcher: "label = agent".into(),
+            action_detail: "開 Goal，Brief 用以下模板：".into(),
+            template: Some(
+                "依照 Issue 的描述實作，先在 Brief 補上驗收條件；需求不清楚時在 Team 貼文發問，不要猜。"
+                    .into(),
+            ),
+            budget_per_trigger_cents: Some(200),
+            max_per_hour: Some(2),
+            triggers_this_week: 2,
+            state: ListenerState::Active,
+            history: vec![
+                trigger(
+                    "#118 → 支援 refresh token",
+                    "11/5 · 花費 $1.40",
+                    TriggerStatus::Done,
+                ),
+                trigger(
+                    "#112 → 錯誤訊息改成中文",
+                    "11/3 · 目前 $0.60",
+                    TriggerStatus::Running,
+                ),
+            ],
+        },
+        ListenerView {
+            id: ListenerId(ids.next()),
+            project: None,
+            condition: "上游 LLM 狀態頁出現重大事故".into(),
+            action: "通知對話".into(),
+            source: "狀態頁".into(),
+            source_detail: "LLM provider 公開狀態頁".into(),
+            trust: TrustLevel::Public,
+            resource: "service:openai/*".into(),
+            event: "Incident 開啟".into(),
+            matcher: "severity ≥ major".into(),
+            action_detail:
+                "只在各 project 的對話裡告訴對話 agent，由它檢查哪些任務受影響。Public 來源預設只能通知。"
+                    .into(),
+            template: None,
+            budget_per_trigger_cents: None,
+            max_per_hour: Some(1),
+            triggers_this_week: 1,
+            state: ListenerState::Active,
+            history: vec![trigger(
+                "API 錯誤率升高 → 通知 4 個專案",
+                "11/6 23:10 · 沒有任務受影響",
+                TriggerStatus::Notified,
+            )],
+        },
+        ListenerView {
+            id: ListenerId(ids.next()),
+            project: Some(infra_id),
+            condition: "main 分支 CI 失敗".into(),
+            action: "開 Goal 修復".into(),
+            source: "GitHub".into(),
+            source_detail: "個人帳號".into(),
+            trust: TrustLevel::Owned,
+            resource: "github.com/me/infra".into(),
+            event: "CI 執行結束".into(),
+            matcher: "branch = main、conclusion = failure".into(),
+            action_detail: "開 Goal「修好 main」，Brief 用以下模板：".into(),
+            template: Some(
+                "讀 CI log 找出失敗原因並修好；同一個 commit 修兩次還失敗就停下來問我。".into(),
+            ),
+            budget_per_trigger_cents: Some(200),
+            max_per_hour: Some(2),
+            triggers_this_week: 0,
+            state: ListenerState::PendingApproval(infra_listener_approval),
+            history: vec![],
+        },
+    ];
 
     let instances = vec![
         InstanceView {
@@ -612,14 +1020,9 @@ pub fn store() -> Store {
                 memory: vec![],
                 memory_total: 0,
             },
-            schedules: AutomationSummary {
-                active: 0,
-                paused: false,
-            },
-            listeners: AutomationSummary {
-                active: 0,
-                paused: false,
-            },
+            schedules: vec![],
+            listeners: vec![],
+            automation_pause: None,
         },
         InstanceView {
             id: home,
@@ -630,14 +1033,14 @@ pub fn store() -> Store {
             last_seq: 88_412,
             projects: vec![auth_service, web_app, infra, docs],
             overseer: home_overseer,
-            schedules: AutomationSummary {
-                active: 3,
-                paused: false,
-            },
-            listeners: AutomationSummary {
-                active: 2,
-                paused: false,
-            },
+            schedules: home_schedules,
+            listeners: home_listeners,
+            // 09:20 你請總管把週末的自動化全部暫停（見總管對話）。
+            automation_pause: Some(AutomationPause {
+                until: "週一 09:00".into(),
+                until_short: "週一".into(),
+                by: "由總管在 09:20 依你的要求暫停".into(),
+            }),
         },
     ];
 
@@ -686,7 +1089,7 @@ pub fn store() -> Store {
             decision: Decision::Pending,
         },
         InboxItem {
-            id: ApprovalId(ids.next()),
+            id: infra_listener_approval,
             instance: home,
             project: Some(infra_id),
             context: "新的 listener".into(),
@@ -818,6 +1221,59 @@ mod tests {
             store.outbox.last(),
             Some((i, ClientCommand::Decide { approve: true, .. })) if *i == home
         ));
+    }
+
+    #[test]
+    fn artifact_cards_resolve() {
+        let store = store();
+        for inst in &store.instances {
+            let items = inst
+                .projects
+                .iter()
+                .flat_map(|p| p.items.iter())
+                .chain(inst.overseer.items.iter());
+            for item in items {
+                let (StreamItemKind::Agent(m) | StreamItemKind::Human(m)) = &item.kind else {
+                    continue;
+                };
+                for card in &m.cards {
+                    if let Card::Artifact { id, kind, .. } = card {
+                        let (_, a) = store.artifact(inst.id, *id).expect("artifact exists");
+                        assert_eq!(a.kind, *kind);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn listener_follows_its_approval() {
+        let home = InstanceId(2);
+        let pending = |store: &Store| {
+            store
+                .instance(home)
+                .unwrap()
+                .listeners
+                .iter()
+                .find_map(|l| match l.state {
+                    ListenerState::PendingApproval(a) => Some((l.id, a)),
+                    _ => None,
+                })
+                .expect("mock has a pending listener")
+        };
+
+        let mut store = store();
+        let (listener, approval) = pending(&store);
+        assert!(store.act(approval, InboxAction::Approve));
+        assert_eq!(
+            store.listener(home, listener).unwrap().state,
+            ListenerState::Active
+        );
+
+        let mut store = super::store();
+        let (listener, approval) = pending(&store);
+        assert!(store.act(approval, InboxAction::Reject));
+        assert!(store.listener(home, listener).is_none());
     }
 
     #[test]

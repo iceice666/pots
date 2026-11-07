@@ -16,7 +16,7 @@ use crate::app::{GoalTab, Panel, PotsApp};
 use crate::model::*;
 use crate::theme;
 
-fn panel_frame() -> Div {
+pub(super) fn panel_frame() -> Div {
     div()
         .flex_none()
         .w(px(380.))
@@ -94,7 +94,7 @@ fn team_post(post: &TeamPost) -> Div {
         .child(div().line_height(relative(1.5)).child(post.body.clone()))
 }
 
-fn white_box() -> Div {
+pub(super) fn white_box() -> Div {
     div()
         .flex()
         .flex_col()
@@ -135,10 +135,49 @@ impl PotsApp {
                 let (g, t) = self.store.task(self.instance, task)?;
                 Some(self.render_task_panel(g, t, cx).into_any_element())
             }
+            Panel::Artifact(id) => {
+                let (_, a) = self.store.artifact(self.instance, id)?;
+                let editor = self.artifact_editor.as_ref().filter(|e| e.artifact == id)?;
+                Some(self.render_artifact_panel(a, editor, cx).into_any_element())
+            }
+            Panel::Schedule(id) => {
+                let s = self.store.schedule(self.instance, id)?;
+                Some(self.render_schedule_panel(s, cx).into_any_element())
+            }
+            Panel::Listener(id) => {
+                let l = self.store.listener(self.instance, id)?;
+                Some(self.render_listener_panel(l, cx).into_any_element())
+            }
         }
     }
 
-    fn close_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Goal 上指定種類的 artifact（Brief、Ledger）。
+    fn goal_artifact(&self, goal: GoalId, kind: ArtifactKind) -> Option<ArtifactId> {
+        self.current_project()?
+            .artifacts
+            .iter()
+            .find(|a| a.goal == Some(goal) && a.kind == kind)
+            .map(|a| a.id)
+    }
+
+    fn open_artifact_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        artifact: ArtifactId,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        secondary_button(id, label)
+            .self_start()
+            .text_size(px(13.))
+            .px(px(12.))
+            .py(px(5.))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.open_artifact(artifact, window, cx)),
+            )
+    }
+
+    pub(super) fn close_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         icon_button("panel-close", IconName::X)
             .ml_auto()
             .tip("關閉面板")
@@ -303,12 +342,26 @@ impl PotsApp {
                         .child("Planner 交接用的 Goal brief"),
                 )
                 .child(div().line_height(relative(1.6)).child(g.brief.clone()))
+                .children(
+                    self.goal_artifact(gid, ArtifactKind::Brief)
+                        .map(|a| self.open_artifact_button("goal-open-brief", "在編輯器開啟", a, cx)),
+                )
                 .into_any_element(),
-            GoalTab::Ledger => empty_state(
-                "Ledger",
-                "Planner 的工作帳本：決定、嘗試與花費。M2 隨 Artifact 一起實作。",
-            )
-            .into_any_element(),
+            GoalTab::Ledger => match self.goal_artifact(gid, ArtifactKind::Ledger) {
+                Some(a) => white_box()
+                    .child(
+                        div()
+                            .line_height(relative(1.6))
+                            .child("Planner 的工作帳本：拆了哪些任務、各自結果與待辦。你在裡面取消勾選某項，Planner 下一輪會看到。"),
+                    )
+                    .child(self.open_artifact_button("goal-open-ledger", "開啟 Ledger", a, cx))
+                    .into_any_element(),
+                None => empty_state(
+                    "還沒有 Ledger",
+                    "Planner 拆完任務後會建立 Ledger，記錄決定、嘗試與花費。",
+                )
+                .into_any_element(),
+            },
             GoalTab::Team => {
                 if g.team.is_empty() {
                     empty_state(

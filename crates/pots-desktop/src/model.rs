@@ -16,8 +16,17 @@ macro_rules! id_type {
 }
 
 id_type!(
-    InstanceId, ProjectId, ItemId, GoalId, TaskId, ApprovalId, ArtifactId,
+    InstanceId, ProjectId, ItemId, GoalId, TaskId, ApprovalId, ArtifactId, ScheduleId, ListenerId,
 );
+
+/// `$2`、`$1.40` 這類金額顯示。
+pub fn format_dollars(cents: u32) -> String {
+    if cents.is_multiple_of(100) {
+        format!("${}", cents / 100)
+    } else {
+        format!("${}.{:02}", cents / 100, cents % 100)
+    }
+}
 
 /// Unix 秒。假資料把它當作本地時間，顯示時不做時區換算。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -79,14 +88,38 @@ pub struct InstanceView {
     pub last_seq: u64,
     pub projects: Vec<ProjectView>,
     pub overseer: OverseerView,
-    pub schedules: AutomationSummary,
-    pub listeners: AutomationSummary,
+    pub schedules: Vec<ScheduleView>,
+    pub listeners: Vec<ListenerView>,
+    /// 批次暫停（`pause_automations`）；`None` 表示正常運作。
+    pub automation_pause: Option<AutomationPause>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
-pub struct AutomationSummary {
-    pub active: u32,
-    pub paused: bool,
+impl InstanceView {
+    /// `project` 為 `None` 時是全部；指定 project 時只看掛在它上面的排程。
+    pub fn schedules_for(&self, project: Option<ProjectId>) -> impl Iterator<Item = &ScheduleView> {
+        self.schedules
+            .iter()
+            .filter(move |s| project.is_none_or(|p| s.project == Some(p)))
+    }
+
+    /// 指定 project 時，也包含套用到所有 project 的 listener。
+    pub fn listeners_for(&self, project: Option<ProjectId>) -> impl Iterator<Item = &ListenerView> {
+        self.listeners
+            .iter()
+            .filter(move |l| project.is_none_or(|p| l.project.is_none() || l.project == Some(p)))
+    }
+
+    /// 頻道「自動化」分頁上的數字。
+    pub fn automation_count(&self, project: ProjectId) -> usize {
+        self.schedules_for(Some(project)).count() + self.listeners_for(Some(project)).count()
+    }
+
+    pub fn project_name(&self, project: ProjectId) -> Option<&str> {
+        self.projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.name.as_str())
+    }
 }
 
 /// 對話頂端顯示的 agent 狀態。
@@ -144,8 +177,7 @@ pub struct ProjectView {
     pub unread: u32,
     pub items: Vec<StreamItemView>,
     pub goals: Vec<GoalView>,
-    pub artifact_count: u32,
-    pub automation_count: u32,
+    pub artifacts: Vec<ArtifactView>,
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +254,120 @@ impl ArtifactKind {
             Self::ProjectNotes => "Project Notes",
         }
     }
+
+    /// 列表與面板上的小標籤。
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Spec => "SPEC",
+            Self::Brief => "BRIEF",
+            Self::Ledger => "LEDGER",
+            Self::Report => "REPORT",
+            Self::ProjectNotes => "NOTES",
+        }
+    }
+}
+
+/// 掛在 project 或 Goal 上的 Markdown 文件，你與 agent 都能編輯
+/// （proposal/artifacts.md）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArtifactView {
+    pub id: ArtifactId,
+    pub kind: ArtifactKind,
+    pub title: String,
+    /// 列表第二行，例如「Goal 交接 · v1」；agent 正在寫入時改顯示寫入狀態。
+    pub note: String,
+    pub rev: u32,
+    /// 掛在哪個 Goal；`None` 表示掛在 project。
+    pub goal: Option<GoalId>,
+    /// Markdown 全文。
+    pub body: String,
+    /// 你改過的區段標題與時間。
+    pub human_edits: Vec<(String, Timestamp)>,
+    /// agent 正在寫入的區段標題；寫入期間這段在客戶端唯讀。
+    pub agent_writing: Option<String>,
+    /// 等你核准的修改提案數；Project Notes 的 agent 修改只能是提案。
+    pub proposals: u32,
+}
+
+impl ArtifactView {
+    pub fn list_note(&self) -> String {
+        if self.agent_writing.is_some() {
+            format!("v{} · agent 正在更新", self.rev)
+        } else {
+            self.note.clone()
+        }
+    }
+
+    pub fn edited_at(&self, heading: &str) -> Option<Timestamp> {
+        self.human_edits
+            .iter()
+            .find(|(h, _)| h == heading)
+            .map(|(_, at)| *at)
+    }
+}
+
+/// Artifact 的一個 `## ` 標題區段。agent 以區段為單位寫入，客戶端也逐段編輯，
+/// 這樣 agent 正在寫的那段可以單獨鎖住。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactSection {
+    /// `None` 是第一個 `##` 之前的部分（文件標題與前言）。
+    pub heading: Option<String>,
+    /// 這段的 Markdown，含標題行。
+    pub source: String,
+}
+
+/// 依 `## ` 標題切段；程式碼區塊裡的 `##` 不算。
+pub fn split_sections(markdown: &str) -> Vec<ArtifactSection> {
+    fn flush(out: &mut Vec<ArtifactSection>, heading: Option<String>, buf: &str) {
+        let source = buf.trim();
+        if heading.is_some() || !source.is_empty() {
+            out.push(ArtifactSection {
+                heading,
+                source: source.to_string(),
+            });
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut heading = None;
+    let mut buf = String::new();
+    let mut in_fence = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        if !in_fence && let Some(h) = section_heading(line) {
+            flush(&mut out, heading.take(), &buf);
+            buf.clear();
+            heading = Some(h);
+        }
+        buf.push_str(line);
+        buf.push('\n');
+    }
+    flush(&mut out, heading, &buf);
+    out
+}
+
+/// 一行（或一段的第一行）若是 `## ` 標題，回傳標題文字。
+pub fn section_heading(source: &str) -> Option<String> {
+    let first = source.lines().next()?;
+    first
+        .strip_prefix("## ")
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+}
+
+/// 把各段的 Markdown 接回全文。
+pub fn join_sections<'a>(sources: impl IntoIterator<Item = &'a str>) -> String {
+    let parts: Vec<&str> = sources
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut out = parts.join("\n\n");
+    out.push('\n');
+    out
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -257,8 +403,23 @@ pub enum Card {
     Notice {
         title: String,
         body: String,
-        actions: Vec<String>,
+        actions: Vec<NoticeAction>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoticeAction {
+    ViewAutomations,
+    ResumeAutomations,
+}
+
+impl NoticeAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ViewAutomations => "查看清單",
+            Self::ResumeAutomations => "立即恢復",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -403,6 +564,141 @@ impl GoalView {
             .filter(|t| matches!(&t.state, TaskStateView::Waiting { on } if on.contains("CI")))
             .count()
     }
+}
+
+// ---------------------------------------------------------------------------
+// 自動化：排程與 listener（proposal/events-and-automation.md）
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScheduleCreator {
+    Chat,
+    Planner,
+    Overseer,
+}
+
+impl ScheduleCreator {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "對話 agent",
+            Self::Planner => "Planner",
+            Self::Overseer => "總管",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerStatus {
+    Done,
+    Running,
+    Failed,
+    /// NotifyChat 一類只通知、不開工的觸發。
+    Notified,
+}
+
+impl TriggerStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Done => "完成",
+            Self::Running => "進行中",
+            Self::Failed => "失敗",
+            Self::Notified => "已通知",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TriggerRecord {
+    /// 例如「#118 → 支援 refresh token」。
+    pub title: String,
+    /// 例如「11/5 · 花費 $1.40」。
+    pub meta: String,
+    pub status: TriggerStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScheduleView {
+    pub id: ScheduleId,
+    /// `None` 是總管的全域排程。
+    pub project: Option<ProjectId>,
+    /// 醒來時要做什麼。
+    pub prompt: String,
+    /// 標題下的小字，例如「30 天後過期」「單次」。
+    pub note: String,
+    pub creator: ScheduleCreator,
+    /// 例如「每天 08:00」「單次」。
+    pub cadence: String,
+    pub next: String,
+    /// 批次暫停期間，恢復後第一次觸發的時間；`None` 表示不受這次暫停影響。
+    pub next_after_pause: Option<String>,
+    pub enabled: bool,
+    pub history: Vec<TriggerRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrustLevel {
+    Owned,
+    Members,
+    Public,
+}
+
+impl TrustLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Owned => "Owned",
+            Self::Members => "Members",
+            Self::Public => "Public",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListenerState {
+    Active,
+    Disabled,
+    /// agent 用 `create_listener` 提案，等 Inbox 裡這筆核准。
+    PendingApproval(ApprovalId),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListenerView {
+    pub id: ListenerId,
+    /// `None` 表示套用到這個實例的所有 project。
+    pub project: Option<ProjectId>,
+    /// 條件的白話描述，例如「issue 加上 agent label」。
+    pub condition: String,
+    /// 動作的白話描述，例如「開 Goal」。
+    pub action: String,
+    pub source: String,
+    /// 來源的帳號或說明，例如「個人帳號」。
+    pub source_detail: String,
+    pub trust: TrustLevel,
+    pub resource: String,
+    pub event: String,
+    pub matcher: String,
+    pub action_detail: String,
+    /// 開 Goal 時 Brief 用的模板。
+    pub template: Option<String>,
+    pub budget_per_trigger_cents: Option<u32>,
+    pub max_per_hour: Option<u32>,
+    pub triggers_this_week: u32,
+    pub state: ListenerState,
+    pub history: Vec<TriggerRecord>,
+}
+
+impl ListenerView {
+    pub fn title(&self) -> String {
+        format!("{} → {}", self.condition, self.action)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AutomationPause {
+    /// 自動恢復的時間，例如「週一 09:00」。
+    pub until: String,
+    /// 表格裡的短寫，例如「週一」。
+    pub until_short: String,
+    /// 例如「由總管在 09:20 依你的要求暫停」。
+    pub by: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +953,102 @@ impl Store {
         self.inbox.iter().find(|i| i.id == id)
     }
 
+    /// Artifact 與它所屬的 project。
+    pub fn artifact(
+        &self,
+        instance: InstanceId,
+        id: ArtifactId,
+    ) -> Option<(&ProjectView, &ArtifactView)> {
+        self.instance(instance)?
+            .projects
+            .iter()
+            .find_map(|p| p.artifacts.iter().find(|a| a.id == id).map(|a| (p, a)))
+    }
+
+    /// 你在編輯器裡改了 artifact：更新全文，並標示改過的區段。
+    /// 寫回服務走 HTTP API（尚未定義），這裡只改本地狀態。
+    pub fn edit_artifact(
+        &mut self,
+        instance: InstanceId,
+        id: ArtifactId,
+        body: String,
+        section: Option<String>,
+    ) {
+        let now = self.now;
+        let Some(a) = self.instance_mut(instance).and_then(|i| {
+            i.projects
+                .iter_mut()
+                .flat_map(|p| p.artifacts.iter_mut())
+                .find(|a| a.id == id)
+        }) else {
+            return;
+        };
+        a.body = body;
+        if let Some(heading) = section {
+            match a.human_edits.iter_mut().find(|(h, _)| *h == heading) {
+                Some(edit) => edit.1 = now,
+                None => a.human_edits.push((heading, now)),
+            }
+        }
+    }
+
+    pub fn schedule(&self, instance: InstanceId, id: ScheduleId) -> Option<&ScheduleView> {
+        self.instance(instance)?
+            .schedules
+            .iter()
+            .find(|s| s.id == id)
+    }
+
+    pub fn listener(&self, instance: InstanceId, id: ListenerId) -> Option<&ListenerView> {
+        self.instance(instance)?
+            .listeners
+            .iter()
+            .find(|l| l.id == id)
+    }
+
+    /// 提前結束批次暫停（`resume_automations`）。
+    pub fn resume_automations(&mut self, instance: InstanceId) {
+        if let Some(i) = self.instance_mut(instance) {
+            i.automation_pause = None;
+        }
+    }
+
+    pub fn set_schedule_enabled(&mut self, instance: InstanceId, id: ScheduleId, enabled: bool) {
+        if let Some(s) = self
+            .instance_mut(instance)
+            .and_then(|i| i.schedules.iter_mut().find(|s| s.id == id))
+        {
+            s.enabled = enabled;
+        }
+    }
+
+    /// 啟用或停用 listener；等待核准中的不受影響。
+    pub fn set_listener_enabled(&mut self, instance: InstanceId, id: ListenerId, enabled: bool) {
+        if let Some(l) = self
+            .instance_mut(instance)
+            .and_then(|i| i.listeners.iter_mut().find(|l| l.id == id))
+            && !matches!(l.state, ListenerState::PendingApproval(_))
+        {
+            l.state = if enabled {
+                ListenerState::Active
+            } else {
+                ListenerState::Disabled
+            };
+        }
+    }
+
+    pub fn delete_schedule(&mut self, instance: InstanceId, id: ScheduleId) {
+        if let Some(i) = self.instance_mut(instance) {
+            i.schedules.retain(|s| s.id != id);
+        }
+    }
+
+    pub fn delete_listener(&mut self, instance: InstanceId, id: ListenerId) {
+        if let Some(i) = self.instance_mut(instance) {
+            i.listeners.retain(|l| l.id != id);
+        }
+    }
+
     /// `None` 代表所有實例。
     pub fn pending(&self, instance: Option<InstanceId>) -> usize {
         self.inbox
@@ -819,6 +1211,17 @@ impl Store {
         let approve = decision == Decision::Approved;
         let is_approval = item.kind == InboxKind::Approval;
         item.decision = decision;
+        // 核准的是 listener 提案：核准就生效，拒絕就撤掉。
+        if is_approval && let Some(inst) = self.instance_mut(instance) {
+            let pending = ListenerState::PendingApproval(id);
+            if approve {
+                for l in inst.listeners.iter_mut().filter(|l| l.state == pending) {
+                    l.state = ListenerState::Active;
+                }
+            } else {
+                inst.listeners.retain(|l| l.state != pending);
+            }
+        }
         if is_approval {
             self.outbox.push((
                 instance,
@@ -857,6 +1260,29 @@ mod tests {
         assert_eq!(t.relative_to(Timestamp(t.0 + 30)), "剛剛");
         assert_eq!(t.relative_to(Timestamp(t.0 + 120)), "2 分鐘前");
         assert_eq!(t.relative_to(Timestamp(t.0 + 7200)), "2 小時前");
+    }
+
+    #[test]
+    fn sections_round_trip() {
+        let md =
+            "# 標題\n\n前言\n\n## 目標\n\n內容\n\n```sh\n## 不是標題\n```\n\n## 範圍\n\n- 一\n";
+        let sections = split_sections(md);
+        let headings: Vec<_> = sections.iter().map(|s| s.heading.as_deref()).collect();
+        assert_eq!(headings, [None, Some("目標"), Some("範圍")]);
+        assert!(sections[1].source.contains("## 不是標題"));
+        assert_eq!(
+            join_sections(sections.iter().map(|s| s.source.as_str())),
+            md
+        );
+        assert_eq!(section_heading("## 範圍\n\n- 一"), Some("範圍".into()));
+        assert_eq!(section_heading("# 標題"), None);
+    }
+
+    #[test]
+    fn dollars() {
+        assert_eq!(format_dollars(200), "$2");
+        assert_eq!(format_dollars(140), "$1.40");
+        assert_eq!(format_dollars(5), "$0.05");
     }
 
     #[test]

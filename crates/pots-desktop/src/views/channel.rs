@@ -118,13 +118,13 @@ impl PotsApp {
                     ))
                     .child(tab_item(
                         "tab-artifacts",
-                        format!("Artifacts {}", p.artifact_count),
+                        format!("Artifacts {}", p.artifacts.len()),
                         ChannelTab::Artifacts,
                         cx,
                     ))
                     .child(tab_item(
                         "tab-automations",
-                        format!("自動化 {}", p.automation_count),
+                        format!("自動化 {}", self.current_instance().automation_count(p.id)),
                         ChannelTab::Automations,
                         cx,
                     ))
@@ -146,16 +146,8 @@ impl PotsApp {
                 .child(self.render_composer(p, window, cx))
                 .into_any_element(),
             ChannelTab::Goals => self.render_goal_list(p, cx).into_any_element(),
-            ChannelTab::Artifacts => empty_state(
-                "Artifacts",
-                "Spec、Brief、Ledger 與 Report 的列表和編輯面板在 M2 實作，編輯器使用 gpui-kit-markdown-editor。",
-            )
-            .into_any_element(),
-            ChannelTab::Automations => empty_state(
-                "自動化",
-                "這個 project 的排程與 listener：可暫停、刪除、看觸發紀錄。尚未實作。",
-            )
-            .into_any_element(),
+            ChannelTab::Artifacts => self.render_artifact_list(p, cx),
+            ChannelTab::Automations => self.render_project_automations(p, cx),
             ChannelTab::Memory => empty_state(
                 "agent 記得什麼",
                 "Observational Memory 的觀察紀錄，可查看、修正、釘選或刪除。M1 實作。",

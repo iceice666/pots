@@ -8,7 +8,7 @@ use gpui_kit::{
 };
 
 use super::widgets::*;
-use crate::app::{GoalTab, Panel, PotsApp};
+use crate::app::{AutomationSection, GoalTab, Panel, PotsApp};
 use crate::model::*;
 use crate::theme;
 
@@ -338,8 +338,13 @@ impl PotsApp {
                 None => muted("核准請求已不存在").into_any_element(),
             },
             Card::Artifact {
-                kind, title, note, ..
+                id,
+                kind,
+                title,
+                note,
             } => {
+                let artifact = *id;
+                let open = matches!(self.panel, Some(Panel::Artifact(a)) if a == artifact);
                 let what = format!("{} · {title}", kind.label());
                 card_frame(480.)
                     .id(SharedString::from(format!("artifact-{}", item.0)))
@@ -377,10 +382,10 @@ impl PotsApp {
                             .text_size(px(13.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::accent())
-                            .child("開啟"),
+                            .child(if open { "在右側開啟中" } else { "開啟" }),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.notify_unimplemented(&format!("開啟 {what}"), cx)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_artifact(artifact, window, cx)
                     }))
                     .into_any_element()
             }
@@ -482,18 +487,37 @@ impl PotsApp {
                     div()
                         .flex()
                         .gap(px(4.))
-                        .children(actions.iter().enumerate().map(|(i, label)| {
-                            let label = label.clone();
-                            link_button(
-                                SharedString::from(format!("notice-{}-{i}", item.0)),
-                                label.clone(),
-                            )
-                            .px(px(0.))
-                            .mr(px(12.))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| this.notify_unimplemented(&label, cx),
-                            ))
-                        })),
+                        // 已經恢復就不再顯示「立即恢復」。
+                        .children(
+                            actions
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, a)| {
+                                    **a != NoticeAction::ResumeAutomations
+                                        || self.current_instance().automation_pause.is_some()
+                                })
+                                .map(|(i, &action)| {
+                                    link_button(
+                                        SharedString::from(format!("notice-{}-{i}", item.0)),
+                                        action.label(),
+                                    )
+                                    .px(px(0.))
+                                    .mr(px(12.))
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| match action {
+                                            NoticeAction::ViewAutomations => {
+                                                this.open_automations(
+                                                    AutomationSection::Schedules,
+                                                    cx,
+                                                )
+                                            }
+                                            NoticeAction::ResumeAutomations => {
+                                                this.resume_automations(cx)
+                                            }
+                                        },
+                                    ))
+                                }),
+                        ),
                 )
                 .into_any_element(),
         }

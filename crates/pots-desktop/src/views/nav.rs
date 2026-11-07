@@ -8,7 +8,7 @@ use gpui_kit::{
 };
 
 use super::widgets::{Tip as _, avatar, count_badge, icon};
-use crate::app::{PotsApp, Screen};
+use crate::app::{AutomationSection, PotsApp, Screen};
 use crate::model::*;
 use crate::theme;
 
@@ -317,29 +317,32 @@ impl PotsApp {
             );
         }
 
-        let automation = |summary: AutomationSummary| {
-            if summary.paused {
-                "已暫停".to_string()
-            } else {
-                summary.active.to_string()
-            }
-        };
+        let on_automations =
+            |section| self.screen == Screen::Automations && self.automation_section == section;
         nav.child(sidebar_heading("自動化"))
             .child(
-                sidebar_row("nav-schedules".into(), false)
-                    .child(icon(IconName::CalendarClock, 16., theme::text_on_dark()))
-                    .child("排程")
-                    .child(dim(automation(inst.schedules)))
-                    .on_click(cx.listener(|this, _, _, cx| this.notify_unimplemented("排程", cx))),
+                sidebar_row(
+                    "nav-schedules".into(),
+                    on_automations(AutomationSection::Schedules),
+                )
+                .child(icon(IconName::CalendarClock, 16., theme::text_on_dark()))
+                .child("排程")
+                .child(dim(self.automation_summary(AutomationSection::Schedules)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_automations(AutomationSection::Schedules, cx)
+                })),
             )
             .child(
-                sidebar_row("nav-listeners".into(), false)
-                    .child(icon(IconName::Radio, 16., theme::text_on_dark()))
-                    .child("Listener")
-                    .child(dim(automation(inst.listeners)))
-                    .on_click(
-                        cx.listener(|this, _, _, cx| this.notify_unimplemented("Listener", cx)),
-                    ),
+                sidebar_row(
+                    "nav-listeners".into(),
+                    on_automations(AutomationSection::Listeners),
+                )
+                .child(icon(IconName::Radio, 16., theme::text_on_dark()))
+                .child("Listener")
+                .child(dim(self.automation_summary(AutomationSection::Listeners)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_automations(AutomationSection::Listeners, cx)
+                })),
             )
             .child(user_footer(inst.host.clone()))
     }

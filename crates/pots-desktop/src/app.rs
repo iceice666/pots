@@ -10,12 +10,16 @@ use gpui_kit::{
     Window, div,
 };
 
+use markdown_editor::{BlockEditorEvent, BlockEditorState};
+
 use crate::model::*;
 use crate::theme;
 
 gpui_kit::actions!(pots, [OpenOverseer]);
 
-pub fn bind_keys(cx: &mut App) {
+/// 在 `gpui_kit::init` 之後呼叫：註冊 Artifact 編輯器與 app 的快捷鍵。
+pub fn init(cx: &mut App) {
+    markdown_editor::init(cx);
     cx.bind_keys([
         // macOS 用 cmd，其他平台用 ctrl。
         KeyBinding::new(
@@ -38,6 +42,15 @@ pub enum Screen {
     Project(ProjectId),
     /// 目前實例的總管對話。
     Overseer,
+    /// 目前實例的排程與 listener。
+    Automations,
+}
+
+/// 左欄「自動化」下的兩列都進自動化頁，分別捲到各自的區塊。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutomationSection {
+    Schedules,
+    Listeners,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +75,23 @@ pub enum GoalTab {
 pub enum Panel {
     Goal(GoalId, GoalTab),
     Task(TaskId),
+    /// Artifact 編輯器，取代狀態面板。只能經由 [`PotsApp::open_artifact`] 打開。
+    Artifact(ArtifactId),
+    Schedule(ScheduleId),
+    Listener(ListenerId),
+}
+
+/// 右欄正在編輯的 artifact：每個 `##` 區段一個編輯器。
+pub struct ArtifactEditor {
+    pub artifact: ArtifactId,
+    pub sections: Vec<SectionEditor>,
+    pub scroll: ScrollHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+pub struct SectionEditor {
+    pub heading: Option<String>,
+    pub editor: Entity<BlockEditorState>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +108,10 @@ pub struct PotsApp {
     pub channel_tab: ChannelTab,
     pub panel: Option<Panel>,
     pub inbox_filter: InboxFilter,
+    pub automation_section: AutomationSection,
+    /// 自動化頁的專案篩選；`None` 是所有專案。
+    pub automation_filter: Option<ProjectId>,
+    pub artifact_editor: Option<ArtifactEditor>,
     pub send_mode: SendMode,
     /// 已展開的「用了 N 個工具」摘要。
     pub expanded_tools: HashSet<ItemId>,
@@ -90,6 +124,7 @@ pub struct PotsApp {
     pub overseer_input: Entity<TextareaState>,
     pub stream_scroll: ScrollHandle,
     pub overseer_scroll: ScrollHandle,
+    pub automations_scroll: ScrollHandle,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -168,6 +203,9 @@ impl PotsApp {
             channel_tab: ChannelTab::Chat,
             panel: None,
             inbox_filter: InboxFilter::All,
+            automation_section: AutomationSection::Schedules,
+            automation_filter: None,
+            artifact_editor: None,
             send_mode: SendMode::Queue,
             expanded_tools: HashSet::new(),
             toast: None,
@@ -177,6 +215,7 @@ impl PotsApp {
             overseer_input,
             stream_scroll: ScrollHandle::new(),
             overseer_scroll: ScrollHandle::new(),
+            automations_scroll: ScrollHandle::new(),
             focus,
             _subscriptions: subscriptions,
         };
@@ -197,7 +236,7 @@ impl PotsApp {
     pub fn current_project(&self) -> Option<&ProjectView> {
         match self.screen {
             Screen::Project(p) => self.store.project(self.instance, p),
-            Screen::Inbox(_) | Screen::Overseer => None,
+            Screen::Inbox(_) | Screen::Overseer | Screen::Automations => None,
         }
     }
 
@@ -205,10 +244,18 @@ impl PotsApp {
 
     pub fn select_instance(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
         self.instance = id;
-        // 在總管畫面切換實例時，留在新實例的總管。
-        if self.screen == Screen::Overseer {
-            self.open_overseer(window, cx);
-            return;
+        // 在總管或自動化畫面切換實例時，留在新實例的同一個畫面。
+        match self.screen {
+            Screen::Overseer => {
+                self.open_overseer(window, cx);
+                return;
+            }
+            Screen::Automations => {
+                self.automation_filter = None;
+                self.open_automations(self.automation_section, cx);
+                return;
+            }
+            _ => {}
         }
         let first = self
             .store
@@ -277,7 +324,148 @@ impl PotsApp {
     }
 
     pub fn open_panel(&mut self, panel: Option<Panel>, cx: &mut Context<Self>) {
+        debug_assert!(
+            !matches!(panel, Some(Panel::Artifact(_))),
+            "artifact 面板要用 open_artifact 打開"
+        );
         self.panel = panel;
+        cx.notify();
+    }
+
+    /// 在右欄開啟 artifact 編輯器。artifact 不在目前的 project 時，先切到它所屬的
+    /// project 的 Artifacts 分頁。
+    pub fn open_artifact(&mut self, id: ArtifactId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((project, artifact)) = self.store.artifact(self.instance, id) else {
+            self.toast = Some("找不到這份 artifact，可能已經刪除。".into());
+            cx.notify();
+            return;
+        };
+        let project = project.id;
+        let body = artifact.body.clone();
+        let agent_writing = artifact.agent_writing.clone();
+
+        if self.screen != Screen::Project(project) {
+            self.open_project(self.instance, project, window, cx);
+            self.channel_tab = ChannelTab::Artifacts;
+        }
+
+        // 同一份已經開著就沿用，保留游標與復原紀錄。
+        if self
+            .artifact_editor
+            .as_ref()
+            .is_none_or(|e| e.artifact != id)
+        {
+            let scroll = ScrollHandle::new();
+            let mut sections = Vec::new();
+            let mut subscriptions = Vec::new();
+            for (ix, section) in split_sections(&body).into_iter().enumerate() {
+                // agent 正在寫的區段唯讀，其他區段可以照常編輯。
+                let readonly = section.heading.is_some() && section.heading == agent_writing;
+                let editor = cx.new(|cx| {
+                    let mut state = BlockEditorState::new(window, cx).with_source(&section.source);
+                    state.set_scroll_handle(scroll.clone());
+                    if readonly {
+                        state.set_readonly(true, cx);
+                    }
+                    state
+                });
+                subscriptions.push(cx.subscribe(
+                    &editor,
+                    move |this, _, event: &BlockEditorEvent, cx| {
+                        if let BlockEditorEvent::Changed { .. } = event {
+                            this.on_section_edited(ix, cx);
+                        }
+                    },
+                ));
+                sections.push(SectionEditor {
+                    heading: section.heading,
+                    editor,
+                });
+            }
+            self.artifact_editor = Some(ArtifactEditor {
+                artifact: id,
+                sections,
+                scroll,
+                _subscriptions: subscriptions,
+            });
+        }
+        self.panel = Some(Panel::Artifact(id));
+        cx.notify();
+    }
+
+    fn on_section_edited(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(editor) = &self.artifact_editor else {
+            return;
+        };
+        let sources: Vec<String> = editor
+            .sections
+            .iter()
+            .map(|s| s.editor.read(cx).source())
+            .collect();
+        let heading = sources.get(ix).and_then(|s| section_heading(s));
+        let artifact = editor.artifact;
+        if let Some(s) = self
+            .artifact_editor
+            .as_mut()
+            .and_then(|e| e.sections.get_mut(ix))
+        {
+            s.heading = heading.clone();
+        }
+        self.store.edit_artifact(
+            self.instance,
+            artifact,
+            join_sections(sources.iter().map(String::as_str)),
+            heading,
+        );
+        cx.notify();
+    }
+
+    /// 切到目前實例的自動化頁，並捲到指定區塊。
+    pub fn open_automations(&mut self, section: AutomationSection, cx: &mut Context<Self>) {
+        if self.screen != Screen::Automations {
+            self.panel = None;
+        }
+        self.screen = Screen::Automations;
+        self.automation_section = section;
+        // 捲動區的子元素：暫停橫幅（若有）、排程、listener。
+        let paused = self.current_instance().automation_pause.is_some();
+        match section {
+            AutomationSection::Schedules => self.automations_scroll.scroll_to_top_of_item(0),
+            AutomationSection::Listeners => self
+                .automations_scroll
+                .scroll_to_top_of_item(if paused { 2 } else { 1 }),
+        }
+        cx.notify();
+    }
+
+    pub fn set_schedule_enabled(&mut self, id: ScheduleId, enabled: bool, cx: &mut Context<Self>) {
+        self.store.set_schedule_enabled(self.instance, id, enabled);
+        cx.notify();
+    }
+
+    pub fn set_listener_enabled(&mut self, id: ListenerId, enabled: bool, cx: &mut Context<Self>) {
+        self.store.set_listener_enabled(self.instance, id, enabled);
+        cx.notify();
+    }
+
+    pub fn delete_schedule(&mut self, id: ScheduleId, cx: &mut Context<Self>) {
+        self.store.delete_schedule(self.instance, id);
+        if self.panel == Some(Panel::Schedule(id)) {
+            self.panel = None;
+        }
+        cx.notify();
+    }
+
+    pub fn delete_listener(&mut self, id: ListenerId, cx: &mut Context<Self>) {
+        self.store.delete_listener(self.instance, id);
+        if self.panel == Some(Panel::Listener(id)) {
+            self.panel = None;
+        }
+        cx.notify();
+    }
+
+    pub fn resume_automations(&mut self, cx: &mut Context<Self>) {
+        self.store.resume_automations(self.instance);
         cx.notify();
     }
 
@@ -428,6 +616,7 @@ impl Render for PotsApp {
             Screen::Inbox(scope) => self.render_inbox(scope, cx).into_any_element(),
             Screen::Project(_) => self.render_channel(window, cx).into_any_element(),
             Screen::Overseer => self.render_overseer(cx).into_any_element(),
+            Screen::Automations => self.render_automations_page(cx).into_any_element(),
         };
         // 總管畫面的右欄固定是專案概況與記憶；其他畫面是狀態面板。
         let panel = match self.screen {

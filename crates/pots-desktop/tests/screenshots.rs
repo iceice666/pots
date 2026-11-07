@@ -23,9 +23,10 @@ mod shots {
         AnyWindowHandle, AppContext as _, Bounds, Entity, HeadlessAppContext, WindowBounds,
         WindowOptions, px, size,
     };
-    use pots_desktop::app::{Panel, PotsApp};
+    use markdown_editor::{EditorCommand, MarkKind};
+    use pots_desktop::app::{AutomationSection, ChannelTab, Panel, PotsApp};
     use pots_desktop::mock;
-    use pots_desktop::model::{InboxAction, TaskId};
+    use pots_desktop::model::{ArtifactKind, InboxAction, TaskId};
 
     struct Shooter {
         cx: HeadlessAppContext,
@@ -43,7 +44,7 @@ mod shots {
             );
             cx.update(|cx| {
                 gpui_kit::init(cx);
-                pots_desktop::app::bind_keys(cx);
+                pots_desktop::app::init(cx);
             });
             let (window, view) = cx
                 .update(|cx| {
@@ -158,5 +159,72 @@ mod shots {
             app.send_composer(window, cx);
         });
         s.shot("07-queued-message");
+
+        // 對話裡的 Spec 卡片→右欄編輯器；切到 Artifacts 分頁看列表。
+        s.update(|app, window, cx| {
+            let spec = app
+                .current_project()
+                .and_then(|p| p.artifacts.iter().find(|a| a.kind == ArtifactKind::Spec))
+                .map(|a| a.id)
+                .expect("auth-service 有 Spec");
+            app.open_artifact(spec, window, cx);
+            app.channel_tab = ChannelTab::Artifacts;
+        });
+        s.shot("08-artifact-editor");
+
+        // 把「範圍」整段加粗：這段標成你改過。agent 正在寫的「測試計畫」唯讀，加粗不會生效。
+        s.update(|app, _, cx| {
+            let editor = app.artifact_editor.as_ref().expect("編輯器已開啟");
+            let section = |name: &str| {
+                editor
+                    .sections
+                    .iter()
+                    .find(|s| s.heading.as_deref() == Some(name))
+                    .map(|s| s.editor.clone())
+                    .expect("區段存在")
+            };
+            for name in ["範圍", "測試計畫"] {
+                section(name).update(cx, |state, cx| {
+                    let _ = state.run(EditorCommand::SelectAll, cx);
+                    let _ = state.run(EditorCommand::ToggleMark(MarkKind::Bold), cx);
+                });
+            }
+        });
+        s.update(|app, _, _| {
+            let Some(Panel::Artifact(id)) = app.panel else {
+                panic!("右欄應該是 artifact");
+            };
+            let a = app.store.artifact(app.instance, id).unwrap().1;
+            assert!(a.body.contains("**後端新增"), "編輯寫回全文");
+            // 整段加粗連標題也變成「**範圍**」，所以用包含比對。
+            assert!(
+                a.human_edits.iter().any(|(h, _)| h.contains("範圍")),
+                "標示改過的區段"
+            );
+            assert!(a.edited_at("測試計畫").is_none(), "agent 寫入中的區段唯讀");
+        });
+        s.shot("08b-artifact-edited");
+
+        s.update(|app, _, cx| {
+            app.open_automations(AutomationSection::Listeners, cx);
+            let first = app.current_instance().listeners[0].id;
+            app.open_panel(Some(Panel::Listener(first)), cx);
+        });
+        s.shot("09-automations");
+
+        s.update(|app, window, cx| {
+            let home = app.store.instances[1].id;
+            let auth = app.store.instances[1].projects[0].id;
+            app.open_project(home, auth, window, cx);
+            app.channel_tab = ChannelTab::Automations;
+            let schedule = app
+                .current_instance()
+                .schedules_for(Some(auth))
+                .next()
+                .map(|s| s.id)
+                .expect("auth-service 有排程");
+            app.open_panel(Some(Panel::Schedule(schedule)), cx);
+        });
+        s.shot("10-channel-automations");
     }
 }
