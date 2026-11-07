@@ -24,7 +24,7 @@ mod shots {
         WindowOptions, px, size,
     };
     use markdown_editor::{EditorCommand, MarkKind};
-    use pots_desktop::app::{AutomationSection, ChannelTab, Panel, PotsApp};
+    use pots_desktop::app::{AutomationSection, ChannelTab, Panel, PotsApp, SettingsTab};
     use pots_desktop::mock;
     use pots_desktop::model::{ArtifactKind, InboxAction, TaskId};
 
@@ -89,6 +89,11 @@ mod shots {
                     view.update(cx, |app, cx| f(app, window, cx));
                 })
                 .expect("update window");
+        }
+
+        fn view_settings_closed(&mut self) -> bool {
+            let view = self.view.clone();
+            self.cx.update(|cx| view.read(cx).settings.is_none())
         }
 
         /// 等連線執行緒送來的事件套用完，直到 `done` 成立（最多 10 秒）。
@@ -396,7 +401,13 @@ mod shots {
         });
         s.shot("10-channel-automations");
 
-        s.update(|app, _, cx| app.open_settings(cx));
+        s.update(|app, _, cx| app.open_settings(SettingsTab::Providers, cx));
         s.shot("10b-settings");
+
+        s.update(|app, _, cx| app.open_settings(SettingsTab::About, cx));
+        s.shot("10c-settings-about");
+
+        s.update(|app, _, cx| app.close_settings(cx));
+        assert!(s.view_settings_closed(), "關閉後沒有設定視窗");
     }
 }

@@ -20,7 +20,7 @@ use crate::model::*;
 use crate::sync::{self, Sync};
 use crate::theme;
 
-gpui_kit::actions!(pots, [OpenOverseer]);
+gpui_kit::actions!(pots, [OpenOverseer, CloseSettings]);
 
 /// 在 `gpui_kit::init` 之後呼叫：註冊 Artifact 編輯器與 app 的快捷鍵。
 pub fn init(cx: &mut App) {
@@ -36,6 +36,8 @@ pub fn init(cx: &mut App) {
             OpenOverseer,
             None,
         ),
+        // 設定視窗開著時關掉它；沒開時讓 Esc 照常往外傳（例如輸入框）。
+        KeyBinding::new("escape", CloseSettings, Some("PotsApp")),
     ]);
 }
 
@@ -49,8 +51,26 @@ pub enum Screen {
     Overseer,
     /// 目前實例的排程與 listener。
     Automations,
-    /// 目前實例的設定（模型 provider）。
-    Settings,
+}
+
+/// 設定視窗左側的類別。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsTab {
+    /// 模型 provider：ChatGPT 方案與 API provider。
+    Providers,
+    /// 版本與目前實例的資訊。
+    About,
+}
+
+impl SettingsTab {
+    pub const ALL: [Self; 2] = [Self::Providers, Self::About];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Providers => "模型 Provider",
+            Self::About => "關於",
+        }
+    }
 }
 
 /// 設定頁正在新增或修改的 provider。
@@ -169,6 +189,8 @@ pub struct PotsApp {
     pub goal_note: Entity<InputState>,
     pub worker_note: Entity<InputState>,
     pub overseer_input: Entity<TextareaState>,
+    /// 設定視窗開著時是目前的類別；`None` 是關著。
+    pub settings: Option<SettingsTab>,
     pub provider_editor: Option<ProviderEditor>,
     next_test_request: u64,
     /// 左欄「新增專案」的輸入框；`None` 時顯示按鈕。
@@ -266,6 +288,7 @@ impl PotsApp {
             worker_note,
             overseer_input,
             new_project: None,
+            settings: None,
             provider_editor: None,
             next_test_request: 0,
             stream_scroll: ScrollHandle::new(),
@@ -500,10 +523,25 @@ impl PotsApp {
 
     // ---- 設定 ---------------------------------------------------------------
 
-    pub fn open_settings(&mut self, cx: &mut Context<Self>) {
-        self.screen = Screen::Settings;
-        self.panel = None;
+    /// 開啟設定視窗（目前實例的設定）。已經開著時切到指定類別。
+    pub fn open_settings(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        self.settings = Some(tab);
         cx.notify();
+    }
+
+    /// 關掉設定視窗，丟掉打到一半的 provider 表單（可能含 API key）。
+    pub fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings = None;
+        self.provider_editor = None;
+        cx.notify();
+    }
+
+    fn on_close_settings(&mut self, _: &CloseSettings, _: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            self.close_settings(cx);
+        } else {
+            cx.propagate();
+        }
     }
 
     /// 設定頁的動作在假資料模式下沒有服務可以存，只提示。回傳是否送出。
@@ -699,7 +737,7 @@ impl PotsApp {
     pub fn current_project(&self) -> Option<&ProjectView> {
         match self.screen {
             Screen::Project(p) => self.store.project(self.instance, p),
-            Screen::Inbox(_) | Screen::Overseer | Screen::Automations | Screen::Settings => None,
+            Screen::Inbox(_) | Screen::Overseer | Screen::Automations => None,
         }
     }
 
@@ -720,10 +758,6 @@ impl PotsApp {
             Screen::Automations => {
                 self.automation_filter = None;
                 self.open_automations(self.automation_section, cx);
-                return;
-            }
-            Screen::Settings => {
-                self.open_settings(cx);
                 return;
             }
             _ => {}
@@ -990,7 +1024,7 @@ impl PotsApp {
                 if let Some(item) = self.store.approval(id) {
                     self.instance = item.instance;
                 }
-                self.open_settings(cx);
+                self.open_settings(SettingsTab::Providers, cx);
             }
             InboxAction::ViewDiff | InboxAction::EditConditions => {
                 self.notify_unimplemented(action.label(), cx);
@@ -1104,7 +1138,6 @@ impl Render for PotsApp {
             Screen::Project(_) => self.render_channel(window, cx).into_any_element(),
             Screen::Overseer => self.render_overseer(cx).into_any_element(),
             Screen::Automations => self.render_automations_page(cx).into_any_element(),
-            Screen::Settings => self.render_settings(cx).into_any_element(),
         };
         // 總管畫面的右欄固定是專案概況與記憶；其他畫面是狀態面板。
         let panel = match self.screen {
@@ -1116,6 +1149,7 @@ impl Render for PotsApp {
             .key_context("PotsApp")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_open_overseer))
+            .on_action(cx.listener(Self::on_close_settings))
             .relative()
             .flex()
             .size_full()
@@ -1130,6 +1164,7 @@ impl Render for PotsApp {
             })
             .child(center)
             .children(panel)
+            .children(self.render_settings_dialog(cx))
             .children(self.render_toast(cx))
     }
 }

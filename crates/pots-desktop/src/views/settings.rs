@@ -1,5 +1,6 @@
-//! 設定：目前實例的模型 provider。左下角「設定」進入，佔中欄。
+//! 設定視窗：左下角「設定」打開，蓋在主畫面上；左邊是類別，右邊是內容。
 //!
+//! 「模型 Provider」類別：
 //! 內建的 ChatGPT 方案在第一張，可以登入、登出、指定模型；另外可以新增 OpenAI 或
 //! Anthropic 相容的 API。對話 agent 用「使用中」的那一個。API key 只送給服務、存在
 //! 實例的資料目錄，畫面上只看得到末四碼。
@@ -13,7 +14,7 @@ use gpui_kit::{
 };
 
 use super::widgets::{icon, link_button, primary_button, secondary_button, tag};
-use crate::app::{PotsApp, ProviderEditor, ProviderTest};
+use crate::app::{PotsApp, ProviderEditor, ProviderTest, SettingsTab};
 use crate::model::*;
 use crate::theme;
 
@@ -83,57 +84,174 @@ fn auth_status(auth: &ModelAuthView) -> (String, gpui_kit::Hsla) {
 }
 
 impl PotsApp {
-    pub fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 設定視窗：蓋在主畫面上，左邊是類別，右邊是內容。點背景、右上角或按 Esc 關閉。
+    pub fn render_settings_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tab = self.settings?;
         let inst = self.current_instance();
-        let providers = &inst.providers;
 
-        let header = div()
+        let mut nav = div()
+            .flex_none()
+            .w(px(220.))
+            .h_full()
             .flex()
             .flex_col()
-            .gap(px(4.))
-            .px(px(32.))
-            .pt(px(20.))
-            .pb(px(16.))
-            .border_b_1()
+            .gap(px(2.))
+            .p(px(12.))
+            .bg(theme::subtle_bg())
+            .border_r_1()
             .border_color(theme::border())
-            .child(
-                div()
-                    .text_size(px(20.))
-                    .font_weight(FontWeight::BOLD)
-                    .child(format!("設定 · {}", inst.name)),
-            )
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .text_color(theme::text_muted())
-                    .child("這些設定屬於這個實例；連到其他實例時各自設定。"),
-            );
-
-        let mut list = div()
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .max_w(px(760.))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
+                    .px(px(10.))
+                    .pt(px(6.))
+                    .pb(px(12.))
                     .child(
                         div()
                             .text_size(px(16.))
                             .font_weight(FontWeight::BOLD)
-                            .child("模型 Provider"),
+                            .child("設定"),
                     )
                     .child(
                         div()
-                            .text_size(px(13.))
+                            .text_size(px(12.))
                             .text_color(theme::text_muted())
-                            .child(
-                                "對話 agent 用「使用中」的 provider 推論。API key 只存在這個實例的資料目錄，設定好後不會再顯示。",
-                            ),
+                            .child(format!("{} · {}", inst.name, inst.kind.label())),
                     ),
             );
+        for t in SettingsTab::ALL {
+            let selected = t == tab;
+            let glyph = match t {
+                SettingsTab::Providers => IconName::Sparkles,
+                SettingsTab::About => IconName::Info,
+            };
+            nav = nav.child(
+                div()
+                    .id(SharedString::from(format!("settings-tab-{t:?}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(px(14.))
+                    .when_else(
+                        selected,
+                        |d| d.bg(theme::white()).font_weight(FontWeight::SEMIBOLD),
+                        |d| {
+                            d.text_color(theme::text_muted())
+                                .hover(|s| s.bg(theme::white()))
+                        },
+                    )
+                    .child(icon(
+                        glyph,
+                        15.,
+                        if selected {
+                            theme::text()
+                        } else {
+                            theme::text_muted()
+                        },
+                    ))
+                    .child(t.label())
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_settings(t, cx))),
+            );
+        }
+
+        let body = match tab {
+            SettingsTab::Providers => self.render_providers_section(cx).into_any_element(),
+            SettingsTab::About => self.render_about_section().into_any_element(),
+        };
+        let content = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(28.))
+                    .pt(px(20.))
+                    .pb(px(12.))
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(tab.label()),
+                    )
+                    .child(
+                        div()
+                            .id("settings-close")
+                            .p(px(6.))
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::subtle_bg()))
+                            .child(icon(IconName::X, 16., theme::text_muted()))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(28.))
+                    .pb(px(24.))
+                    .child(body),
+            );
+
+        let dialog = div()
+            .id("settings-dialog")
+            .w(px(980.))
+            .max_w(gpui_kit::relative(0.92))
+            .h(px(680.))
+            .max_h(gpui_kit::relative(0.9))
+            .flex()
+            .rounded(px(12.))
+            .overflow_hidden()
+            .bg(theme::white())
+            .shadow_lg()
+            .child(nav)
+            .child(content)
+            // 視窗裡的點擊不往外傳到背景，免得關掉。
+            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation()
+            })
+            .on_click(|_, _, cx| cx.stop_propagation());
+
+        Some(
+            div()
+                .id("settings-backdrop")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_kit::hsla(0., 0., 0., 0.45))
+                .occlude()
+                .child(dialog)
+                .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+                .into_any_element(),
+        )
+    }
+
+    fn render_providers_section(&self, cx: &mut Context<Self>) -> Div {
+        let inst = self.current_instance();
+        let providers = &inst.providers;
+
+        let mut list = div().flex().flex_col().gap(px(12.)).child(
+            div()
+                .text_size(px(13.))
+                .text_color(theme::text_muted())
+                .child(
+                    "對話 agent 用「使用中」的 provider 推論。API key 只存在這個實例的資料目錄，設定好後不會再顯示。",
+                ),
+        );
 
         if providers.active.is_none() {
             list = list.child(
@@ -199,22 +317,74 @@ impl PotsApp {
             }
         }
 
+        list
+    }
+
+    fn render_about_section(&self) -> Div {
+        let inst = self.current_instance();
+        let (status, color) = match inst.connection {
+            ConnectionState::Connected => ("已連線", theme::ok()),
+            ConnectionState::Reconnecting => ("重新連線中", theme::warn_text()),
+            ConnectionState::Offline => ("離線", theme::danger()),
+        };
+        let mode = if self.live.is_some() {
+            "連著實例的服務"
+        } else {
+            "假資料（--mock）"
+        };
         div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
             .flex()
             .flex_col()
-            .child(header)
+            .gap(px(12.))
             .child(
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(32.))
-                    .py(px(20.))
-                    .child(list),
+                card()
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Pots"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(detail_row("版本", env!("CARGO_PKG_VERSION")))
+                            .child(detail_row("模式", mode)),
+                    ),
+            )
+            .child(
+                card()
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("這個實例"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(detail_row("名稱", inst.name.clone()))
+                            .child(detail_row("形態", inst.kind.label()))
+                            .child(detail_row("位置", inst.host.clone()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(12.))
+                                    .text_size(px(13.))
+                                    .child(
+                                        div()
+                                            .w(px(72.))
+                                            .flex_none()
+                                            .text_color(theme::text_muted())
+                                            .child("連線"),
+                                    )
+                                    .child(div().text_color(color).child(status)),
+                            )
+                            .child(detail_row("實例 ID", inst.id.to_string())),
+                    ),
             )
     }
 

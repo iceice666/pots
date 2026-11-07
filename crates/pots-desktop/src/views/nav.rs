@@ -9,7 +9,7 @@ use gpui_kit::{
 };
 
 use super::widgets::{Tip as _, count_badge, icon};
-use crate::app::{AutomationSection, PotsApp, Screen};
+use crate::app::{AutomationSection, PotsApp, Screen, SettingsTab};
 use crate::model::*;
 use crate::theme;
 
@@ -381,8 +381,11 @@ impl PotsApp {
                     .border_t_1()
                     .border_color(theme::sidebar_active())
                     .child(
-                        settings_footer(self.screen == Screen::Settings, inst.host.clone())
-                            .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
+                        settings_footer(self.settings.is_some(), inst.host.clone()).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.open_settings(SettingsTab::Providers, cx)
+                            }),
+                        ),
                     ),
             )
     }
@@ -449,8 +452,11 @@ impl PotsApp {
                 .border_t_1()
                 .border_color(theme::sidebar_active())
                 .child(
-                    settings_footer(false, format!("{connected} 個實例已連線"))
-                        .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
+                    settings_footer(false, format!("{connected} 個實例已連線")).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.open_settings(SettingsTab::Providers, cx)
+                        }),
+                    ),
                 ),
         )
     }

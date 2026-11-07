@@ -19,7 +19,7 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 
 - 資料目錄預設是系統的應用程式資料目錄下的 `pots`（macOS：`~/Library/Application Support/pots`），可用 `POTS_DATA_DIR` 或 `--data-dir` 覆寫。
 - app 讀資料目錄的 `server.json` 找服務；連不上就用 `--serve` 啟動自己當子行程（獨立的 process group），日誌寫到資料目錄的 `server.log`。關掉視窗後服務繼續跑，用 `kill` 或 ctrl-c 結束；目前還沒有系統匣或選單列。
-- 第一次使用：Inbox 會出現「設定模型 provider」，按「開啟設定」（或左下角「設定」）選一個：
+- 第一次使用：Inbox 會出現「設定模型 provider」，按「開啟設定」（或左下角「設定」）打開設定視窗，在「模型 Provider」選一個：
   - **ChatGPT 方案**：按「登入」開瀏覽器授權，再「設為使用中」。模型留空就用帳號清單的第一個。
   - **OpenAI 相容 API**：base URL 到 `/v1` 為止（OpenAI、OpenRouter、Ollama 的 `http://localhost:11434/v1` 等），本機服務可以不填 key。
   - **Anthropic 相容 API**：base URL 例如 `https://api.anthropic.com`，需要 key。
@@ -33,7 +33,7 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | 實例與 project | 本機實例、建立 project、project 列表 |
 | 頻道對話 | 傳訊息（排隊／改方向）、串流回覆、工具摘要、停止 |
 | Inbox | 還沒設定 provider、ChatGPT 需要登入時的提示 |
-| 設定 | 左下角進入：模型 provider 的新增、編輯、測試連線、刪除、切換使用中；ChatGPT 登入與登出 |
+| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；「關於」：版本與實例資訊 |
 | 其他 | Goal、任務、Artifact、自動化、總管在 live 模式是空的，等之後的里程碑 |
 
 ## 已有的畫面（`--mock` 假資料）
@@ -71,7 +71,7 @@ cargo test -p pots-desktop --test screenshots    # 用離屏 renderer 輸出主�
 cargo run -p pots-desktop --example probe -- <資料目錄> project 名稱 send 你好   # 不開視窗直接和服務說話
 ```
 
-截圖裡的 `11-live-*` 到 `14-live-*` 會在背景起一個真的服務（模型換成腳本），走一次「還沒設定 provider → 設定頁新增 OpenAI 相容 API、測試連線、儲存 → 建立 project → 傳訊息 → 收到串流回覆」。
+截圖裡的 `11-live-*` 到 `14-live-*` 會在背景起一個真的服務（模型換成腳本），走一次「還沒設定 provider → 設定視窗新增 OpenAI 相容 API、測試連線、儲存 → 建立 project → 傳訊息 → 收到串流回覆」。
 
 截圖寫到 `target/tmp/screenshots/`，需要 Metal（macOS）或 WGPU（Linux）。這只是產生圖檔方便檢查版面，不是 golden-image 比對。
 
