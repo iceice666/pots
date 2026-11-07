@@ -39,14 +39,16 @@ fn main() {
     std::thread::spawn(move || {
         futures::executor::block_on(async {
             while let Some(event) = events.next().await {
-                match &event {
-                    ConnEvent::Server(ServerEvent::Snapshot { instance, .. }) => {
-                        *seen.lock().unwrap() = instance.projects.last().map(|p| p.id);
+                if let ConnEvent::Server(ev) = &event {
+                    match ev.as_ref() {
+                        ServerEvent::Snapshot { instance, .. } => {
+                            *seen.lock().unwrap() = instance.projects.last().map(|p| p.id);
+                        }
+                        ServerEvent::ProjectAdded { project, .. } => {
+                            *seen.lock().unwrap() = Some(project.id);
+                        }
+                        _ => {}
                     }
-                    ConnEvent::Server(ServerEvent::ProjectAdded { project, .. }) => {
-                        *seen.lock().unwrap() = Some(project.id);
-                    }
-                    _ => {}
                 }
                 println!("{}", describe(&event));
             }

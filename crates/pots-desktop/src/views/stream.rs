@@ -102,6 +102,22 @@ fn goal_progress(goal: &GoalView) -> Div {
         .child(seg(goal.count(TaskBucket::Waiting), theme::warn_strong()))
 }
 
+/// Goal 卡片最後一行：Planner 備註（結束的 Goal 是結果），有預算時加上已用比例。
+pub fn goal_note(goal: &GoalView) -> String {
+    let mut note = match &goal.state {
+        GoalState::Active => goal.planner_note.clone(),
+        GoalState::Done { summary } => format!("已完成：{summary}"),
+        GoalState::Cancelled { reason } => format!("已取消：{reason}"),
+    };
+    if goal.budget_used_pct > 0 {
+        if !note.is_empty() {
+            note.push_str(" · ");
+        }
+        note.push_str(&format!("預算已用 {}%", goal.budget_used_pct));
+    }
+    note
+}
+
 pub fn goal_counts(goal: &GoalView) -> Div {
     let running = goal.count(TaskBucket::Running);
     let ci = goal.waiting_ci();
@@ -389,6 +405,40 @@ impl PotsApp {
                     }))
                     .into_any_element()
             }
+            Card::Milestone { goal, text } => {
+                let gid = *goal;
+                let title = self
+                    .store
+                    .goal(self.instance, gid)
+                    .map_or_else(|| "Goal 已不存在".to_string(), |g| g.title.clone());
+                card_frame(520.)
+                    .id(SharedString::from(format!("milestone-{}", item.0)))
+                    .flex_row()
+                    .items_start()
+                    .gap(px(10.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .rounded(px(10.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::subtle_bg()))
+                    .child(icon(IconName::Flag, 16., theme::accent()).mt(px(2.)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(muted(format!("Planner · {title}")))
+                            .child(div().child(text.clone())),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.store.goal(this.instance, gid).is_some() {
+                            this.open_panel(Some(Panel::Goal(gid, GoalTab::Tasks)), cx)
+                        }
+                    }))
+                    .into_any_element()
+            }
             Card::RemoteGoal {
                 project,
                 title,
@@ -547,6 +597,9 @@ impl PotsApp {
                             .font_weight(FontWeight::BOLD)
                             .child(goal.title.clone()),
                     )
+                    .when(!goal.state.is_active(), |d| {
+                        d.child(tag(goal.state.label(), theme::text_muted(), theme::track()))
+                    })
                     .child(
                         div()
                             .ml_auto()
@@ -562,10 +615,7 @@ impl PotsApp {
             )
             .child(goal_progress(goal))
             .child(goal_counts(goal))
-            .child(muted(format!(
-                "{} · 預算已用 {}%",
-                goal.planner_note, goal.budget_used_pct
-            )))
+            .child(muted(goal_note(goal)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_panel(Some(Panel::Goal(gid, GoalTab::Tasks)), cx)
             }))

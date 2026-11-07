@@ -38,7 +38,7 @@ pub trait Endpoint: Send + 'static {
 #[derive(Debug)]
 pub enum ConnEvent {
     State(ConnectionState),
-    Server(ServerEvent),
+    Server(Box<ServerEvent>),
     /// 找不到或啟動不了服務等需要讓人知道的錯誤。
     Problem(String),
 }
@@ -270,7 +270,7 @@ async fn session(
                     }
                     state.last_seq = seq;
                 }
-                if events.unbounded_send(ConnEvent::Server(event)).is_err() {
+                if events.unbounded_send(ConnEvent::Server(Box::new(event))).is_err() {
                     return Ok(());
                 }
             }
@@ -347,6 +347,8 @@ mod tests {
                     agent_state: AgentState::Idle,
                     items: vec![StreamItemView { id: b, ..echo }],
                     memory: MemoryView::default(),
+                    goals: vec![],
+                    artifacts: vec![],
                 }],
                 model_auth: ModelAuthView::SignedOut,
                 providers: ProvidersView::default(),

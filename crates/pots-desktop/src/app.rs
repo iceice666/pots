@@ -158,16 +158,60 @@ pub enum Panel {
 }
 
 /// 右欄正在編輯的 artifact：每個 `##` 區段一個編輯器。
+///
+/// 編輯先留在編輯器裡（草稿），按「儲存」才帶著 `base_rev` 送給服務；期間 agent 改過的話
+/// 服務以區段合併。沒有草稿時，服務推來的新版本直接換掉編輯器內容。
 pub struct ArtifactEditor {
     pub artifact: ArtifactId,
     pub sections: Vec<SectionEditor>,
     pub scroll: ScrollHandle,
+    /// 編輯器內容根據的版本，儲存時當 `base_rev`。
+    pub base_rev: u32,
+    /// `base_rev` 那一版的全文，用來判斷有沒有草稿。
+    base_body: String,
+    /// 有還沒儲存的修改。
+    pub dirty: bool,
+    /// 已送出儲存，等服務回覆；儲存期間編輯器唯讀。
+    pub saving: bool,
+    /// 送出的草稿，用來認出服務回的是不是這次儲存的結果。
+    sent: Option<String>,
+    /// 有草稿時服務更新到的版本（儲存時會合併）。
+    pub remote_rev: Option<u32>,
+    /// 儲存被拒絕的原因。
+    pub error: Option<String>,
+    /// 版本紀錄；`None` 是編輯模式。
+    pub history: Option<ArtifactHistory>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// 版本紀錄模式。
+pub struct ArtifactHistory {
+    /// 由新到舊；還沒收到服務回覆時是 `None`。
+    pub revisions: Option<Vec<ArtifactRevisionView>>,
+    /// 選取的版本（`revisions` 的索引）。
+    pub selected: usize,
 }
 
 pub struct SectionEditor {
     pub heading: Option<String>,
     pub editor: Entity<BlockEditorState>,
+    /// 這段原本的 Markdown。編輯器會把內容正規化（例如 `*` 清單改成 `-`），
+    /// 沒動過的區段儲存時送原文，免得被當成你改過、在合併時和 agent 的修改衝突。
+    raw: String,
+    /// 編輯器剛載入時的 `source()`，用來判斷這段有沒有被你動過。
+    initial: String,
+}
+
+impl SectionEditor {
+    /// 這段目前要存的 Markdown：沒動過就是原文。
+    fn draft(&self, cx: &App) -> String {
+        let source = self.editor.read(cx).source();
+        if source == self.initial {
+            self.raw.clone()
+        } else {
+            source
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,6 +431,15 @@ impl PotsApp {
         let instance = live.instance;
         match event {
             ConnEvent::State(state) => {
+                if state != ConnectionState::Connected
+                    && let Some(editor) = &mut self.artifact_editor
+                    && editor.saving
+                {
+                    editor.saving = false;
+                    editor.sent = None;
+                    editor.error = Some("連線中斷，請再儲存一次".into());
+                    set_readonly(editor, false, cx);
+                }
                 // 斷線時等不到回覆了。
                 if state != ConnectionState::Connected
                     && let Some(editor) = &mut self.provider_editor
@@ -417,7 +470,7 @@ impl PotsApp {
             }
             ConnEvent::Problem(problem) => self.toast = Some(problem),
             ConnEvent::Server(event) => {
-                let applied = live.sync.apply(&mut self.store, instance, event);
+                let applied = live.sync.apply(&mut self.store, instance, *event);
                 if let Some((old, new)) = applied.rekeyed {
                     live.instance = new;
                     if self.instance == old {
@@ -433,18 +486,36 @@ impl PotsApp {
                     cx.open_url(&url);
                 }
                 if let Some(toast) = applied.toast {
-                    // 儲存 provider 被拒絕：原因顯示在表單裡。
-                    match (&mut self.provider_editor, &mut self.memory_model_editor) {
-                        (Some(editor), _) if editor.saving => {
+                    // 儲存 provider 或 artifact 被拒絕：原因顯示在表單或編輯器裡。
+                    match (
+                        &mut self.provider_editor,
+                        &mut self.memory_model_editor,
+                        &mut self.artifact_editor,
+                    ) {
+                        (Some(editor), _, _) if editor.saving => {
                             editor.saving = false;
                             editor.error = Some(toast);
                         }
-                        (_, Some(editor)) if editor.saving => {
+                        (_, Some(editor), _) if editor.saving => {
                             editor.saving = false;
                             editor.error = Some(toast);
+                        }
+                        (_, _, Some(editor)) if editor.saving => {
+                            editor.saving = false;
+                            editor.sent = None;
+                            editor.error = Some(toast);
+                            set_readonly(editor, false, cx);
                         }
                         _ => self.toast = Some(toast),
                     }
+                }
+                if let Some((id, revisions)) = applied.artifact_history
+                    && let Some(editor) = &mut self.artifact_editor
+                    && editor.artifact == id
+                    && let Some(history) = &mut editor.history
+                {
+                    history.selected = 0;
+                    history.revisions = Some(revisions);
                 }
                 if applied.providers_changed
                     && self.memory_model_editor.as_ref().is_some_and(|e| e.saving)
@@ -516,6 +587,11 @@ impl PotsApp {
                 }
                 if matches!(self.screen, Screen::Project(_)) {
                     self.stream_scroll.scroll_to_bottom();
+                }
+                if applied.artifacts_reset {
+                    self.on_artifacts_reset(window, cx);
+                } else if let Some(id) = applied.artifact_changed {
+                    self.on_artifact_changed(id, window, cx);
                 }
             }
         }
@@ -976,7 +1052,7 @@ impl PotsApp {
         self.panel = self
             .store
             .project(instance, project)
-            .and_then(|p| p.goals.first())
+            .and_then(|p| p.goals.iter().find(|g| g.state.is_active()))
             .map(|g| Panel::Goal(g.id, GoalTab::Tasks));
         if let Some(p) = self.store.project_mut(instance, project) {
             p.unread = 0;
@@ -1029,88 +1105,308 @@ impl PotsApp {
     /// 在右欄開啟 artifact 編輯器。artifact 不在目前的 project 時，先切到它所屬的
     /// project 的 Artifacts 分頁。
     pub fn open_artifact(&mut self, id: ArtifactId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((project, artifact)) = self.store.artifact(self.instance, id) else {
+        let Some((project, _)) = self.store.artifact(self.instance, id) else {
             self.toast = Some("找不到這份 artifact，可能已經刪除。".into());
             cx.notify();
             return;
         };
         let project = project.id;
-        let body = artifact.body.clone();
-        let agent_writing = artifact.agent_writing.clone();
+        // 換到別份會丟掉草稿。
+        if let Some(editor) = &self.artifact_editor
+            && editor.artifact != id
+            && editor.dirty
+            && self.store.instances.iter().any(|i| {
+                i.projects
+                    .iter()
+                    .any(|p| p.artifacts.iter().any(|a| a.id == editor.artifact))
+            })
+        {
+            self.toast = Some("目前的 artifact 有還沒儲存的修改，先儲存或放棄。".into());
+            if let Some(Panel::Artifact(_)) | None = self.panel {
+                self.panel = Some(Panel::Artifact(editor.artifact));
+            }
+            cx.notify();
+            return;
+        }
 
         if self.screen != Screen::Project(project) {
             self.open_project(self.instance, project, window, cx);
             self.channel_tab = ChannelTab::Artifacts;
         }
 
-        // 同一份已經開著就沿用，保留游標與復原紀錄。
+        // 同一份已經開著就沿用，保留游標、復原紀錄與草稿。
         if self
             .artifact_editor
             .as_ref()
             .is_none_or(|e| e.artifact != id)
         {
-            let scroll = ScrollHandle::new();
-            let mut sections = Vec::new();
-            let mut subscriptions = Vec::new();
-            for (ix, section) in split_sections(&body).into_iter().enumerate() {
-                // agent 正在寫的區段唯讀，其他區段可以照常編輯。
-                let readonly = section.heading.is_some() && section.heading == agent_writing;
-                let editor = cx.new(|cx| {
-                    let mut state = BlockEditorState::new(window, cx).with_source(&section.source);
-                    state.set_scroll_handle(scroll.clone());
-                    if readonly {
-                        state.set_readonly(true, cx);
-                    }
-                    state
-                });
-                subscriptions.push(cx.subscribe(
-                    &editor,
-                    move |this, _, event: &BlockEditorEvent, cx| {
-                        if let BlockEditorEvent::Changed { .. } = event {
-                            this.on_section_edited(ix, cx);
-                        }
-                    },
-                ));
-                sections.push(SectionEditor {
-                    heading: section.heading,
-                    editor,
-                });
-            }
-            self.artifact_editor = Some(ArtifactEditor {
-                artifact: id,
-                sections,
-                scroll,
-                _subscriptions: subscriptions,
-            });
+            self.artifact_editor = self.build_artifact_editor(id, window, cx);
         }
         self.panel = Some(Panel::Artifact(id));
         cx.notify();
     }
 
+    /// 依目前的內容建立編輯器。
+    fn build_artifact_editor(
+        &mut self,
+        id: ArtifactId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ArtifactEditor> {
+        let (_, artifact) = self.store.artifact(self.instance, id)?;
+        let body = artifact.body.clone();
+        let rev = artifact.rev;
+        let agent_writing = artifact.agent_writing.clone();
+        let scroll = ScrollHandle::new();
+        let mut sections = Vec::new();
+        let mut subscriptions = Vec::new();
+        for (ix, section) in split_sections(&body).into_iter().enumerate() {
+            // agent 正在寫的區段唯讀，其他區段可以照常編輯。
+            let readonly = section.heading.is_some() && section.heading == agent_writing;
+            let editor = cx.new(|cx| {
+                let mut state = BlockEditorState::new(window, cx).with_source(&section.source);
+                state.set_scroll_handle(scroll.clone());
+                if readonly {
+                    state.set_readonly(true, cx);
+                }
+                state
+            });
+            subscriptions.push(cx.subscribe(
+                &editor,
+                move |this, _, event: &BlockEditorEvent, cx| {
+                    if let BlockEditorEvent::Changed { .. } = event {
+                        this.on_section_edited(ix, cx);
+                    }
+                },
+            ));
+            let initial = editor.read(cx).source();
+            sections.push(SectionEditor {
+                heading: section.heading,
+                editor,
+                raw: section.source,
+                initial,
+            });
+        }
+        Some(ArtifactEditor {
+            artifact: id,
+            base_body: join_sections(sections.iter().map(|s| s.raw.as_str())),
+            sections,
+            scroll,
+            base_rev: rev,
+            dirty: false,
+            saving: false,
+            sent: None,
+            remote_rev: None,
+            error: None,
+            history: None,
+            _subscriptions: subscriptions,
+        })
+    }
+
+    /// 編輯器目前的全文（沒動過的區段用原文）。
+    fn artifact_draft(&self, cx: &Context<Self>) -> Option<String> {
+        let editor = self.artifact_editor.as_ref()?;
+        let sources: Vec<String> = editor.sections.iter().map(|s| s.draft(cx)).collect();
+        Some(join_sections(sources.iter().map(String::as_str)))
+    }
+
     fn on_section_edited(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(draft) = self.artifact_draft(cx) else {
+            return;
+        };
+        let heading = self
+            .artifact_editor
+            .as_ref()
+            .and_then(|e| e.sections.get(ix))
+            .and_then(|s| section_heading(&s.editor.read(cx).source()));
+        let Some(editor) = self.artifact_editor.as_mut() else {
+            return;
+        };
+        if let Some(s) = editor.sections.get_mut(ix) {
+            s.heading = heading;
+        }
+        editor.dirty = draft != editor.base_body;
+        editor.error = None;
+        cx.notify();
+    }
+
+    /// 「儲存」：連著服務時帶 `base_rev` 送出，等 `ArtifactChanged`；假資料模式只改本地。
+    pub fn save_artifact(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.artifact_draft(cx) else {
+            return;
+        };
+        let instance = self.instance;
+        let live = self.live.is_some();
+        let connected = self.current_instance().connection == ConnectionState::Connected;
+        let Some(editor) = self.artifact_editor.as_mut() else {
+            return;
+        };
+        if !editor.dirty || editor.saving {
+            return;
+        }
+        // 離線時不排進待送佇列：重連後才送出的儲存會和之後的儲存互相衝突。
+        if live && !connected {
+            editor.error = Some("目前離線，連上服務後再儲存。".into());
+            cx.notify();
+            return;
+        }
+        let artifact = editor.artifact;
+        if live {
+            editor.saving = true;
+            editor.sent = Some(draft.clone());
+            editor.error = None;
+            set_readonly(editor, true, cx);
+            self.store.outbox.push((
+                instance,
+                ClientCommand::SaveArtifact {
+                    artifact,
+                    base_rev: editor.base_rev,
+                    body: draft,
+                },
+            ));
+        } else if let Some(rev) = self.store.edit_artifact(instance, artifact, draft.clone()) {
+            editor.base_rev = rev;
+            editor.base_body = draft;
+            editor.dirty = false;
+        }
+        cx.notify();
+    }
+
+    /// 「放棄修改」：用目前的內容重建編輯器。
+    pub fn discard_artifact_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 儲存中也可以放棄：服務沒有回覆（例如錯誤被其他表單接走）時，這是唯一的出口。
+        // 儲存若之後還是成功，新版本會照常推來並顯示。
+        let Some(id) = self.artifact_editor.as_ref().map(|e| e.artifact) else {
+            return;
+        };
+        self.artifact_editor = self.build_artifact_editor(id, window, cx);
+        cx.notify();
+    }
+
+    /// 服務推來 artifact 的新版本。沒有草稿時換掉編輯器內容；有草稿時保留，提示儲存時會合併。
+    /// 儲存中收到的新版本要包含你送出的修改才算是這次儲存的結果（可能是 agent 剛好也寫了），
+    /// 否則繼續等，草稿不動。
+    fn on_artifact_changed(&mut self, id: ArtifactId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = &mut self.artifact_editor else {
+            return;
+        };
+        if editor.artifact != id {
+            return;
+        }
+        let Some((_, artifact)) = self.store.artifact(self.instance, id) else {
+            return;
+        };
+        let rev = artifact.rev;
+        let body = join_sections(
+            split_sections(&artifact.body)
+                .iter()
+                .map(|s| s.source.as_str()),
+        );
+        if editor.saving {
+            let sent = editor.sent.as_deref().unwrap_or_default();
+            if !save_applied(&editor.base_body, sent, &body) {
+                if rev != editor.base_rev {
+                    editor.remote_rev = Some(rev);
+                }
+                return;
+            }
+        } else if editor.dirty {
+            if rev != editor.base_rev {
+                editor.remote_rev = Some(rev);
+            }
+            return;
+        } else if body == editor.base_body {
+            editor.base_rev = rev;
+            editor.saving = false;
+            return;
+        }
+        let history = editor.history.take();
+        self.artifact_editor = self.build_artifact_editor(id, window, cx);
+        if let (Some(editor), Some(_)) = (&mut self.artifact_editor, history) {
+            // 版本紀錄開著：重新讀一次，包含新的版本。
+            editor.history = Some(ArtifactHistory {
+                revisions: None,
+                selected: 0,
+            });
+            self.store.outbox.push((
+                self.instance,
+                ClientCommand::ArtifactHistory { artifact: id },
+            ));
+        }
+    }
+
+    /// 快照換掉了 artifact：開著的編輯器跟著更新；那份 artifact 不在了而且沒有草稿就關掉。
+    fn on_artifacts_reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = &self.artifact_editor else {
             return;
         };
-        let sources: Vec<String> = editor
-            .sections
-            .iter()
-            .map(|s| s.editor.read(cx).source())
-            .collect();
-        let heading = sources.get(ix).and_then(|s| section_heading(s));
-        let artifact = editor.artifact;
-        if let Some(s) = self
+        let id = editor.artifact;
+        if self.store.artifact(self.instance, id).is_some() {
+            self.on_artifact_changed(id, window, cx);
+        } else if !editor.dirty {
+            self.artifact_editor = None;
+            if self.panel == Some(Panel::Artifact(id)) {
+                self.panel = None;
+            }
+        }
+    }
+
+    /// 開關版本紀錄。
+    pub fn toggle_artifact_history(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_none() {
+            self.toast = Some("假資料模式沒有版本紀錄。".into());
+            cx.notify();
+            return;
+        }
+        let instance = self.instance;
+        let Some(editor) = &mut self.artifact_editor else {
+            return;
+        };
+        if editor.history.take().is_none() {
+            editor.history = Some(ArtifactHistory {
+                revisions: None,
+                selected: 0,
+            });
+            self.store.outbox.push((
+                instance,
+                ClientCommand::ArtifactHistory {
+                    artifact: editor.artifact,
+                },
+            ));
+        }
+        cx.notify();
+    }
+
+    pub fn select_revision(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(history) = self
             .artifact_editor
             .as_mut()
-            .and_then(|e| e.sections.get_mut(ix))
+            .and_then(|e| e.history.as_mut())
         {
-            s.heading = heading.clone();
+            history.selected = ix;
         }
-        self.store.edit_artifact(
-            self.instance,
-            artifact,
-            join_sections(sources.iter().map(String::as_str)),
-            heading,
-        );
+        cx.notify();
+    }
+
+    /// 還原成某一版（服務新增一個版本）。有草稿時不做，免得蓋掉。
+    pub fn restore_revision(&mut self, rev: u32, cx: &mut Context<Self>) {
+        let instance = self.instance;
+        let Some(editor) = &mut self.artifact_editor else {
+            return;
+        };
+        if editor.dirty {
+            editor.error = Some("先儲存或放棄你的修改，再還原。".into());
+            cx.notify();
+            return;
+        }
+        editor.history = None;
+        self.store.outbox.push((
+            instance,
+            ClientCommand::RestoreArtifact {
+                artifact: editor.artifact,
+                rev,
+            },
+        ));
         cx.notify();
     }
 
@@ -1291,6 +1587,11 @@ impl PotsApp {
         if text.is_empty() {
             return;
         }
+        if self.live.is_some() {
+            // team 貼文在 M4；要改方向請在對話裡說，或直接改 Brief。
+            self.notify_unimplemented("留言給 Planner", cx);
+            return;
+        }
         self.store.post_goal_note(self.instance, goal, text);
         self.panel = Some(Panel::Goal(goal, GoalTab::Team));
         self.goal_note.update(cx, |s, cx| s.clean(window, cx));
@@ -1305,10 +1606,42 @@ impl PotsApp {
         if text.is_empty() {
             return;
         }
+        if self.live.is_some() {
+            // 還沒有 worker（M4）。
+            self.notify_unimplemented("對 worker 說話", cx);
+            return;
+        }
         self.store.send_to_task(self.instance, task, text);
         self.worker_note.update(cx, |s, cx| s.clean(window, cx));
         cx.notify();
     }
+}
+
+/// 儲存期間鎖住編輯器，避免回覆到來時重建編輯器丟掉之後打的字。
+fn set_readonly(editor: &ArtifactEditor, readonly: bool, cx: &mut App) {
+    for s in &editor.sections {
+        s.editor
+            .update(cx, |state, cx| state.set_readonly(readonly, cx));
+    }
+}
+
+/// `current` 是否包含 `sent` 相對 `base` 的所有修改（以 `##` 區段比對）。
+fn save_applied(base: &str, sent: &str, current: &str) -> bool {
+    fn sections(md: &str) -> Vec<(Option<String>, String)> {
+        split_sections(md)
+            .into_iter()
+            .map(|s| (s.heading, s.source))
+            .collect()
+    }
+    fn get<'a>(v: &'a [(Option<String>, String)], k: &Option<String>) -> Option<&'a String> {
+        v.iter().find(|(h, _)| h == k).map(|(_, s)| s)
+    }
+    let (base, sent, current) = (sections(base), sections(sent), sections(current));
+    base.iter()
+        .chain(&sent)
+        .map(|(k, _)| k)
+        .filter(|k| get(&base, k) != get(&sent, k))
+        .all(|k| get(&current, k) == get(&sent, k))
 }
 
 impl Focusable for PotsApp {
@@ -1355,5 +1688,32 @@ impl Render for PotsApp {
             .children(panel)
             .children(self.render_settings_dialog(cx))
             .children(self.render_toast(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_applied;
+
+    const BASE: &str = "# 標題\n\n## 目標\n\n舊\n\n## 範圍\n\n- 一\n";
+
+    #[test]
+    fn save_applied_needs_every_section_you_changed() {
+        let sent = BASE.replace("舊", "我的");
+        // 服務回的是你的儲存（可能合併了 agent 改的別段）。
+        assert!(save_applied(BASE, &sent, &sent));
+        assert!(save_applied(
+            BASE,
+            &sent,
+            &sent.replace("- 一", "- 一\n- agent")
+        ));
+        // agent 剛好寫了別段，還不是你的儲存結果。
+        assert!(!save_applied(BASE, &sent, &BASE.replace("- 一", "- agent")));
+        // 刪掉的區段也要不在。
+        let removed = BASE.replace("## 範圍\n\n- 一\n", "");
+        assert!(save_applied(BASE, &removed, &removed));
+        assert!(!save_applied(BASE, &removed, BASE));
+        // 沒有修改的儲存，任何回覆都算。
+        assert!(save_applied(BASE, BASE, BASE));
     }
 }

@@ -411,6 +411,7 @@ pub fn store() -> Store {
     let oauth = GoalView {
         id: oauth_goal,
         title: "OAuth 登入遷移".into(),
+        state: GoalState::Active,
         planner_note: "Planner · 4 個任務".into(),
         budget_used_pct: 38,
         tasks: vec![callback_task, button_task, integration_task, review_task],
@@ -601,6 +602,7 @@ pub fn store() -> Store {
         goals: vec![GoalView {
             id: checkout_goal,
             title: "結帳頁改版".into(),
+            state: GoalState::Active,
             planner_note: "Planner · 2 個任務".into(),
             budget_used_pct: 71,
             tasks: vec![TaskView {
@@ -880,6 +882,7 @@ pub fn store() -> Store {
         goals: vec![GoalView {
             id: shell_goal,
             title: "整理 shell 設定".into(),
+            state: GoalState::Active,
             planner_note: "Planner · 1 個任務".into(),
             budget_used_pct: 12,
             tasks: vec![TaskView {

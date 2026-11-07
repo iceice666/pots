@@ -87,31 +87,51 @@ impl Store {
             .find_map(|p| p.artifacts.iter().find(|a| a.id == id).map(|a| (p, a)))
     }
 
-    /// 你在編輯器裡改了 artifact：更新全文，並標示改過的區段。
-    /// 寫回服務走 HTTP API（尚未定義），這裡只改本地狀態。
+    /// 假資料模式的「儲存」：更新全文、版本加一，並標示內容有變的 `##` 區段。
+    /// 連著服務時改送 `SaveArtifact`，由服務回的 `ArtifactChanged` 更新。回傳新的版本。
     pub fn edit_artifact(
         &mut self,
         instance: InstanceId,
         id: ArtifactId,
         body: String,
-        section: Option<String>,
-    ) {
+    ) -> Option<u32> {
         let now = self.now;
-        let Some(a) = self.instance_mut(instance).and_then(|i| {
+        let a = self.instance_mut(instance).and_then(|i| {
             i.projects
                 .iter_mut()
                 .flat_map(|p| p.artifacts.iter_mut())
                 .find(|a| a.id == id)
-        }) else {
-            return;
-        };
-        a.body = body;
-        if let Some(heading) = section {
+        })?;
+        let old = split_sections(&a.body);
+        for section in split_sections(&body) {
+            let Some(heading) = section.heading else {
+                continue;
+            };
+            let before = old.iter().find(|o| o.heading.as_ref() == Some(&heading));
+            if before.map(|o| &o.source) == Some(&section.source) {
+                continue;
+            }
             match a.human_edits.iter_mut().find(|(h, _)| *h == heading) {
                 Some(edit) => edit.1 = now,
                 None => a.human_edits.push((heading, now)),
             }
         }
+        a.body = body;
+        a.rev += 1;
+        let (rev, kind, goal, body) = (a.rev, a.kind, a.goal, a.body.clone());
+        // Goal 面板的 Brief 分頁讀 `GoalView::brief`（live 模式由服務的 `GoalChanged` 更新）。
+        if kind == ArtifactKind::Brief
+            && let Some(goal) = goal
+            && let Some(g) = self.instance_mut(instance).and_then(|i| {
+                i.projects
+                    .iter_mut()
+                    .flat_map(|p| p.goals.iter_mut())
+                    .find(|g| g.id == goal)
+            })
+        {
+            g.brief = body;
+        }
+        Some(rev)
     }
 
     pub fn schedule(&self, instance: InstanceId, id: ScheduleId) -> Option<&ScheduleView> {

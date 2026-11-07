@@ -134,12 +134,13 @@ mod shots {
     }
 
     /// 連到真正的服務（腳本化的模型）：還沒設定 provider → 在設定頁新增 OpenAI 相容 API
-    /// → 測試連線 → 儲存 → 建立 project → 傳訊息 → 收到串流回覆。
+    /// → 測試連線 → 儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開 Goal、Planner
+    /// 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄。
     fn live_screens() {
         use pots_desktop::connection::{Endpoint, Target};
         use pots_desktop::model::*;
-        use pots_llm::testing::{ScriptedProvider, ScriptedTurn};
-        use pots_llm::{LlmError, ModelProvider};
+        use pots_llm::testing::{FnProvider, ScriptedProvider, ScriptedTurn};
+        use pots_llm::{Item, LlmError, ModelProvider, ModelRequest};
 
         struct Fixed(Target);
         impl Endpoint for Fixed {
@@ -149,7 +150,7 @@ mod shots {
         }
 
         /// 每個 API provider 都接到同一個腳本化的模型。
-        struct ScriptedApi(Arc<ScriptedProvider>);
+        struct ScriptedApi(Arc<FnProvider>);
 
         #[async_trait::async_trait]
         impl pots_server::ApiProviderFactory for ScriptedApi {
@@ -183,11 +184,68 @@ mod shots {
             .enable_all()
             .build()
             .expect("runtime");
-        let model = ScriptedProvider::new([ScriptedTurn::new().text_deltas([
-            "收到！",
-            "這是接上本機服務後的第一則回覆，",
-            "用的是設定頁新增的 OpenAI 相容 provider。",
-        ])]);
+        // 對話 agent：一般訊息回一段串流文字；「開 Goal」時呼叫 create_goal。
+        // Planner：拆兩個任務、建 Ledger、貼里程碑。
+        fn fake_model(req: &ModelRequest) -> ScriptedTurn {
+            let results = req
+                .input
+                .iter()
+                .rev()
+                .take_while(|i| !matches!(i, Item::User { .. }))
+                .filter(|i| matches!(i, Item::ToolResult { .. }))
+                .count();
+            let last_user = req.input.iter().rev().find_map(|i| match i {
+                Item::User { text } => Some(text.as_str()),
+                _ => None,
+            });
+            let planner = req
+                .instructions
+                .as_deref()
+                .is_some_and(|i| i.starts_with("你是 Pots 的 Planner"));
+            if planner {
+                let edited = matches!(
+                    req.input.first(),
+                    Some(Item::User { text }) if text.contains("使用者直接修改了 Brief")
+                );
+                if edited {
+                    return ScriptedTurn::reply("看過新的 Brief，規劃不用改");
+                }
+                return match results {
+                    0 => ScriptedTurn::new()
+                        .tool_call(
+                            "t1",
+                            "create_task",
+                            r#"{"title":"Google OAuth callback","summary":"新增 /auth/google/callback 並換發 session"}"#,
+                        )
+                        .tool_call(
+                            "t2",
+                            "create_task",
+                            r#"{"title":"登入頁按鈕","summary":"在登入頁加上「用 Google 登入」"}"#,
+                        )
+                        .tool_call(
+                            "t3",
+                            "write_artifact",
+                            r###"{"kind":"Ledger","edits":[{"op":"replace_all","body_md":"# Ledger\n\n## 任務\n\n- [ ] Google OAuth callback\n- [ ] 登入頁按鈕"}]}"###,
+                        )
+                        .tool_call("t4", "post_milestone", r#"{"text":"已拆成 2 個任務，等 worker 接手"}"#),
+                    _ => ScriptedTurn::reply("拆成 2 個任務，Ledger 已建立"),
+                };
+            }
+            match (last_user, results) {
+                (Some(t), 0) if t.contains("開 Goal") => ScriptedTurn::new().tool_call(
+                    "g1",
+                    "create_goal",
+                    r###"{"title":"Google 登入","brief_md":"## 目標\n\n使用者可以用 Google 帳號登入。\n\n## 約束\n\n- 既有的密碼登入保留\n\n## 已決定\n\n- 用 OAuth 2.0 授權碼流程"}"###,
+                ),
+                (_, n) if n > 0 => ScriptedTurn::reply("開好了，Planner 會在右邊拆任務。"),
+                _ => ScriptedTurn::new().text_deltas([
+                    "收到！",
+                    "這是接上本機服務後的第一則回覆，",
+                    "用的是設定頁新增的 OpenAI 相容 provider。",
+                ]),
+            }
+        }
+        let model = FnProvider::new("scripted", fake_model);
         let deps = pots_server::Deps::new(
             ScriptedProvider::new(Vec::<ScriptedTurn>::new()),
             "auto",
@@ -272,6 +330,72 @@ mod shots {
             })
         });
         s.shot("14-live-chat");
+
+        // agent 開 Goal → Planner 拆任務：對話裡出現 Goal 卡片與里程碑，右欄是 Goal 面板。
+        s.update(|app, window, cx| {
+            app.close_settings(cx);
+            app.composer
+                .update(cx, |state, cx| state.set_value("開 Goal 吧", window, cx));
+            app.send_composer(window, cx);
+        });
+        s.wait_until("Planner 拆完任務", |app| {
+            app.current_project().is_some_and(|p| {
+                p.goals
+                    .first()
+                    .is_some_and(|g| g.tasks.len() == 2 && g.planner_note.starts_with("拆成"))
+                    && p.agent_state == AgentState::Idle
+            })
+        });
+        s.update(|app, _, cx| {
+            let goal = app.current_project().unwrap().goals[0].id;
+            app.open_panel(
+                Some(Panel::Goal(goal, pots_desktop::app::GoalTab::Tasks)),
+                cx,
+            );
+        });
+        s.shot("15-live-goal");
+
+        // 在編輯器改 Brief 並儲存：伺服器回新的版本，區段標成你改過。
+        s.update(|app, window, cx| {
+            let brief = app
+                .current_project()
+                .and_then(|p| p.artifacts.iter().find(|a| a.kind == ArtifactKind::Brief))
+                .map(|a| a.id)
+                .expect("有 Brief");
+            app.open_artifact(brief, window, cx);
+            let editor = app.artifact_editor.as_ref().expect("編輯器已開啟");
+            let section = editor
+                .sections
+                .iter()
+                .find(|s| s.heading.as_deref() == Some("約束"))
+                .map(|s| s.editor.clone())
+                .expect("有「約束」");
+            section.update(cx, |state, cx| {
+                let _ = state.run(EditorCommand::SelectAll, cx);
+                let _ = state.run(EditorCommand::ToggleMark(MarkKind::Bold), cx);
+            });
+        });
+        s.update(|app, _, cx| app.save_artifact(cx));
+        s.wait_until("Brief 存成 v2", |app| {
+            app.current_project().is_some_and(|p| {
+                p.artifacts.iter().any(|a| {
+                    a.kind == ArtifactKind::Brief && a.rev == 2 && !a.human_edits.is_empty()
+                })
+            }) && app
+                .artifact_editor
+                .as_ref()
+                .is_some_and(|e| !e.dirty && !e.saving)
+        });
+        s.shot("16-live-brief-saved");
+
+        s.update(|app, _, cx| app.toggle_artifact_history(cx));
+        s.wait_until("版本紀錄", |app| {
+            app.artifact_editor
+                .as_ref()
+                .and_then(|e| e.history.as_ref())
+                .is_some_and(|h| h.revisions.as_ref().is_some_and(|r| r.len() == 2))
+        });
+        s.shot("17-live-brief-history");
 
         handle.shutdown();
         runtime.block_on(handle.wait()).expect("shutdown");
@@ -364,12 +488,27 @@ mod shots {
                 });
             }
         });
+        // 修改先留在編輯器裡（未儲存），按「儲存」才寫回。
         s.update(|app, _, _| {
             let Some(Panel::Artifact(id)) = app.panel else {
                 panic!("右欄應該是 artifact");
             };
+            assert!(
+                app.artifact_editor.as_ref().unwrap().dirty,
+                "有未儲存的修改"
+            );
             let a = app.store.artifact(app.instance, id).unwrap().1;
-            assert!(a.body.contains("**後端新增"), "編輯寫回全文");
+            assert!(!a.body.contains("**後端新增"), "還沒儲存");
+        });
+        s.shot("08b-artifact-unsaved");
+        s.update(|app, _, cx| app.save_artifact(cx));
+        s.update(|app, _, _| {
+            let Some(Panel::Artifact(id)) = app.panel else {
+                panic!("右欄應該是 artifact");
+            };
+            assert!(!app.artifact_editor.as_ref().unwrap().dirty, "已儲存");
+            let a = app.store.artifact(app.instance, id).unwrap().1;
+            assert!(a.body.contains("**後端新增"), "儲存後寫回全文");
             // 整段加粗連標題也變成「**範圍**」，所以用包含比對。
             assert!(
                 a.human_edits.iter().any(|(h, _)| h.contains("範圍")),
@@ -377,7 +516,7 @@ mod shots {
             );
             assert!(a.edited_at("測試計畫").is_none(), "agent 寫入中的區段唯讀");
         });
-        s.shot("08b-artifact-edited");
+        s.shot("08c-artifact-saved");
 
         s.update(|app, _, cx| {
             app.open_automations(AutomationSection::Listeners, cx);

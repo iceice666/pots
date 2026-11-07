@@ -22,6 +22,12 @@ pub struct Applied {
     pub provider_test: Option<(u64, Result<Vec<ModelOption>, String>)>,
     /// 這個 project 的記憶整份換了（`Memory` 事件）。
     pub memory_changed: Option<ProjectId>,
+    /// 這份 artifact 新增或有變（`ArtifactChanged`）。
+    pub artifact_changed: Option<ArtifactId>,
+    /// 快照整份換掉了 artifact。
+    pub artifacts_reset: bool,
+    /// `ArtifactHistory` 的結果（時間已換成本地）。
+    pub artifact_history: Option<(ArtifactId, Vec<ArtifactRevisionView>)>,
 }
 
 /// 本地時區相對 UTC 的秒數。
@@ -78,6 +84,29 @@ impl Sync {
         item
     }
 
+    fn localize_goal(&self, mut goal: GoalView) -> GoalView {
+        for t in &mut goal.tasks {
+            for s in &mut t.steps {
+                s.at = s.at.map(|at| self.local(at));
+            }
+            t.thread = std::mem::take(&mut t.thread)
+                .into_iter()
+                .map(|i| self.localize(i))
+                .collect();
+        }
+        for post in &mut goal.team {
+            post.at = self.local(post.at);
+        }
+        goal
+    }
+
+    fn localize_artifact(&self, mut artifact: ArtifactView) -> ArtifactView {
+        for (_, at) in &mut artifact.human_edits {
+            *at = self.local(*at);
+        }
+        artifact
+    }
+
     fn project_view(&self, p: ProjectSnapshot) -> ProjectView {
         ProjectView {
             id: p.id,
@@ -90,8 +119,12 @@ impl Sync {
             },
             unread: 0,
             items: p.items.into_iter().map(|i| self.localize(i)).collect(),
-            goals: vec![],
-            artifacts: vec![],
+            goals: p.goals.into_iter().map(|g| self.localize_goal(g)).collect(),
+            artifacts: p
+                .artifacts
+                .into_iter()
+                .map(|a| self.localize_artifact(a))
+                .collect(),
             memory: p.memory,
         }
     }
@@ -125,6 +158,7 @@ impl Sync {
                 view.providers = snap.providers;
                 view.model_auth = snap.model_auth;
                 out.providers_changed = true;
+                out.artifacts_reset = true;
                 if new_id != instance {
                     for item in store.inbox.iter_mut().filter(|i| i.instance == instance) {
                         item.instance = new_id;
@@ -233,8 +267,38 @@ impl Sync {
                 }
                 out.memory_changed = Some(project);
             }
+            ServerEvent::GoalChanged { project, goal, .. } => {
+                let goal = self.localize_goal(goal);
+                if let Some(p) = store.project_mut(instance, project) {
+                    match p.goals.iter_mut().find(|g| g.id == goal.id) {
+                        Some(g) => *g = goal,
+                        None => p.goals.push(goal),
+                    }
+                }
+            }
+            ServerEvent::ArtifactChanged {
+                project, artifact, ..
+            } => {
+                let artifact = self.localize_artifact(artifact);
+                out.artifact_changed = Some(artifact.id);
+                if let Some(p) = store.project_mut(instance, project) {
+                    match p.artifacts.iter_mut().find(|a| a.id == artifact.id) {
+                        Some(a) => *a = artifact,
+                        None => p.artifacts.push(artifact),
+                    }
+                }
+            }
+            ServerEvent::ArtifactHistory {
+                artifact,
+                mut revisions,
+            } => {
+                for r in &mut revisions {
+                    r.at = self.local(r.at);
+                }
+                out.artifact_history = Some((artifact, revisions));
+            }
             ServerEvent::Error { message } => out.toast = Some(message),
-            // M0 還沒有任務樹與核准。
+            // 任務的變化隨 `GoalChanged` 整個 Goal 送來；核准在 M5。
             ServerEvent::TaskChanged { .. } | ServerEvent::Inbox { .. } => {}
         }
         if let Some(seq) = seq
@@ -410,6 +474,8 @@ mod tests {
                     agent_state: AgentState::Idle,
                     items: vec![],
                     memory: MemoryView::default(),
+                    goals: vec![],
+                    artifacts: vec![],
                 }],
                 model_auth: auth,
                 providers: chatgpt_active(),
