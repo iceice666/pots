@@ -1,0 +1,25 @@
+[package]
+name = "pots-desktop"
+version = "0.1.0"
+description = "Pots 桌面客戶端（GPUI）"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# 離屏 renderer 與 HeadlessAppContext。
+gpui-kit = { workspace = true, features = ["test-support"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# 用離屏 renderer 把主要畫面存成 PNG：
+#   cargo test -p pots-desktop --test screenshots
+# 需要 Metal（macOS）或 WGPU（Linux）。
+[[test]]
+name = "screenshots"
+path = "tests/screenshots.rs"
+test = false
+harness = false

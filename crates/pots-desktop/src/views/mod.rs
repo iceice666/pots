@@ -1,0 +1,10 @@
+//! 各區塊的 render，皆實作在 [`crate::app::PotsApp`] 上。
+
+mod channel;
+mod inbox;
+mod nav;
+mod overlay;
+mod overseer;
+mod panel;
+mod stream;
+mod widgets;
