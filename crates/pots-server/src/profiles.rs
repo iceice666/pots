@@ -1,0 +1,224 @@
+//! Agent profile（`proposal/agent-collaboration.md#profile-一覽`）。
+//!
+//! profile 是設定檔：內建的 `profiles/*.toml` 編進執行檔；資料目錄裡有同名的
+//! `profiles/<name>.toml` 時用它取代（整份，不合併）。目前執行期只認得 `chat` 與 `planner`
+//! 兩種 agent，所以只讀這兩個檔；工具清單與可寫的 artifact 種類依 agent 檢查，
+//! 不合法時服務不啟動。
+
+use std::path::Path;
+
+use pots_proto::ArtifactKind;
+use serde::Deserialize;
+
+use crate::Error;
+
+const BUILTIN_CHAT: &str = include_str!("../profiles/chat.toml");
+const BUILTIN_PLANNER: &str = include_str!("../profiles/planner.toml");
+
+/// 唯讀基礎集以外、要在 profile 裡授權的工具。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolName {
+    CreateGoal,
+    SteerGoal,
+    CancelGoal,
+    WriteArtifact,
+    CreateTask,
+    CancelTask,
+    PostMilestone,
+    CompleteGoal,
+}
+
+impl ToolName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateGoal => "create_goal",
+            Self::SteerGoal => "steer_goal",
+            Self::CancelGoal => "cancel_goal",
+            Self::WriteArtifact => "write_artifact",
+            Self::CreateTask => "create_task",
+            Self::CancelTask => "cancel_task",
+            Self::PostMilestone => "post_milestone",
+            Self::CompleteGoal => "complete_goal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMode {
+    /// 歷史由 Observational Memory 組成。
+    Om,
+    /// 每次 run 從狀態重建 context。
+    Stateless,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProfile {
+    pub name: String,
+    pub memory: MemoryMode,
+    pub max_turns: usize,
+    pub tools: Vec<ToolName>,
+    #[serde(default)]
+    pub artifact_kinds: Vec<ArtifactKind>,
+    pub role_prompt: String,
+}
+
+impl AgentProfile {
+    pub fn has(&self, tool: ToolName) -> bool {
+        self.tools.contains(&tool)
+    }
+
+    pub fn role_prompt(&self) -> &str {
+        self.role_prompt.trim()
+    }
+}
+
+/// 執行期用到的 profile。
+#[derive(Clone, Debug)]
+pub struct Profiles {
+    pub chat: AgentProfile,
+    pub planner: AgentProfile,
+}
+
+struct Rules {
+    name: &'static str,
+    memory: MemoryMode,
+    tools: &'static [ToolName],
+    kinds: &'static [ArtifactKind],
+}
+
+const CHAT_RULES: Rules = Rules {
+    name: "chat",
+    memory: MemoryMode::Om,
+    tools: &[
+        ToolName::CreateGoal,
+        ToolName::SteerGoal,
+        ToolName::CancelGoal,
+        ToolName::WriteArtifact,
+    ],
+    kinds: &[ArtifactKind::Spec, ArtifactKind::Report],
+};
+
+const PLANNER_RULES: Rules = Rules {
+    name: "planner",
+    memory: MemoryMode::Stateless,
+    tools: &[
+        ToolName::CreateTask,
+        ToolName::CancelTask,
+        ToolName::PostMilestone,
+        ToolName::CompleteGoal,
+        ToolName::WriteArtifact,
+    ],
+    kinds: &[ArtifactKind::Ledger, ArtifactKind::Report],
+};
+
+impl Profiles {
+    /// 內建的 profile。
+    #[cfg(test)]
+    pub fn builtin() -> Self {
+        Self {
+            chat: parse(BUILTIN_CHAT, &CHAT_RULES, "內建 chat.toml").expect("內建 chat.toml"),
+            planner: parse(BUILTIN_PLANNER, &PLANNER_RULES, "內建 planner.toml")
+                .expect("內建 planner.toml"),
+        }
+    }
+
+    /// 內建的 profile，資料目錄的 `profiles/<name>.toml` 存在時取代。
+    pub fn load(data_dir: &Path) -> Result<Self, Error> {
+        let dir = data_dir.join("profiles");
+        let one = |builtin: &str, rules: &Rules| -> Result<AgentProfile, Error> {
+            let path = dir.join(format!("{}.toml", rules.name));
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let p = parse(&text, rules, &path.display().to_string())?;
+                    tracing::info!(path = %path.display(), "使用自訂的 profile");
+                    Ok(p)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    parse(builtin, rules, &format!("內建 {}.toml", rules.name))
+                }
+                Err(e) => Err(Error::Io(e)),
+            }
+        };
+        Ok(Self {
+            chat: one(BUILTIN_CHAT, &CHAT_RULES)?,
+            planner: one(BUILTIN_PLANNER, &PLANNER_RULES)?,
+        })
+    }
+}
+
+fn parse(text: &str, rules: &Rules, source: &str) -> Result<AgentProfile, Error> {
+    let bad = |msg: String| Error::Config(format!("{source}：{msg}"));
+    let p: AgentProfile = toml::from_str(text).map_err(|e| bad(e.to_string()))?;
+    if p.name != rules.name {
+        return Err(bad(format!("name 應該是 {}", rules.name)));
+    }
+    if p.memory != rules.memory {
+        return Err(bad(format!("{} 的 memory 不能改", rules.name)));
+    }
+    if p.max_turns == 0 || p.max_turns > 50 {
+        return Err(bad("max_turns 要在 1 到 50 之間".into()));
+    }
+    if let Some(t) = p.tools.iter().find(|t| !rules.tools.contains(t)) {
+        return Err(bad(format!("{} 不能用 {}", rules.name, t.as_str())));
+    }
+    if let Some(k) = p.artifact_kinds.iter().find(|k| !rules.kinds.contains(k)) {
+        return Err(bad(format!(
+            "{} 不能用 write_artifact 寫 {}",
+            rules.name,
+            k.label()
+        )));
+    }
+    if p.has(ToolName::WriteArtifact) && p.artifact_kinds.is_empty() {
+        return Err(bad("有 write_artifact 時 artifact_kinds 不能是空的".into()));
+    }
+    if p.role_prompt.trim().is_empty() {
+        return Err(bad("role_prompt 不能是空的".into()));
+    }
+    Ok(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_profiles_parse() {
+        let p = Profiles::builtin();
+        assert_eq!(p.chat.memory, MemoryMode::Om);
+        assert!(p.chat.has(ToolName::CreateGoal));
+        assert_eq!(p.chat.artifact_kinds, [ArtifactKind::Spec]);
+        assert!(p.planner.has(ToolName::CompleteGoal));
+        assert_eq!(p.planner.artifact_kinds, [ArtifactKind::Ledger]);
+        assert!(!p.planner.role_prompt().ends_with('\n'));
+    }
+
+    #[test]
+    fn data_dir_overrides_and_validates() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("profiles")).unwrap();
+        let path = tmp.path().join("profiles/chat.toml");
+        std::fs::write(
+            &path,
+            "name = \"chat\"\nmemory = \"om\"\nmax_turns = 3\ntools = [\"create_goal\"]\nrole_prompt = \"自訂\"\n",
+        )
+        .unwrap();
+        let p = Profiles::load(tmp.path()).unwrap();
+        assert_eq!(p.chat.max_turns, 3);
+        assert_eq!(p.chat.tools, [ToolName::CreateGoal]);
+        assert_eq!(p.planner, Profiles::builtin().planner);
+
+        std::fs::write(
+            &path,
+            "name = \"chat\"\nmemory = \"om\"\nmax_turns = 3\ntools = [\"create_task\"]\nrole_prompt = \"x\"\n",
+        )
+        .unwrap();
+        let err = Profiles::load(tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("chat 不能用 create_task"), "{err}");
+
+        std::fs::write(&path, "name = \"chat\"\ntools = [\"fly\"]\n").unwrap();
+        assert!(Profiles::load(tmp.path()).is_err());
+    }
+}

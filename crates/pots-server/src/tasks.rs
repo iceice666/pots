@@ -1,0 +1,503 @@
+//! 任務樹：`goals`、`tasks` 與 `task_events`（`proposal/architecture.md#核心資料模型`）。
+//!
+//! 任務樹是平台唯一的真相來源。所有變更都在 [`LogTxn`] 裡做，同一個 transaction 記一筆
+//! `GoalChanged`（整個 Goal 連同任務樹替換），客戶端不用自己拼狀態。
+//!
+//! M2 還沒有 worker：任務建立後停在 `Planned`，只會被 Planner、你或 Goal 的結束取消。
+
+use pots_proto::{
+    ArtifactKind, GoalId, GoalState, GoalView, ProjectId, ServerEvent, TaskId, TaskStateView,
+    TaskStep, TaskView, Timestamp,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::Row;
+use sqlx::sqlite::{SqliteConnection, SqliteRow};
+
+use crate::Error;
+use crate::artifacts;
+use crate::hub::LogTxn;
+use crate::store::{LOCAL_USER_ID, parse_id, to_json};
+
+/// Goal 標題與任務標題最多幾個字。
+pub const MAX_TITLE_CHARS: usize = 120;
+/// 一個 Goal 同時最多幾個未結束的任務（防止 Planner 失控）。
+pub const MAX_OPEN_TASKS_PER_GOAL: usize = 50;
+/// 一個 Goal 最多幾個任務（含已取消的；重新規劃會取消再建立）。
+pub const MAX_TASKS_PER_GOAL: usize = 300;
+
+/// 誰做的（`proposal/architecture.md` 的 `Principal`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "name")]
+pub enum Principal {
+    Human,
+    /// agent profile 名稱，例如 `chat`、`planner`。
+    Agent(String),
+    System,
+}
+
+impl Principal {
+    pub fn agent(name: &str) -> Self {
+        Self::Agent(name.to_string())
+    }
+
+    /// 顯示名稱。
+    pub fn label(&self) -> String {
+        match self {
+            Self::Human => "你".into(),
+            Self::Agent(name) if name == "chat" => "對話 agent".into(),
+            Self::Agent(name) if name == "planner" => "Planner".into(),
+            Self::Agent(name) => name.clone(),
+            Self::System => "系統".into(),
+        }
+    }
+}
+
+/// 任務狀態。M2 只有規劃與取消；執行、等待與結果在 M3／M4 加上。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state")]
+pub enum TaskState {
+    Planned,
+    Cancelled { by: Principal },
+}
+
+impl TaskState {
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Planned)
+    }
+
+    pub fn view(&self) -> TaskStateView {
+        match self {
+            Self::Planned => TaskStateView::Planned,
+            Self::Cancelled { .. } => TaskStateView::Cancelled,
+        }
+    }
+
+    /// 給 agent 看的狀態名稱。
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Cancelled { .. } => "cancelled",
+        }
+    }
+}
+
+/// 狀態變化的原因（`task_events.cause`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cause {
+    pub by: Principal,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct GoalRow {
+    pub id: GoalId,
+    pub project: ProjectId,
+    pub title: String,
+    pub state: GoalState,
+    pub planner_note: String,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskRow {
+    pub id: TaskId,
+    pub goal: GoalId,
+    pub parent: Option<TaskId>,
+    pub title: String,
+    pub summary: String,
+    pub assignee: String,
+    pub state: TaskState,
+}
+
+fn goal_state_columns(state: &GoalState) -> (&'static str, Option<&str>) {
+    match state {
+        GoalState::Active => ("active", None),
+        GoalState::Done { summary } => ("done", Some(summary)),
+        GoalState::Cancelled { reason } => ("cancelled", Some(reason)),
+    }
+}
+
+macro_rules! goal_columns {
+    () => {
+        "id, project_id, title, state, outcome, planner_note, created_at"
+    };
+}
+
+fn goal_from_row(row: &SqliteRow) -> Result<GoalRow, Error> {
+    let state: String = row.try_get("state")?;
+    let outcome: Option<String> = row.try_get("outcome")?;
+    let outcome = outcome.unwrap_or_default();
+    let state = match state.as_str() {
+        "active" => GoalState::Active,
+        "done" => GoalState::Done { summary: outcome },
+        "cancelled" => GoalState::Cancelled { reason: outcome },
+        _ => return Err(Error::Corrupt(format!("Goal 狀態不對：{state}"))),
+    };
+    Ok(GoalRow {
+        id: parse_id(row.try_get("id")?)?,
+        project: parse_id(row.try_get("project_id")?)?,
+        title: row.try_get("title")?,
+        state,
+        planner_note: row.try_get("planner_note")?,
+        created_at: Timestamp(row.try_get("created_at")?),
+    })
+}
+
+pub async fn insert_goal(
+    conn: &mut SqliteConnection,
+    goal: &GoalRow,
+    created_by: &Principal,
+) -> Result<(), Error> {
+    let (state, outcome) = goal_state_columns(&goal.state);
+    sqlx::query(
+        "INSERT INTO goals (id, project_id, user_id, title, kind, state, outcome, created_by, \
+         planner_note, created_at, updated_at) VALUES (?, ?, ?, ?, 'feature', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(goal.id.to_string())
+    .bind(goal.project.to_string())
+    .bind(LOCAL_USER_ID.to_string())
+    .bind(&goal.title)
+    .bind(state)
+    .bind(outcome)
+    .bind(to_json(created_by)?)
+    .bind(&goal.planner_note)
+    .bind(goal.created_at.0)
+    .bind(goal.created_at.0)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+pub async fn goal(conn: &mut SqliteConnection, id: GoalId) -> Result<Option<GoalRow>, Error> {
+    let row = sqlx::query(concat!(
+        "SELECT ",
+        goal_columns!(),
+        " FROM goals WHERE id = ?"
+    ))
+    .bind(id.to_string())
+    .fetch_optional(conn)
+    .await?;
+    row.as_ref().map(goal_from_row).transpose()
+}
+
+/// project 的 Goal，依建立時間。
+pub async fn goals(conn: &mut SqliteConnection, project: ProjectId) -> Result<Vec<GoalRow>, Error> {
+    let rows = sqlx::query(concat!(
+        "SELECT ",
+        goal_columns!(),
+        " FROM goals WHERE project_id = ? ORDER BY created_at, id"
+    ))
+    .bind(project.to_string())
+    .fetch_all(conn)
+    .await?;
+    rows.iter().map(goal_from_row).collect()
+}
+
+pub async fn set_goal_state(
+    conn: &mut SqliteConnection,
+    id: GoalId,
+    state: &GoalState,
+) -> Result<(), Error> {
+    let (s, outcome) = goal_state_columns(state);
+    sqlx::query("UPDATE goals SET state = ?, outcome = ?, updated_at = ? WHERE id = ?")
+        .bind(s)
+        .bind(outcome)
+        .bind(Timestamp::now().0)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_planner_note(
+    conn: &mut SqliteConnection,
+    id: GoalId,
+    note: &str,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE goals SET planner_note = ?, updated_at = ? WHERE id = ?")
+        .bind(note)
+        .bind(Timestamp::now().0)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+pub async fn add_spent(conn: &mut SqliteConnection, id: GoalId, tokens: u64) -> Result<(), Error> {
+    sqlx::query("UPDATE goals SET spent_tokens = spent_tokens + ? WHERE id = ?")
+        .bind(tokens as i64)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+macro_rules! task_columns {
+    () => {
+        "id, goal_id, parent_id, title, summary, assignee, state"
+    };
+}
+
+fn task_from_row(row: &SqliteRow) -> Result<TaskRow, Error> {
+    let parent: Option<String> = row.try_get("parent_id")?;
+    let state: String = row.try_get("state")?;
+    Ok(TaskRow {
+        id: parse_id(row.try_get("id")?)?,
+        goal: parse_id(row.try_get("goal_id")?)?,
+        parent: parent.map(parse_id).transpose()?,
+        title: row.try_get("title")?,
+        summary: row.try_get("summary")?,
+        assignee: row.try_get("assignee")?,
+        state: serde_json::from_str(&state)?,
+    })
+}
+
+/// 新增任務並記一筆建立事件。
+pub async fn insert_task(
+    conn: &mut SqliteConnection,
+    task: &TaskRow,
+    cause: &Cause,
+) -> Result<(), Error> {
+    let now = Timestamp::now().0;
+    sqlx::query(
+        "INSERT INTO tasks (id, goal_id, parent_id, title, summary, assignee, state, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(task.id.to_string())
+    .bind(task.goal.to_string())
+    .bind(task.parent.map(|p| p.to_string()))
+    .bind(&task.title)
+    .bind(&task.summary)
+    .bind(&task.assignee)
+    .bind(to_json(&task.state)?)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    insert_event(conn, task.id, None, &task.state, cause).await
+}
+
+async fn insert_event(
+    conn: &mut SqliteConnection,
+    task: TaskId,
+    from: Option<&TaskState>,
+    to: &TaskState,
+    cause: &Cause,
+) -> Result<(), Error> {
+    sqlx::query(
+        "INSERT INTO task_events (task_id, seq, from_state, to_state, cause, at) VALUES \
+         (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?), ?, ?, ?, ?)",
+    )
+    .bind(task.to_string())
+    .bind(task.to_string())
+    .bind(from.map(to_json).transpose()?)
+    .bind(to_json(to)?)
+    .bind(to_json(cause)?)
+    .bind(Timestamp::now().0)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+pub async fn tasks(conn: &mut SqliteConnection, goal: GoalId) -> Result<Vec<TaskRow>, Error> {
+    let rows = sqlx::query(concat!(
+        "SELECT ",
+        task_columns!(),
+        " FROM tasks WHERE goal_id = ? ORDER BY created_at, id"
+    ))
+    .bind(goal.to_string())
+    .fetch_all(conn)
+    .await?;
+    rows.iter().map(task_from_row).collect()
+}
+
+pub async fn task(conn: &mut SqliteConnection, id: TaskId) -> Result<Option<TaskRow>, Error> {
+    let row = sqlx::query(concat!(
+        "SELECT ",
+        task_columns!(),
+        " FROM tasks WHERE id = ?"
+    ))
+    .bind(id.to_string())
+    .fetch_optional(conn)
+    .await?;
+    row.as_ref().map(task_from_row).transpose()
+}
+
+/// 改任務狀態並記一筆事件。
+pub async fn set_task_state(
+    conn: &mut SqliteConnection,
+    task: &TaskRow,
+    to: &TaskState,
+    cause: &Cause,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?")
+        .bind(to_json(to)?)
+        .bind(Timestamp::now().0)
+        .bind(task.id.to_string())
+        .execute(&mut *conn)
+        .await?;
+    insert_event(conn, task.id, Some(&task.state), to, cause).await
+}
+
+/// 取消 Goal 裡所有還沒結束的任務，回傳取消了幾個。
+pub async fn cancel_open_tasks(
+    conn: &mut SqliteConnection,
+    goal: GoalId,
+    cause: &Cause,
+) -> Result<usize, Error> {
+    let open: Vec<TaskRow> = tasks(conn, goal)
+        .await?
+        .into_iter()
+        .filter(|t| t.state.is_open())
+        .collect();
+    let to = TaskState::Cancelled {
+        by: cause.by.clone(),
+    };
+    for t in &open {
+        set_task_state(conn, t, &to, cause).await?;
+    }
+    Ok(open.len())
+}
+
+/// 任務的進度步驟（由 `task_events` 產生）。
+async fn steps(conn: &mut SqliteConnection, task: TaskId) -> Result<Vec<TaskStep>, Error> {
+    let rows = sqlx::query(
+        "SELECT from_state, to_state, cause, at FROM task_events WHERE task_id = ? ORDER BY seq",
+    )
+    .bind(task.to_string())
+    .fetch_all(conn)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let from: Option<String> = row.try_get("from_state")?;
+        let to: String = row.try_get("to_state")?;
+        let to: TaskState = serde_json::from_str(&to)?;
+        let cause: String = row.try_get("cause")?;
+        let cause: Cause = serde_json::from_str(&cause)?;
+        let what = match (&from, &to) {
+            (None, _) => "建立".to_string(),
+            (_, TaskState::Cancelled { .. }) => "取消".to_string(),
+            (_, TaskState::Planned) => "回到規劃".to_string(),
+        };
+        let mut text = format!("{what}（{}）", cause.by.label());
+        if !cause.reason.is_empty() {
+            text.push('：');
+            text.push_str(&cause.reason);
+        }
+        out.push(TaskStep {
+            text,
+            at: Some(Timestamp(row.try_get("at")?)),
+        });
+    }
+    Ok(out)
+}
+
+async fn task_view(conn: &mut SqliteConnection, t: &TaskRow) -> Result<TaskView, Error> {
+    Ok(TaskView {
+        id: t.id,
+        goal: t.goal,
+        title: t.title.clone(),
+        assignee: if t.assignee.is_empty() {
+            "尚未指派".into()
+        } else {
+            t.assignee.clone()
+        },
+        summary: t.summary.clone(),
+        state: t.state.view(),
+        branch: None,
+        elapsed_min: 0,
+        cost_cents: 0,
+        steps: steps(conn, t.id).await?,
+        thread: Vec::new(),
+    })
+}
+
+/// Goal 的完整檢視（任務樹與 Brief 全文）。
+pub async fn goal_view(conn: &mut SqliteConnection, g: &GoalRow) -> Result<GoalView, Error> {
+    let mut views = Vec::new();
+    for t in tasks(conn, g.id).await? {
+        views.push(task_view(conn, &t).await?);
+    }
+    let brief = artifacts::for_goal(conn, g.id, ArtifactKind::Brief)
+        .await?
+        .map(|a| a.body)
+        .unwrap_or_default();
+    Ok(GoalView {
+        id: g.id,
+        title: g.title.clone(),
+        state: g.state.clone(),
+        planner_note: g.planner_note.clone(),
+        // 預算在 M6。
+        budget_used_pct: 0,
+        tasks: views,
+        // team 貼文在 M4。
+        team: Vec::new(),
+        brief,
+    })
+}
+
+/// project 的所有 Goal 檢視，快照用。
+pub async fn project_goals(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+) -> Result<Vec<GoalView>, Error> {
+    let mut out = Vec::new();
+    for g in goals(conn, project).await? {
+        out.push(goal_view(conn, &g).await?);
+    }
+    Ok(out)
+}
+
+/// 記一筆 `GoalChanged`（Goal 不存在就不記）。
+pub async fn push_goal(txn: &mut LogTxn<'_>, id: GoalId) -> Result<(), Error> {
+    let Some(g) = goal(txn.conn(), id).await? else {
+        return Ok(());
+    };
+    let view = goal_view(txn.conn(), &g).await?;
+    let project = g.project;
+    txn.push(|seq| ServerEvent::GoalChanged {
+        seq,
+        project,
+        goal: view,
+    })
+    .await
+}
+
+/// 檢查長度並去掉頭尾空白；不合法時回說明。
+pub fn check_text(what: &str, text: &str, max: usize, required: bool) -> Result<String, String> {
+    let t = text.trim();
+    if required && t.is_empty() {
+        return Err(format!("{what}不能是空的"));
+    }
+    if t.chars().count() > max {
+        return Err(format!("{what}最多 {max} 個字"));
+    }
+    Ok(t.to_string())
+}
+
+/// 標題類的單行文字：同 [`check_text`]（必填），另外不能換行。標題會放進其他 agent 的
+/// instructions 與觸發訊息，換行可能偽造出標題或任務樹的項目。
+pub fn check_line(what: &str, text: &str, max: usize) -> Result<String, String> {
+    let t = check_text(what, text, max, true)?;
+    if t.contains(['\n', '\r']) {
+        return Err(format!("{what}不能換行"));
+    }
+    Ok(t)
+}
+
+/// 放進 prompt 的一行：連續的空白（含換行）合成一個空格，再截到 `max` 個字。
+pub fn one_line(text: &str, max: usize) -> String {
+    truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
+}
+
+/// 截到 `max` 個字，超過時加「…」。
+pub fn truncate(text: &str, max: usize) -> String {
+    let t = text.trim();
+    if t.chars().count() <= max {
+        t.to_string()
+    } else {
+        let mut s: String = t.chars().take(max).collect();
+        s.push('…');
+        s
+    }
+}

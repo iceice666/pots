@@ -23,12 +23,16 @@ gethostname = "1"
 getrandom = "0.3"
 serde.workspace = true
 serde_json.workspace = true
+# artifact 的版本 diff（proposal/architecture.md#crate-選型）。
+similar = "2"
 # 只用執行期檢查的查詢（`sqlx::query`），`macros` 只為了 `sqlx::migrate!` 內嵌 migration。
 sqlx = { version = "0.9", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+# agent profile 設定檔（profiles/*.toml）。
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"

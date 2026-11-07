@@ -15,7 +15,9 @@ use uuid::Uuid;
 /// - 1：M0。
 /// - 2：模型 provider 設定、`LoginUrl`、`ProviderTest`。
 /// - 3：Observational Memory（`Memory` 事件、觀察的釘選／修正／刪除、記憶用的模型）。
-pub const PROTOCOL_VERSION: u32 = 3;
+/// - 4：任務樹與 artifact（`GoalChanged`、`ArtifactChanged`、`ArtifactHistory`、
+///   `SaveArtifact`、`RestoreArtifact`、`Card::Milestone`、快照帶 Goal 與 artifact）。
+pub const PROTOCOL_VERSION: u32 = 4;
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -406,6 +408,17 @@ impl ArtifactView {
     }
 }
 
+/// Artifact 的一個版本（版本紀錄用）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRevisionView {
+    pub rev: u32,
+    /// 「你」「對話 agent」「Planner」這類顯示名稱。
+    pub author: String,
+    pub at: Timestamp,
+    /// 和前一版比較的 unified diff；第一版是空字串。
+    pub diff: String,
+}
+
 /// Artifact 的一個 `## ` 標題區段。agent 以區段為單位寫入，客戶端也逐段編輯，
 /// 這樣 agent 正在寫的那段可以單獨鎖住。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -489,6 +502,11 @@ pub enum Card {
         kind: ArtifactKind,
         title: String,
         note: String,
+    },
+    /// Planner 回報的里程碑（包含 Goal 完成）。
+    Milestone {
+        goal: GoalId,
+        text: String,
     },
     CatchUp {
         summary: String,
@@ -638,10 +656,39 @@ pub struct TeamPost {
     pub body: String,
 }
 
+/// Goal 的狀態。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GoalState {
+    #[default]
+    Active,
+    Done {
+        summary: String,
+    },
+    Cancelled {
+        reason: String,
+    },
+}
+
+impl GoalState {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Active => "進行中",
+            Self::Done { .. } => "已完成",
+            Self::Cancelled { .. } => "已取消",
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GoalView {
     pub id: GoalId,
     pub title: String,
+    #[serde(default)]
+    pub state: GoalState,
     pub planner_note: String,
     pub budget_used_pct: u8,
     pub tasks: Vec<TaskView>,
@@ -1077,6 +1124,12 @@ pub struct ProjectSnapshot {
     pub items: Vec<StreamItemView>,
     #[serde(default)]
     pub memory: MemoryView,
+    /// 所有 Goal（含任務樹），依建立時間。
+    #[serde(default)]
+    pub goals: Vec<GoalView>,
+    /// 所有 artifact，依建立時間。
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactView>,
 }
 
 /// 模型 provider（ChatGPT Plan，經 SIWC 授權）的狀態。不含任何 token；`Debug` 不印出
@@ -1183,6 +1236,23 @@ pub enum ServerEvent {
         project: ProjectId,
         memory: MemoryView,
     },
+    /// Goal 新增或有變（狀態、任務樹、Brief、Planner 備註），整筆替換。
+    GoalChanged {
+        seq: u64,
+        project: ProjectId,
+        goal: GoalView,
+    },
+    /// Artifact 新增或有變，整筆替換。
+    ArtifactChanged {
+        seq: u64,
+        project: ProjectId,
+        artifact: ArtifactView,
+    },
+    /// 回給送出 `ArtifactHistory` 的那條連線：最近的版本（最多 50 版），由新到舊。不寫入事件日誌。
+    ArtifactHistory {
+        artifact: ArtifactId,
+        revisions: Vec<ArtifactRevisionView>,
+    },
     /// 回給送出 `TestProvider` 的那條連線：成功時是可用的模型清單。不寫入事件日誌。
     ProviderTest {
         /// 對應 `TestProvider::request`。
@@ -1213,9 +1283,12 @@ impl ServerEvent {
             | Self::Inbox { seq, .. }
             | Self::ModelAuth { seq, .. }
             | Self::Providers { seq, .. }
-            | Self::Memory { seq, .. } => Some(*seq),
+            | Self::Memory { seq, .. }
+            | Self::GoalChanged { seq, .. }
+            | Self::ArtifactChanged { seq, .. } => Some(*seq),
             Self::Delta { .. }
             | Self::StreamingText { .. }
+            | Self::ArtifactHistory { .. }
             | Self::LoginUrl { .. }
             | Self::ProviderTest { .. }
             | Self::Error { .. } => None,
@@ -1297,6 +1370,23 @@ pub enum ClientCommand {
     DeleteObservation {
         project: ProjectId,
         id: ObservationId,
+    },
+    /// 儲存你對 artifact 的修改。`base_rev` 是你開始編輯時的版本；期間 agent 改過的話，
+    /// 伺服器以 `## ` 區段合併，同一段兩邊都改過就拒絕（回 `Error`，你的草稿留在客戶端）。
+    /// 成功時伺服器回 `ArtifactChanged`；改了 Goal 的 Brief 會叫醒 Planner。
+    SaveArtifact {
+        artifact: ArtifactId,
+        base_rev: u32,
+        body: String,
+    },
+    /// 列出 artifact 最近的版本；伺服器回 `ArtifactHistory`。
+    ArtifactHistory {
+        artifact: ArtifactId,
+    },
+    /// 把 artifact 還原成某一版的內容（新增一個版本，不刪除歷史）。
+    RestoreArtifact {
+        artifact: ArtifactId,
+        rev: u32,
     },
 }
 

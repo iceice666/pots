@@ -473,6 +473,23 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// 最近 `limit` 張卡片，由新到舊。
+    pub async fn recent_cards(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        limit: u32,
+    ) -> Result<Vec<StreamItemView>, Error> {
+        let rows = sqlx::query(
+            "SELECT id, body, created_at FROM stream_items WHERE project_id = ? AND kind = 'card' \
+             ORDER BY ord DESC LIMIT ?",
+        )
+        .bind(project.to_string())
+        .bind(i64::from(limit))
+        .fetch_all(conn)
+        .await?;
+        rows.iter().map(item_from_row).collect()
+    }
+
     /// 某個狀態的所有 item，依 project 與順序。給啟動時的復原用。
     pub async fn items_with_status(
         conn: &mut SqliteConnection,
@@ -582,10 +599,12 @@ impl Store {
         Ok(())
     }
 
-    /// 上次異常結束時還在跑的 run 一律標成失敗。
+    /// 上次異常結束時還在跑的 chat run 一律標成失敗。Planner 的 run 在持久化佇列裡，
+    /// 由 [`crate::planner::requeue_stale`] 放回佇列。
     pub async fn fail_stale_runs(conn: &mut SqliteConnection, error: &str) -> Result<u64, Error> {
         let done = sqlx::query(
-            "UPDATE agent_runs SET state = 'failed', error = ?, finished_at = ? WHERE state = 'running'",
+            "UPDATE agent_runs SET state = 'failed', error = ?, finished_at = ? \
+             WHERE state = 'running' AND agent <> 'planner'",
         )
         .bind(error)
         .bind(Timestamp::now().0)
@@ -1057,11 +1076,11 @@ fn kind_and_author(kind: &StreamItemKind) -> (&'static str, Option<Author>) {
     }
 }
 
-fn to_json(v: &impl Serialize) -> Result<String, Error> {
+pub(crate) fn to_json(v: &impl Serialize) -> Result<String, Error> {
     Ok(serde_json::to_string(v)?)
 }
 
-fn parse_id<T: std::str::FromStr>(s: String) -> Result<T, Error> {
+pub(crate) fn parse_id<T: std::str::FromStr>(s: String) -> Result<T, Error> {
     s.parse()
         .map_err(|_| Error::Corrupt(format!("資料庫裡的 ID 格式不對：{s}")))
 }

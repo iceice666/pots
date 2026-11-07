@@ -9,6 +9,7 @@
 //! API provider。伺服器不知道背後是不是 SIWC。使用中的 provider 由伺服器保存與路由
 //! （見 `providers` 模組）。
 
+mod artifacts;
 mod commands;
 pub mod config;
 mod datadir;
@@ -16,10 +17,14 @@ mod gateway;
 mod hub;
 mod memory;
 pub mod model_auth;
+mod planner;
+mod profiles;
 mod providers;
 mod runs;
 pub mod service;
 mod store;
+mod tasks;
+mod tools;
 mod ws;
 
 use std::collections::BTreeSet;
@@ -39,10 +44,11 @@ pub use datadir::{BuildInfo, ConnectionInfo, LocalToken, read_connection_info};
 pub use memory::OmConfig;
 pub use model_auth::{FakeModelAuth, ModelAuthControl};
 pub use providers::{ApiProviderFactory, NoApiProviders};
-pub use runs::{AgentProfile, CHAT_PROFILE};
 
 use crate::hub::{Hub, InstanceInfo};
 use crate::memory::Memory;
+use crate::planner::Planner;
+use crate::profiles::Profiles;
 use crate::providers::{ProviderRegistry, ProviderRouter};
 use crate::runs::Runs;
 use crate::store::{ItemStatus, Store};
@@ -111,6 +117,7 @@ pub(crate) struct App {
     pub hub: Arc<Hub>,
     pub store: Store,
     pub runs: Runs,
+    pub planner: Planner,
     pub memory: Memory,
     pub providers: Arc<ProviderRegistry>,
     pub model_auth: Arc<dyn ModelAuthControl>,
@@ -201,6 +208,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
     let port = config.check_supported()?;
 
     let data_dir = datadir::DataDir::acquire(&config.data_dir).await?;
+    let profiles = Profiles::load(&config.data_dir)?;
     // SIWC 的 host ID（`data_dir/host-id`）由組裝端用 `pots_llm` 載入，這裡不碰；
     // 組裝端可以在呼叫 `start` 之前用 `config.data_dir` 取得它。
 
@@ -276,18 +284,22 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         router.clone(),
         config.memory.clone(),
     );
+    let planner = Planner::new(hub.clone(), store.clone(), router.clone(), profiles.planner);
     let runs = Runs::new(
         hub.clone(),
         store.clone(),
         memory.clone(),
         router,
         deps.model_auth.status(),
+        profiles.chat,
+        planner.clone(),
     );
     let shutdown = CancellationToken::new();
     let app = Arc::new(App {
         hub: hub.clone(),
         store: store.clone(),
         runs: runs.clone(),
+        planner: planner.clone(),
         memory: memory.clone(),
         providers: registry,
         model_auth: deps.model_auth,
@@ -311,6 +323,9 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         Ok(projects) => projects.iter().for_each(|p| memory.wake(p.id)),
         Err(e) => tracing::error!(error = %e, "無法列出 project，稍後再整理記憶"),
     }
+    // 上次沒跑完（或排隊中）的 Planner run 接著跑。
+    planner.start();
+    planner.kick();
 
     let forwarder = tokio::spawn(forward_model_auth(hub.clone(), auth_rx, shutdown.clone()));
     let router = gateway::router(
@@ -330,6 +345,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
                 shutdown.cancelled().await;
                 tokio::join!(
                     runs.shutdown(RUN_SHUTDOWN_GRACE),
+                    planner.shutdown(RUN_SHUTDOWN_GRACE),
                     memory.shutdown(RUN_SHUTDOWN_GRACE)
                 );
             });
@@ -369,6 +385,8 @@ fn default_instance_name() -> String {
 async fn recover(hub: &Hub) -> Result<(), Error> {
     let mut txn = hub.begin().await?;
     let stale = Store::fail_stale_runs(txn.conn(), "服務中斷").await?;
+    let (requeued, gave_up) = planner::requeue_stale(txn.conn()).await?;
+    planner::note_gave_up(&mut txn, &gave_up).await?;
     let mut idle = BTreeSet::<ProjectId>::new();
     for (project, mut item) in Store::items_with_status(txn.conn(), ItemStatus::Streaming).await? {
         if let StreamItemKind::Agent(msg) = &mut item.kind {
@@ -406,6 +424,9 @@ async fn recover(hub: &Hub) -> Result<(), Error> {
     txn.commit().await?;
     if stale > 0 {
         tracing::warn!(stale, "上次結束時有 run 還在執行，已標成失敗");
+    }
+    if requeued > 0 {
+        tracing::warn!(requeued, "上次結束時有 Planner run 還在執行，已放回佇列");
     }
     Ok(())
 }

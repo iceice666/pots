@@ -19,11 +19,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pots_llm::LlmError;
-use pots_llm::agent::{self, AgentEvent, Hook, RunConfig, RunOutcome, Tool, ToolError};
-use pots_llm::{Item, ToolCall, ToolSpec};
+use pots_llm::agent::{self, AgentEvent, RunConfig, RunOutcome};
+use pots_llm::{Item, ToolCall};
 use pots_proto::{
-    AgentRole, AgentState, Author, ItemId, ModelAuthView, Msg, MsgStatus, ProjectId, ProviderId,
-    ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp, ToolSummary,
+    AgentRole, AgentState, Author, Card, GoalState, ItemId, ModelAuthView, Msg, MsgStatus,
+    ProjectId, ProviderId, ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp,
+    ToolSummary,
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -33,35 +34,15 @@ use uuid::Uuid;
 use crate::Error;
 use crate::hub::{Hub, LogTxn};
 use crate::memory::Memory;
+use crate::planner::Planner;
+use crate::profiles::AgentProfile;
 use crate::providers::{ProviderRouter, Route};
 use crate::store::{ItemStatus, ProjectRow, RunState, Store};
+use crate::tasks::{self, Principal};
+use crate::tools::{self, Scope, ToolCtx};
 
-/// Agent profile。M0 只有 chat，之後改成設定檔（`profiles/*.toml`）。
-pub struct AgentProfile {
-    pub name: &'static str,
-    pub role_prompt: &'static str,
-    pub max_turns: usize,
-}
-
-pub const CHAT_PROFILE: AgentProfile = AgentProfile {
-    name: "chat",
-    role_prompt: "你是 Pots 的 project 對話 agent，和使用者討論這個 project 的事情。\
-        預設用繁體中文回答，簡潔、直接；不確定時說不確定，不要編造。\
-        需要知道 project 的狀態或現在時間時，用工具查詢，不要猜。",
-    max_turns: 8,
-};
-
-/// 平台的 gate：每次工具呼叫前後把關。
-///
-/// M0 全部放行。之後在這裡做 profile 的工具授權、scope 檢查、預算與熔斷、
-/// Suspend／Effect 類工具的處理與 trace（`proposal/agent-collaboration.md`）。
-pub struct Gate {
-    #[allow(dead_code)]
-    profile: &'static AgentProfile,
-}
-
-#[async_trait::async_trait]
-impl Hook for Gate {}
+/// 對話 agent 的 instructions 裡列出幾張最近的里程碑卡片。
+const RECENT_MILESTONES: u32 = 5;
 
 #[derive(Clone, Debug)]
 pub struct Trigger {
@@ -89,6 +70,10 @@ struct Lane {
 struct Inner {
     hub: Arc<Hub>,
     store: Store,
+    /// chat profile。
+    profile: AgentProfile,
+    /// 對話 agent 的工具會建立 Goal、叫醒 Planner。
+    planner: Planner,
     /// 對話 agent 的歷史（記憶區塊 + 未觀察的尾巴）；寫進 `om_raw` 後叫醒它。
     memory: Memory,
     /// 每個 run 開始時決定要用的 provider 與模型。
@@ -112,11 +97,15 @@ impl Runs {
         memory: Memory,
         router: Arc<ProviderRouter>,
         auth_status: watch::Receiver<ModelAuthView>,
+        profile: AgentProfile,
+        planner: Planner,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 hub,
                 store,
+                profile,
+                planner,
                 memory,
                 router,
                 auth_status,
@@ -312,6 +301,10 @@ struct Reply {
     author: Author,
     text: String,
     tools: ToolLog,
+    /// 附在這則回覆下面的卡片（例如 `create_goal` 的 Goal 卡片）。
+    cards: Vec<Card>,
+    /// 工具寫進來、還沒搬到 `cards` 的卡片。
+    pending_cards: Arc<Mutex<Vec<Card>>>,
     /// 上一輪有文字輸出，下一段文字前要空一行。
     needs_break: bool,
 }
@@ -326,7 +319,7 @@ impl Reply {
                 text: self.text.clone(),
                 status,
                 tools: self.tools.summary(),
-                cards: Vec::new(),
+                cards: self.cards.clone(),
                 steer: false,
             }),
         }
@@ -351,7 +344,7 @@ async fn run_chat(
     batch: Vec<Trigger>,
     cancel: CancellationToken,
 ) -> Result<(), Error> {
-    let profile = &CHAT_PROFILE;
+    let profile = &inner.profile;
     let Some(row) = inner.store.project(project).await? else {
         return Err(Error::Corrupt(format!("找不到 project {project}")));
     };
@@ -366,6 +359,8 @@ async fn run_chat(
         },
         text: String::new(),
         tools: ToolLog::default(),
+        cards: Vec::new(),
+        pending_cards: Arc::new(Mutex::new(Vec::new())),
         needs_break: false,
     };
 
@@ -376,7 +371,7 @@ async fn run_chat(
             "kind": "messages",
             "items": batch.iter().map(|t| t.item.to_string()).collect::<Vec<_>>(),
         });
-        Store::insert_run(txn.conn(), run_id, project, profile.name, &trigger).await?;
+        Store::insert_run(txn.conn(), run_id, project, &profile.name, &trigger).await?;
         for t in &batch {
             consume(&mut txn, project, t.item, &t.text, Some(run_id)).await?;
         }
@@ -586,24 +581,49 @@ async fn drive_loop(
         .map_err(RunError::Server)?;
     let history = close_dangling_calls(history);
 
-    let mut instructions = CHAT_PROFILE.role_prompt.to_string();
+    let profile = &inner.profile;
+    let mut instructions = profile.role_prompt().to_string();
     instructions.push_str(&format!("\n\n這個 project 叫「{}」。", project.name));
     if !project.instructions.trim().is_empty() {
         instructions.push_str("\n\n# Project 指示\n\n");
         instructions.push_str(project.instructions.trim());
     }
+    let goals = goal_overview(inner, project.id)
+        .await
+        .map_err(RunError::Server)?;
+    if !goals.is_empty() {
+        instructions.push_str("\n\n");
+        instructions.push_str(&goals);
+    }
+    let queued = {
+        let inner = inner.clone();
+        let project = project.id;
+        Arc::new(move || inner.has_queued(project)) as Arc<dyn Fn() -> bool + Send + Sync>
+    };
+    let ctx = Arc::new(ToolCtx {
+        hub: inner.hub.clone(),
+        store: inner.store.clone(),
+        planner: inner.planner.clone(),
+        project: project.id,
+        scope: Scope::Project,
+        actor: Principal::agent(&profile.name),
+        reader: format!("chat:{}", project.id),
+        artifact_kinds: profile.artifact_kinds.clone(),
+        run_id,
+        cards: reply.pending_cards.clone(),
+        finished: Default::default(),
+        milestones: Default::default(),
+        goals_created: Default::default(),
+        queued: Some(queued),
+    });
+    let gate = ctx.gate();
     let config = RunConfig {
         provider: route.provider,
         model: route.model,
         instructions: Some(instructions),
-        tools: vec![Arc::new(GetStatus {
-            inner: inner.clone(),
-            project: project.id,
-        })],
-        hook: Arc::new(Gate {
-            profile: &CHAT_PROFILE,
-        }),
-        max_turns: CHAT_PROFILE.max_turns,
+        tools: tools::build(profile, ctx),
+        hook: Arc::new(gate),
+        max_turns: profile.max_turns,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -662,6 +682,8 @@ async fn on_event(
         }
         AgentEvent::ToolFinished { call, ok } => {
             reply.tools.finished(&call, ok);
+            let cards = std::mem::take(&mut *reply.pending_cards.lock().unwrap());
+            reply.cards.extend(cards);
             log_update(inner, reply).await?;
         }
         AgentEvent::TurnCompleted { turn, usage } => {
@@ -717,8 +739,67 @@ fn close_dangling_calls(history: Vec<Item>) -> Vec<Item> {
     out
 }
 
+/// 對話 agent 的 instructions 裡的 Goal 概況：進行中的 Goal 與最近的里程碑。
+/// 里程碑卡片不寫進 `om_raw`（寫成使用者訊息會讓 Observer 誤認成使用者說的話），
+/// 改從這裡讓對話 agent 在下一輪看到並轉述。沒有內容時是空字串。
+async fn goal_overview(inner: &Inner, project: ProjectId) -> Result<String, Error> {
+    let mut tx = inner.store.read().await?;
+    let goals = tasks::goals(&mut tx, project).await?;
+    let mut out = String::new();
+    let active: Vec<_> = goals.iter().filter(|g| g.state.is_active()).collect();
+    if !active.is_empty() {
+        out.push_str("# 進行中的 Goal（細節與最新狀態用 get_status）\n\n");
+        for g in active {
+            let tasks = tasks::tasks(&mut tx, g.id).await?;
+            let open = tasks.iter().filter(|t| t.state.is_open()).count();
+            out.push_str(&format!(
+                "- 「{}」（goal_id：{}）：{} 個任務，{} 個未結束；Planner：{}\n",
+                tasks::one_line(&g.title, 120),
+                g.id,
+                tasks.len(),
+                open,
+                tasks::one_line(&g.planner_note, 120)
+            ));
+        }
+    }
+    let mut milestones = Vec::new();
+    for item in Store::recent_cards(&mut tx, project, RECENT_MILESTONES * 4).await? {
+        if let StreamItemKind::Card(Card::Milestone { goal, text }) = item.kind {
+            let title = goals
+                .iter()
+                .find(|g| g.id == goal)
+                .map_or("（已刪除）", |g| g.title.as_str());
+            let state = goals
+                .iter()
+                .find(|g| g.id == goal)
+                .map(|g| &g.state)
+                .filter(|s| !matches!(s, GoalState::Active))
+                .map(|s| format!("（{}）", s.label()))
+                .unwrap_or_default();
+            milestones.push(format!(
+                "- {} 「{}」{state}：{}",
+                format_utc(item.at),
+                tasks::one_line(title, 120),
+                tasks::one_line(&text, 300)
+            ));
+            if milestones.len() as u32 >= RECENT_MILESTONES {
+                break;
+            }
+        }
+    }
+    if !milestones.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("# Planner 最近的里程碑（新的在前；使用者在對話流裡也看得到）\n\n");
+        out.push_str(&milestones.join("\n"));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// 模型錯誤的白話說明，顯示在訊息裡。
-fn explain(e: &LlmError) -> String {
+pub(crate) fn explain(e: &LlmError) -> String {
     match e {
         LlmError::NeedsLogin => {
             "（需要先登入 ChatGPT 才能回覆。請在 Inbox 按「開始登入」，完成後再傳一次訊息。）"
@@ -738,54 +819,6 @@ fn explain(e: &LlmError) -> String {
             format!("（模型 provider 的 API key 無效或沒有權限，請到「設定」檢查：{m}）")
         }
         LlmError::Other(m) => format!("（回覆失敗：{m}）"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 唯讀工具
-
-/// `get_status`：project 的基本狀態。M2 之後加上任務樹。
-struct GetStatus {
-    inner: Arc<Inner>,
-    project: ProjectId,
-}
-
-#[async_trait::async_trait]
-impl Tool for GetStatus {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "get_status".into(),
-            description: "查詢這個 project 的狀態：名稱、建立時間、訊息數、現在時間（UTC），\
-                以及是否有使用者訊息在排隊。"
-                .into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false,
-            }),
-        }
-    }
-
-    async fn call(&self, _arguments: &str) -> Result<String, ToolError> {
-        let store = &self.inner.store;
-        let project = store
-            .project(self.project)
-            .await
-            .map_err(|e| ToolError(format!("讀取 project 失敗：{e}")))?
-            .ok_or_else(|| ToolError("找不到這個 project".into()))?;
-        let messages = store
-            .count_messages(self.project)
-            .await
-            .map_err(|e| ToolError(format!("讀取訊息數失敗：{e}")))?;
-        let status = serde_json::json!({
-            "project": project.name,
-            "agent": project.agent_name,
-            "created_at": format_utc(project.created_at),
-            "messages": messages,
-            "now": format_utc(Timestamp::now()),
-            "queued": self.inner.has_queued(self.project),
-        });
-        Ok(status.to_string())
     }
 }
 

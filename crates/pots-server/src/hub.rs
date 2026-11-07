@@ -197,9 +197,16 @@ impl Hub {
     async fn snapshot(&self, state: &HubState) -> Result<InstanceSnapshot, Error> {
         let mut projects = Vec::new();
         for p in self.store.list_projects().await? {
-            let memory = {
+            let (memory, goals, artifacts) = {
                 let mut conn = self.store.acquire().await?;
-                crate::memory::view(&mut conn, p.id).await?
+                let memory = crate::memory::view(&mut conn, p.id).await?;
+                let goals = crate::tasks::project_goals(&mut conn, p.id).await?;
+                let artifacts = crate::artifacts::list(&mut conn, p.id)
+                    .await?
+                    .iter()
+                    .map(|a| a.view())
+                    .collect();
+                (memory, goals, artifacts)
             };
             projects.push(ProjectSnapshot {
                 id: p.id,
@@ -208,6 +215,8 @@ impl Hub {
                 agent_state: state.agent_state(p.id),
                 items: self.store.latest_items(p.id, SNAPSHOT_ITEMS).await?,
                 memory,
+                goals,
+                artifacts,
             });
         }
         Ok(InstanceSnapshot {

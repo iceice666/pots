@@ -2,14 +2,18 @@
 //! 被拒絕或失敗時只回給發出指令的連線一個 `Error`。
 
 use pots_proto::{
-    AgentState, Author, ClientCommand, ItemId, Msg, MsgStatus, ProjectId, ProjectSnapshot,
-    SendMode, ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp,
+    AgentState, ArtifactId, ArtifactKind, Author, ClientCommand, ItemId, Msg, MsgStatus, ProjectId,
+    ProjectSnapshot, SendMode, ServerEvent, StreamItemKind, StreamItemView, StreamScope, TaskId,
+    Timestamp,
 };
 use tokio::sync::mpsc;
 
 use crate::App;
+use crate::artifacts::{self, ArtifactRow};
+use crate::planner::{self, PlannerTrigger};
 use crate::runs::Trigger;
 use crate::store::{ItemStatus, ProjectRow, Store};
+use crate::tasks::{self, Cause, Principal, TaskState};
 
 const MAX_PROJECT_NAME: usize = 100;
 
@@ -48,6 +52,9 @@ async fn run(app: &App, cmd: ClientCommand) -> Result<Option<ServerEvent>, Strin
             .map(|url| Some(ServerEvent::LoginUrl { url }))
             .map_err(|e| format!("無法開始登入：{e}"));
     }
+    if let ClientCommand::ArtifactHistory { artifact } = cmd {
+        return artifact_history(app, artifact).await.map(Some);
+    }
     run_logged(app, cmd).await.map(|()| None)
 }
 
@@ -65,7 +72,17 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             app.runs.stop(project);
             Ok(())
         }
-        ClientCommand::Decide { .. } | ClientCommand::Cancel { .. } => Err("尚未支援".into()),
+        ClientCommand::Decide { .. } => Err("尚未支援".into()),
+        ClientCommand::Cancel { task } => cancel_task(app, task).await,
+        ClientCommand::SaveArtifact {
+            artifact,
+            base_rev,
+            body,
+        } => save_artifact(app, artifact, Edit::Save { base_rev, body }).await,
+        ClientCommand::RestoreArtifact { artifact, rev } => {
+            save_artifact(app, artifact, Edit::Restore { rev }).await
+        }
+        ClientCommand::ArtifactHistory { .. } => unreachable!("在 run 處理"),
         ClientCommand::StartModelLogin => unreachable!("在 run 處理"),
         ClientCommand::CancelModelLogin => {
             app.model_auth.cancel_login().await;
@@ -157,6 +174,8 @@ async fn create_project(app: &App, name: String) -> Result<(), String> {
             agent_state: AgentState::Idle,
             items: Vec::new(),
             memory: Default::default(),
+            goals: Vec::new(),
+            artifacts: Vec::new(),
         };
         txn.push(|seq| ServerEvent::ProjectAdded { seq, project })
             .await?;
@@ -164,6 +183,130 @@ async fn create_project(app: &App, name: String) -> Result<(), String> {
     }
     .await;
     result.map_err(internal)
+}
+
+/// 這個 project 屬於本機使用者（`Store::project` 依 user 過濾）。
+async fn owns(app: &App, project: ProjectId) -> Result<bool, crate::Error> {
+    Ok(app.store.project(project).await?.is_some())
+}
+
+/// 你對 artifact 的修改。
+enum Edit {
+    Save { base_rev: u32, body: String },
+    Restore { rev: u32 },
+}
+
+/// 儲存或還原 artifact。改了進行中 Goal 的 Brief 時叫醒 Planner（你的編輯就是 steer）。
+async fn save_artifact(app: &App, id: ArtifactId, edit: Edit) -> Result<(), String> {
+    let result: Result<Result<(), String>, crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        let Some(row) = artifacts::get(txn.conn(), id).await? else {
+            return Ok(Err("找不到這份 artifact".into()));
+        };
+        if !owns(app, row.project).await? {
+            return Ok(Err("找不到這份 artifact".into()));
+        }
+        let saved = match &edit {
+            Edit::Save { base_rev, body } => {
+                artifacts::human_save(txn.conn(), &row, *base_rev, body).await?
+            }
+            Edit::Restore { rev } => artifacts::restore(txn.conn(), &row, *rev).await?,
+        };
+        let new: ArtifactRow = match saved {
+            Err(e) => return Ok(Err(e)),
+            // 沒有變化：重送目前的內容，讓客戶端收掉「未儲存」。
+            Ok(None) => {
+                artifacts::push_changed(&mut txn, &row).await?;
+                txn.commit().await?;
+                return Ok(Ok(()));
+            }
+            Ok(Some(new)) => new,
+        };
+        artifacts::push_changed(&mut txn, &new).await?;
+        let steer = match (new.kind, new.goal) {
+            (ArtifactKind::Brief, Some(goal))
+                if tasks::goal(txn.conn(), goal)
+                    .await?
+                    .is_some_and(|g| g.state.is_active()) =>
+            {
+                planner::enqueue(
+                    txn.conn(),
+                    new.project,
+                    goal,
+                    &PlannerTrigger::BriefEdited { rev: new.rev },
+                )
+                .await?;
+                Some(goal)
+            }
+            _ => None,
+        };
+        txn.commit_then(|| {
+            if let Some(goal) = steer {
+                app.planner.steer(goal);
+            }
+        })
+        .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    result.map_err(internal)?
+}
+
+async fn artifact_history(app: &App, id: ArtifactId) -> Result<ServerEvent, String> {
+    let result: Result<Option<ServerEvent>, crate::Error> = async {
+        let mut conn = app.store.acquire().await?;
+        match artifacts::get(&mut conn, id).await? {
+            Some(a) if owns(app, a.project).await? => {}
+            _ => return Ok(None),
+        }
+        let revisions = artifacts::history(&mut conn, id).await?;
+        Ok(Some(ServerEvent::ArtifactHistory {
+            artifact: id,
+            revisions,
+        }))
+    }
+    .await;
+    result
+        .map_err(internal)?
+        .ok_or_else(|| "找不到這份 artifact".into())
+}
+
+/// 你取消一個任務。不叫醒 Planner（M2 的 Planner 只在 Goal 建立與 steer 時醒來）。
+async fn cancel_task(app: &App, id: TaskId) -> Result<(), String> {
+    let result: Result<Result<(), String>, crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        let Some(task) = tasks::task(txn.conn(), id).await? else {
+            return Ok(Err("找不到這個任務".into()));
+        };
+        let project = tasks::goal(txn.conn(), task.goal).await?.map(|g| g.project);
+        match project {
+            Some(p) if owns(app, p).await? => {}
+            _ => return Ok(Err("找不到這個任務".into())),
+        }
+        if !task.state.is_open() {
+            // 已經結束：重送目前的 Goal，讓客戶端蓋掉它先改的狀態。
+            tasks::push_goal(&mut txn, task.goal).await?;
+            txn.commit().await?;
+            return Ok(Err("這個任務已經結束".into()));
+        }
+        tasks::set_task_state(
+            txn.conn(),
+            &task,
+            &TaskState::Cancelled {
+                by: Principal::Human,
+            },
+            &Cause {
+                by: Principal::Human,
+                reason: String::new(),
+            },
+        )
+        .await?;
+        tasks::push_goal(&mut txn, task.goal).await?;
+        txn.commit().await?;
+        Ok(Ok(()))
+    }
+    .await;
+    result.map_err(internal)?
 }
 
 async fn send(
