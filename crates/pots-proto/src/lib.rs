@@ -14,7 +14,8 @@ use uuid::Uuid;
 ///
 /// - 1：M0。
 /// - 2：模型 provider 設定、`LoginUrl`、`ProviderTest`。
-pub const PROTOCOL_VERSION: u32 = 2;
+/// - 3：Observational Memory（`Memory` 事件、觀察的釘選／修正／刪除、記憶用的模型）。
+pub const PROTOCOL_VERSION: u32 = 3;
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -56,8 +57,17 @@ macro_rules! id_type {
 }
 
 id_type!(
-    InstanceId, ProjectId, ItemId, GoalId, TaskId, ApprovalId, ArtifactId, ScheduleId, ListenerId,
+    InstanceId,
+    ProjectId,
+    ItemId,
+    GoalId,
+    TaskId,
+    ApprovalId,
+    ArtifactId,
+    ScheduleId,
+    ListenerId,
     ProviderId,
+    ObservationId,
 );
 
 /// `$2`、`$1.40` 這類金額顯示。
@@ -230,6 +240,44 @@ pub struct ProjectView {
     pub items: Vec<StreamItemView>,
     pub goals: Vec<GoalView>,
     pub artifacts: Vec<ArtifactView>,
+    /// 對話 agent 記得什麼（「記憶」分頁）。
+    #[serde(default)]
+    pub memory: MemoryView,
+}
+
+// ---------------------------------------------------------------------------
+// Observational Memory（proposal/memory.md）
+
+/// 一條觀察最多幾個字（你的修正超過會被拒絕，模型的輸出超過會被截斷）。
+pub const MAX_OBSERVATION_CHARS: usize = 500;
+
+/// 一條觀察。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationView {
+    pub id: ObservationId,
+    /// 觀察到的對話發生的日期，`YYYY-MM-DD`。
+    pub date: String,
+    pub priority: Priority,
+    pub text: String,
+    /// 釘選的觀察在 Reflector 重寫時一定保留。
+    pub pinned: bool,
+    /// 你修正過。
+    pub edited: bool,
+}
+
+/// 一個 project 對話 agent 目前的記憶區塊：反思後的長期觀察與之後追加的觀察，
+/// 依時間排序。整份替換。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryView {
+    /// Reflector 每重寫一次加一；舊世代保留作稽核，不送給模型。
+    pub generation: u32,
+    /// Observer 摘要的「目前在做什麼」；還沒有時是空字串。
+    pub current_task: String,
+    pub observations: Vec<ObservationView>,
+    /// 記憶區塊的估計 token 數。
+    pub tokens: u64,
+    /// 上次整理記憶失敗的原因；成功後清掉。
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -962,6 +1010,18 @@ pub struct ProvidersView {
     pub active: Option<ProviderId>,
     /// 內建的 ChatGPT 一定在第一筆。
     pub items: Vec<ProviderView>,
+    /// 整理記憶（Observer／Reflector）用的模型。
+    #[serde(default)]
+    pub memory: MemoryModelView,
+}
+
+/// 整理記憶用的 provider 與模型，和對話 agent 分開設定。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryModelView {
+    /// `None`：跟對話 agent 用同一個 provider 與模型。
+    pub provider: Option<ProviderId>,
+    /// 空字串：用該 provider 設定的模型。
+    pub model: String,
 }
 
 impl ProvidersView {
@@ -1015,6 +1075,8 @@ pub struct ProjectSnapshot {
     pub agent_state: AgentState,
     /// 最近的對話；更早的走 HTTP `GET /projects/:id/items?before=<id>`。
     pub items: Vec<StreamItemView>,
+    #[serde(default)]
+    pub memory: MemoryView,
 }
 
 /// 模型 provider（ChatGPT Plan，經 SIWC 授權）的狀態。不含任何 token；`Debug` 不印出
@@ -1115,6 +1177,12 @@ pub enum ServerEvent {
         seq: u64,
         providers: ProvidersView,
     },
+    /// project 的記憶有變（Observer、Reflector 或你的修正），整份替換。
+    Memory {
+        seq: u64,
+        project: ProjectId,
+        memory: MemoryView,
+    },
     /// 回給送出 `TestProvider` 的那條連線：成功時是可用的模型清單。不寫入事件日誌。
     ProviderTest {
         /// 對應 `TestProvider::request`。
@@ -1144,7 +1212,8 @@ impl ServerEvent {
             | Self::TaskChanged { seq, .. }
             | Self::Inbox { seq, .. }
             | Self::ModelAuth { seq, .. }
-            | Self::Providers { seq, .. } => Some(*seq),
+            | Self::Providers { seq, .. }
+            | Self::Memory { seq, .. } => Some(*seq),
             Self::Delta { .. }
             | Self::StreamingText { .. }
             | Self::LoginUrl { .. }
@@ -1203,6 +1272,31 @@ pub enum ClientCommand {
     TestProvider {
         request: u64,
         draft: ProviderDraft,
+    },
+    /// 設定整理記憶用的 provider 與模型；伺服器回 `Providers`。
+    SetMemoryModel {
+        /// `None`：跟對話 agent 相同。
+        provider: Option<ProviderId>,
+        model: String,
+    },
+    /// 釘選或取消釘選一條觀察。有變動時伺服器回 `Memory`；被拒絕時回 `Error`，並重送一次
+    /// 目前的 `Memory`（下面兩個指令也一樣）。
+    PinObservation {
+        project: ProjectId,
+        id: ObservationId,
+        pinned: bool,
+    },
+    /// 修正一條觀察的文字（連續的空白合成一個空格，最多 [`MAX_OBSERVATION_CHARS`] 字）。
+    /// 原本的內容保留作稽核，模型只看到修正後的。
+    EditObservation {
+        project: ProjectId,
+        id: ObservationId,
+        text: String,
+    },
+    /// 刪除一條觀察（保留作稽核，不再送給模型）。
+    DeleteObservation {
+        project: ProjectId,
+        id: ObservationId,
     },
 }
 

@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use crate::Error;
 use crate::hub::{Hub, LogTxn};
+use crate::memory::Memory;
 use crate::providers::{ProviderRouter, Route};
 use crate::store::{ItemStatus, ProjectRow, RunState, Store};
 
@@ -88,6 +89,8 @@ struct Lane {
 struct Inner {
     hub: Arc<Hub>,
     store: Store,
+    /// 對話 agent 的歷史（記憶區塊 + 未觀察的尾巴）；寫進 `om_raw` 後叫醒它。
+    memory: Memory,
     /// 每個 run 開始時決定要用的 provider 與模型。
     router: Arc<ProviderRouter>,
     /// 模型授權控制的狀態，用來在 run 成功後校正 hub 裡的授權狀態。
@@ -106,6 +109,7 @@ impl Runs {
     pub fn new(
         hub: Arc<Hub>,
         store: Store,
+        memory: Memory,
         router: Arc<ProviderRouter>,
         auth_status: watch::Receiver<ModelAuthView>,
     ) -> Self {
@@ -113,6 +117,7 @@ impl Runs {
             inner: Arc::new(Inner {
                 hub,
                 store,
+                memory,
                 router,
                 auth_status,
                 lanes: Mutex::new(HashMap::new()),
@@ -228,7 +233,9 @@ async fn consume_without_run(
     for t in triggers {
         consume(&mut txn, project, t.item, &t.text, None).await?;
     }
-    txn.commit().await
+    txn.commit().await?;
+    inner.memory.wake(project);
+    Ok(())
 }
 
 /// 人類訊息進入原始歷史：寫 `om_raw`、標成已處理，並記一筆 `ItemUpdated`，
@@ -337,7 +344,7 @@ impl Reply {
     }
 }
 
-/// chat profile 的 run：完整原始歷史，沒有記憶。
+/// chat profile 的 run：歷史是 Observational Memory 的記憶區塊加上未觀察的原始尾巴。
 async fn run_chat(
     inner: &Arc<Inner>,
     project: ProjectId,
@@ -396,6 +403,7 @@ async fn run_chat(
         })
         .await?;
         txn.commit().await?;
+        inner.memory.wake(project);
     }
 
     // 整個 run 用同一個 provider 與模型，中途切換只影響下一個 run。
@@ -572,8 +580,8 @@ async fn drive_loop(
     cancel: CancellationToken,
 ) -> Result<RunOutcome, RunError> {
     let history = inner
-        .store
-        .om_raw_history(project.id)
+        .memory
+        .load(project.id, &cancel)
         .await
         .map_err(RunError::Server)?;
     let history = close_dangling_calls(history);
@@ -646,6 +654,7 @@ async fn on_event(
             let mut tx = inner.store.begin().await?;
             Store::append_om_raw(&mut tx, reply.project, Some(run_id), &item).await?;
             tx.commit().await?;
+            inner.memory.wake(reply.project);
         }
         AgentEvent::ToolStarted(call) => {
             reply.tools.started(&call);

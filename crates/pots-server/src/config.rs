@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use pots_proto::{InstanceKind, ProviderId};
 
 use crate::Error;
+use crate::memory::OmConfig;
 
 /// 事件日誌預設保留的筆數；更早的事件刪掉後，落後太多的客戶端改拿快照。
 pub const DEFAULT_EVENT_RETENTION: u64 = 50_000;
@@ -31,6 +32,8 @@ pub struct Config {
     /// 桌面版是 `None`：使用者到設定自己選；但 ChatGPT 在啟動時已登入的話會選 ChatGPT，
     /// 讓升級前就登入的使用者照常可用。之後一律以資料庫為準。
     pub default_provider: Option<ProviderId>,
+    /// Observational Memory 的閾值（`proposal/memory.md`）。
+    pub memory: OmConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +87,7 @@ impl Config {
             agent_name: "Pots".into(),
             instance_name: None,
             default_provider: None,
+            memory: OmConfig::default(),
         }
     }
 

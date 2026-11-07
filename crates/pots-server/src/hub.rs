@@ -197,12 +197,17 @@ impl Hub {
     async fn snapshot(&self, state: &HubState) -> Result<InstanceSnapshot, Error> {
         let mut projects = Vec::new();
         for p in self.store.list_projects().await? {
+            let memory = {
+                let mut conn = self.store.acquire().await?;
+                crate::memory::view(&mut conn, p.id).await?
+            };
             projects.push(ProjectSnapshot {
                 id: p.id,
                 name: p.name,
                 agent_name: p.agent_name,
                 agent_state: state.agent_state(p.id),
                 items: self.store.latest_items(p.id, SNAPSHOT_ITEMS).await?,
+                memory,
             });
         }
         Ok(InstanceSnapshot {

@@ -1,4 +1,4 @@
-//! Pots 服務：gateway（HTTP 與 WebSocket）、儲存、事件日誌與 agent run。
+//! Pots 服務：gateway（HTTP 與 WebSocket）、儲存、事件日誌、agent run 與 Observational Memory。
 //!
 //! 桌面版由 app 用 `--serve` 以子行程啟動自己，再呼叫 [`run_until_signal`]（或
 //! [`start`] 取得 [`ServerHandle`]）；多設備版是獨立的 `pots-server` binary。兩者走同一條
@@ -14,6 +14,7 @@ pub mod config;
 mod datadir;
 mod gateway;
 mod hub;
+mod memory;
 pub mod model_auth;
 mod providers;
 mod runs;
@@ -35,11 +36,13 @@ use tokio_util::sync::CancellationToken;
 
 pub use config::{AuthConfig, Config, ListenConfig, StoreConfig};
 pub use datadir::{BuildInfo, ConnectionInfo, LocalToken, read_connection_info};
+pub use memory::OmConfig;
 pub use model_auth::{FakeModelAuth, ModelAuthControl};
 pub use providers::{ApiProviderFactory, NoApiProviders};
 pub use runs::{AgentProfile, CHAT_PROFILE};
 
 use crate::hub::{Hub, InstanceInfo};
+use crate::memory::Memory;
 use crate::providers::{ProviderRegistry, ProviderRouter};
 use crate::runs::Runs;
 use crate::store::{ItemStatus, Store};
@@ -108,6 +111,7 @@ pub(crate) struct App {
     pub hub: Arc<Hub>,
     pub store: Store,
     pub runs: Runs,
+    pub memory: Memory,
     pub providers: Arc<ProviderRegistry>,
     pub model_auth: Arc<dyn ModelAuthControl>,
     pub shutdown: CancellationToken,
@@ -212,6 +216,10 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
     if pruned > 0 {
         tracing::debug!(pruned, "清掉舊的事件日誌");
     }
+    let backfilled = store.backfill_om_tokens().await?;
+    if backfilled > 0 {
+        tracing::info!(backfilled, "補算舊的原始歷史的 token 數");
+    }
 
     let auth_rx = deps.model_auth.status();
     let initial_auth = auth_rx.borrow().clone();
@@ -257,11 +265,22 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         txn.commit().await?;
     }
 
-    let router = ProviderRouter::new(registry.clone(), deps.provider, deps.model);
+    let router = Arc::new(ProviderRouter::new(
+        registry.clone(),
+        deps.provider,
+        deps.model,
+    ));
+    let memory = Memory::new(
+        hub.clone(),
+        store.clone(),
+        router.clone(),
+        config.memory.clone(),
+    );
     let runs = Runs::new(
         hub.clone(),
         store.clone(),
-        Arc::new(router),
+        memory.clone(),
+        router,
         deps.model_auth.status(),
     );
     let shutdown = CancellationToken::new();
@@ -269,6 +288,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         hub: hub.clone(),
         store: store.clone(),
         runs: runs.clone(),
+        memory: memory.clone(),
         providers: registry,
         model_auth: deps.model_auth,
         shutdown: shutdown.clone(),
@@ -286,6 +306,11 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         build: Some(BuildInfo::current()),
     };
     data_dir.write_connection_info(&info)?;
+    // 啟動不會再失敗了：上次關閉時可能還有沒整理完的記憶。
+    match store.list_projects().await {
+        Ok(projects) => projects.iter().for_each(|p| memory.wake(p.id)),
+        Err(e) => tracing::error!(error = %e, "無法列出 project，稍後再整理記憶"),
+    }
 
     let forwarder = tokio::spawn(forward_model_auth(hub.clone(), auth_rx, shutdown.clone()));
     let router = gateway::router(
@@ -303,7 +328,10 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
                 .with_graceful_shutdown(shutdown.clone().cancelled_owned());
             let (served, ()) = tokio::join!(serve, async {
                 shutdown.cancelled().await;
-                runs.shutdown(RUN_SHUTDOWN_GRACE).await;
+                tokio::join!(
+                    runs.shutdown(RUN_SHUTDOWN_GRACE),
+                    memory.shutdown(RUN_SHUTDOWN_GRACE)
+                );
             });
             let _ = forwarder.await;
             data_dir.remove_connection_info();

@@ -15,7 +15,12 @@
 //! 所有變更都在 [`Hub`](crate::hub::Hub) 的日誌鎖內進行：資料庫、key 檔與 `Providers`
 //! 事件一起寫，commit 之後才換掉記憶體裡的設定，所以快照、事件與路由一致。
 //!
-//! run 開始時用 [`ProviderRouter`] 依當下使用中的 provider 決定一次 [`Route`]，整個 run 都用它。
+//! - 整理記憶（Observer／Reflector）用的 provider 與模型存在 `instance_settings.memory_provider`
+//!   與 `memory_model`：provider 是空字串或沒有這列表示跟對話 agent 相同；模型是空字串時用該
+//!   provider 設定的模型。刪掉記憶用的 provider 時改回跟對話 agent 相同。
+//!
+//! run 開始時用 [`ProviderRouter`] 依當下使用中的 provider 決定一次 [`Route`]，整個 run 都用它；
+//! Observer／Reflector 每次呼叫用 [`ProviderRouter::resolve_memory`]。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,8 +28,8 @@ use std::time::Duration;
 
 use pots_llm::{LlmError, ModelProvider};
 use pots_proto::{
-    ModelOption, ProviderDraft, ProviderId, ProviderKind, ProviderView, ProvidersView, ServerEvent,
-    Timestamp,
+    MemoryModelView, ModelOption, ProviderDraft, ProviderId, ProviderKind, ProviderView,
+    ProvidersView, ServerEvent, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -34,6 +39,8 @@ use crate::{App, Error};
 
 pub(crate) const SETTING_ACTIVE: &str = "active_provider";
 pub(crate) const SETTING_CHATGPT_MODEL: &str = "chatgpt_model";
+pub(crate) const SETTING_MEMORY_PROVIDER: &str = "memory_provider";
+pub(crate) const SETTING_MEMORY_MODEL: &str = "memory_model";
 /// API key 檔案的目錄，相對於資料目錄。
 const SECRET_DIR: &str = "auth/providers";
 /// `TestProvider` 列模型的時限。
@@ -153,6 +160,10 @@ struct ProviderState {
     active: Option<ProviderId>,
     chatgpt_model: String,
     api: Vec<ApiEntry>,
+    /// 整理記憶用的 provider；`None` 跟對話 agent 相同。
+    memory_provider: Option<ProviderId>,
+    /// 整理記憶用的模型；空字串用該 provider 設定的模型。
+    memory_model: String,
 }
 
 impl ProviderState {
@@ -169,6 +180,10 @@ impl ProviderState {
         ProvidersView {
             active: self.active,
             items,
+            memory: MemoryModelView {
+                provider: self.memory_provider,
+                model: self.memory_model.clone(),
+            },
         }
     }
 
@@ -210,6 +225,8 @@ impl ProviderRegistry {
                 active: None,
                 chatgpt_model: String::new(),
                 api: Vec::new(),
+                memory_provider: None,
+                memory_model: String::new(),
             }),
         };
         let mut api = Vec::new();
@@ -224,11 +241,25 @@ impl ProviderRegistry {
             .setting(SETTING_CHATGPT_MODEL)
             .await?
             .unwrap_or_default();
+        let memory_model = store
+            .setting(SETTING_MEMORY_MODEL)
+            .await?
+            .unwrap_or_default();
         let mut state = ProviderState {
             active: None,
             chatgpt_model,
             api,
+            memory_provider: None,
+            memory_model,
         };
+        match store.setting(SETTING_MEMORY_PROVIDER).await? {
+            None => {}
+            Some(s) if s.is_empty() => {}
+            Some(s) => match s.parse::<ProviderId>() {
+                Ok(id) if state.contains(id) => state.memory_provider = Some(id),
+                _ => tracing::warn!(value = %s, "記憶用的 provider 不存在，改成跟對話 agent 相同"),
+            },
+        }
         let mut initial_active = None;
         match store.setting(SETTING_ACTIVE).await? {
             None => {
@@ -372,30 +403,54 @@ impl ProviderRouter {
         let state = self.registry.state.lock().unwrap();
         match state.active {
             None => Err(LlmError::NotConfigured),
-            Some(ProviderId::CHATGPT) => {
-                let model = if state.chatgpt_model.is_empty() {
-                    self.chatgpt_default_model.clone()
-                } else {
-                    state.chatgpt_model.clone()
-                };
-                Ok(Route {
-                    id: ProviderId::CHATGPT,
-                    provider: self.chatgpt.clone(),
-                    model,
-                })
-            }
-            Some(id) => {
-                let entry = state.entry(id).ok_or(LlmError::NotConfigured)?;
-                if entry.row.model.is_empty() {
-                    return Err(LlmError::Unsupported("請在設定選擇模型".into()));
-                }
-                Ok(Route {
-                    id,
-                    provider: entry.built.clone()?,
-                    model: entry.row.model.clone(),
-                })
-            }
+            Some(id) => self.route(&state, id, ""),
         }
+    }
+
+    /// 整理記憶（Observer／Reflector）用的 route：沒有另外設定時和 [`resolve`](Self::resolve)
+    /// 相同。
+    pub fn resolve_memory(&self) -> Result<Route, LlmError> {
+        let state = self.registry.state.lock().unwrap();
+        match state.memory_provider {
+            None => match state.active {
+                None => Err(LlmError::NotConfigured),
+                Some(id) => self.route(&state, id, ""),
+            },
+            Some(id) => self.route(&state, id, &state.memory_model),
+        }
+    }
+
+    /// `id` 這個 provider 的 route。`model` 非空時取代 provider 設定的模型。
+    fn route(&self, state: &ProviderState, id: ProviderId, model: &str) -> Result<Route, LlmError> {
+        let model = model.trim();
+        if id == ProviderId::CHATGPT {
+            let model = if !model.is_empty() {
+                model.to_string()
+            } else if state.chatgpt_model.is_empty() {
+                self.chatgpt_default_model.clone()
+            } else {
+                state.chatgpt_model.clone()
+            };
+            return Ok(Route {
+                id,
+                provider: self.chatgpt.clone(),
+                model,
+            });
+        }
+        let entry = state.entry(id).ok_or(LlmError::NotConfigured)?;
+        let model = if model.is_empty() {
+            entry.row.model.clone()
+        } else {
+            model.to_string()
+        };
+        if model.is_empty() {
+            return Err(LlmError::Unsupported("請在設定選擇模型".into()));
+        }
+        Ok(Route {
+            id,
+            provider: entry.built.clone()?,
+            model,
+        })
     }
 }
 
@@ -608,11 +663,20 @@ pub(crate) async fn delete(app: &App, id: ProviderId) -> Result<(), String> {
     if state.active == Some(id) {
         state.active = None;
     }
+    let memory_cleared = state.memory_provider == Some(id);
+    if memory_cleared {
+        state.memory_provider = None;
+        state.memory_model.clear();
+    }
     let providers = state.view();
     let result: Result<(), Error> = async {
         Store::delete_connection(txn.conn(), id).await?;
         if providers.active.is_none() {
             Store::set_setting(txn.conn(), SETTING_ACTIVE, "").await?;
+        }
+        if memory_cleared {
+            Store::set_setting(txn.conn(), SETTING_MEMORY_PROVIDER, "").await?;
+            Store::set_setting(txn.conn(), SETTING_MEMORY_MODEL, "").await?;
         }
         txn.push(|seq| ServerEvent::Providers { seq, providers })
             .await?;
@@ -639,6 +703,43 @@ pub(crate) async fn set_active(app: &App, id: ProviderId) -> Result<(), String> 
     let providers = state.view();
     let result: Result<(), Error> = async {
         Store::set_setting(txn.conn(), SETTING_ACTIVE, &id.to_string()).await?;
+        txn.push(|seq| ServerEvent::Providers { seq, providers })
+            .await?;
+        txn.commit_then(|| registry.replace(state)).await
+    }
+    .await;
+    result.map_err(internal)
+}
+
+/// `SetMemoryModel`。`provider` 為 `None` 時跟對話 agent 相同，模型一併清掉。
+pub(crate) async fn set_memory(
+    app: &App,
+    provider: Option<ProviderId>,
+    model: String,
+) -> Result<(), String> {
+    let registry = &app.providers;
+    let model = model.trim().to_string();
+    if model.chars().count() > MAX_NAME {
+        return Err(format!("模型 ID 最多 {MAX_NAME} 個字"));
+    }
+    let mut txn = app.hub.begin().await.map_err(internal)?;
+    let mut state = registry.snapshot();
+    if let Some(id) = provider
+        && !state.contains(id)
+    {
+        return Err("找不到這個 provider".into());
+    }
+    state.memory_provider = provider;
+    state.memory_model = if provider.is_some() {
+        model
+    } else {
+        String::new()
+    };
+    let providers = state.view();
+    let result: Result<(), Error> = async {
+        let id = provider.map(|id| id.to_string()).unwrap_or_default();
+        Store::set_setting(txn.conn(), SETTING_MEMORY_PROVIDER, &id).await?;
+        Store::set_setting(txn.conn(), SETTING_MEMORY_MODEL, &providers.memory.model).await?;
         txn.push(|seq| ServerEvent::Providers { seq, providers })
             .await?;
         txn.commit_then(|| registry.replace(state)).await

@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use pots_llm::Item;
 use pots_proto::{
-    Author, InstanceId, ItemId, ProjectId, ProviderId, ProviderKind, ServerEvent, StreamItemKind,
-    StreamItemView, Timestamp,
+    Author, InstanceId, ItemId, ObservationId, Priority, ProjectId, ProviderId, ProviderKind,
+    ServerEvent, StreamItemKind, StreamItemView, Timestamp,
 };
 use serde::Serialize;
 use sqlx::Row;
+use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePool, SqlitePoolOptions,
-    SqliteSynchronous,
+    Sqlite, SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePool,
+    SqlitePoolOptions, SqliteSynchronous,
 };
 use uuid::Uuid;
 
@@ -97,6 +98,113 @@ impl RunState {
     }
 }
 
+/// `om_raw` 的一列。
+#[derive(Clone, Debug)]
+pub struct RawRow {
+    pub seq: i64,
+    pub item: Item,
+    pub tokens: u64,
+    pub created_at: Timestamp,
+}
+
+/// 觀察是誰寫的（`om_observations.source`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservationSource {
+    Observer,
+    Reflector,
+    /// 你修正過的。
+    Human,
+}
+
+impl ObservationSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Observer => "observer",
+            Self::Reflector => "reflector",
+            Self::Human => "human",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, Error> {
+        match s {
+            "observer" => Ok(Self::Observer),
+            "reflector" => Ok(Self::Reflector),
+            "human" => Ok(Self::Human),
+            _ => Err(Error::Corrupt(format!("觀察的來源不對：{s}"))),
+        }
+    }
+}
+
+/// `om_observations` 的狀態。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservationState {
+    Active,
+    /// 被你修正後的版本取代。
+    Superseded,
+    Deleted,
+}
+
+impl ObservationState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Superseded => "superseded",
+            Self::Deleted => "deleted",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, Error> {
+        match s {
+            "active" => Ok(Self::Active),
+            "superseded" => Ok(Self::Superseded),
+            "deleted" => Ok(Self::Deleted),
+            _ => Err(Error::Corrupt(format!("觀察的狀態不對：{s}"))),
+        }
+    }
+}
+
+/// `om_observations` 的一列。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservationRow {
+    pub id: ObservationId,
+    pub generation: i64,
+    pub seq: i64,
+    pub date: String,
+    pub priority: Priority,
+    pub text: String,
+    pub pinned: bool,
+    pub source: ObservationSource,
+    pub state: ObservationState,
+    pub replaces: Option<ObservationId>,
+}
+
+/// `om_state` 的一列；沒有這列時是 [`Default`]。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OmStateRow {
+    pub generation: i64,
+    pub current_task: String,
+    pub revision: i64,
+    pub reflected_tokens: u64,
+    pub last_error: Option<String>,
+}
+
+fn priority_str(p: Priority) -> &'static str {
+    match p {
+        Priority::High => "high",
+        Priority::Medium => "medium",
+        Priority::Low => "low",
+    }
+}
+
+fn parse_priority(s: &str) -> Result<Priority, Error> {
+    match s {
+        "high" => Ok(Priority::High),
+        "medium" => Ok(Priority::Medium),
+        "low" => Ok(Priority::Low),
+        _ => Err(Error::Corrupt(format!("觀察的優先序不對：{s}"))),
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -129,6 +237,16 @@ impl Store {
     /// WAL 下讀鎖升級會直接回 SQLITE_BUSY，busy_timeout 也救不了。
     pub async fn begin(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, Error> {
         Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
+    }
+
+    /// 只讀的 transaction：幾個查詢看到同一個快照（WAL），不拿寫入鎖。
+    pub async fn read(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, Error> {
+        Ok(self.pool.begin().await?)
+    }
+
+    /// 一條連線，給收 `&mut SqliteConnection` 的讀取方法用。
+    pub async fn acquire(&self) -> Result<PoolConnection<Sqlite>, Error> {
+        Ok(self.pool.acquire().await?)
     }
 
     // -----------------------------------------------------------------------
@@ -479,7 +597,7 @@ impl Store {
     // -----------------------------------------------------------------------
     // om_raw
 
-    /// 追加一筆原始歷史，`seq` 接在這個 project 的最後一筆之後。
+    /// 追加一筆原始歷史，`seq` 接在這個 project 的最後一筆之後，順便記下估計的 token 數。
     pub async fn append_om_raw(
         conn: &mut SqliteConnection,
         project: ProjectId,
@@ -487,17 +605,289 @@ impl Store {
         item: &Item,
     ) -> Result<(), Error> {
         sqlx::query(
-            "INSERT INTO om_raw (project_id, seq, run_id, item, created_at) \
-             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM om_raw WHERE project_id = ?), ?, ?, ?)",
+            "INSERT INTO om_raw (project_id, seq, run_id, item, created_at, tokens) \
+             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM om_raw WHERE project_id = ?), ?, ?, ?, ?)",
         )
         .bind(project.to_string())
         .bind(project.to_string())
         .bind(run_id.map(|r| r.to_string()))
         .bind(to_json(item)?)
         .bind(Timestamp::now().0)
+        .bind(crate::memory::tokens::item(item) as i64)
         .execute(conn)
         .await?;
         Ok(())
+    }
+
+    /// 升級前寫入、還沒有 token 數的原始歷史：補算。回傳補了幾筆。
+    pub async fn backfill_om_tokens(&self) -> Result<u64, Error> {
+        let rows = sqlx::query("SELECT project_id, seq, item FROM om_raw WHERE tokens IS NULL")
+            .fetch_all(&self.pool)
+            .await?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.begin().await?;
+        for row in &rows {
+            let project: String = row.try_get("project_id")?;
+            let seq: i64 = row.try_get("seq")?;
+            let item: String = row.try_get("item")?;
+            let tokens = match serde_json::from_str::<Item>(&item) {
+                Ok(item) => crate::memory::tokens::item(&item),
+                Err(_) => crate::memory::tokens::estimate(&item),
+            };
+            sqlx::query("UPDATE om_raw SET tokens = ? WHERE project_id = ? AND seq = ?")
+                .bind(tokens as i64)
+                .bind(project)
+                .bind(seq)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(rows.len() as u64)
+    }
+
+    /// 還沒整理進觀察的原始歷史，依時間排序。
+    pub async fn om_unobserved(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+    ) -> Result<Vec<RawRow>, Error> {
+        let rows = sqlx::query(
+            "SELECT seq, item, tokens, created_at FROM om_raw \
+             WHERE project_id = ? AND observed = FALSE ORDER BY seq",
+        )
+        .bind(project.to_string())
+        .fetch_all(conn)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let item: String = row.try_get("item")?;
+                let item: Item = serde_json::from_str(&item)?;
+                let tokens: Option<i64> = row.try_get("tokens")?;
+                Ok(RawRow {
+                    seq: row.try_get("seq")?,
+                    tokens: tokens.map_or_else(|| crate::memory::tokens::item(&item), |t| t as u64),
+                    item,
+                    created_at: Timestamp(row.try_get("created_at")?),
+                })
+            })
+            .collect()
+    }
+
+    /// 還沒整理的原始歷史共幾個 token。
+    pub async fn om_unobserved_tokens(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+    ) -> Result<u64, Error> {
+        let n: Option<i64> = sqlx::query_scalar(
+            "SELECT CAST(COALESCE(SUM(tokens), 0) AS BIGINT) FROM om_raw \
+             WHERE project_id = ? AND observed = FALSE",
+        )
+        .bind(project.to_string())
+        .fetch_one(conn)
+        .await?;
+        Ok(n.unwrap_or(0).max(0) as u64)
+    }
+
+    /// 把 `first..=last` 這段還沒觀察的原始歷史標成已觀察，回傳標了幾筆。
+    /// 只標 `observed = FALSE` 的列：同一段已經被觀察過時回傳的數量會少於預期，
+    /// 呼叫端據此放棄這次的結果（冪等鍵是 `(project_id, 最後一則 seq)`）。
+    pub async fn om_mark_observed(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        first: i64,
+        last: i64,
+    ) -> Result<u64, Error> {
+        let done = sqlx::query(
+            "UPDATE om_raw SET observed = TRUE \
+             WHERE project_id = ? AND seq >= ? AND seq <= ? AND observed = FALSE",
+        )
+        .bind(project.to_string())
+        .bind(first)
+        .bind(last)
+        .execute(conn)
+        .await?;
+        Ok(done.rows_affected())
+    }
+
+    pub async fn om_state(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+    ) -> Result<OmStateRow, Error> {
+        let row = sqlx::query(
+            "SELECT generation, current_task, revision, reflected_tokens, last_error \
+             FROM om_state WHERE project_id = ?",
+        )
+        .bind(project.to_string())
+        .fetch_optional(conn)
+        .await?;
+        let Some(row) = row else {
+            return Ok(OmStateRow::default());
+        };
+        let reflected: i64 = row.try_get("reflected_tokens")?;
+        Ok(OmStateRow {
+            generation: row.try_get("generation")?,
+            current_task: row.try_get("current_task")?,
+            revision: row.try_get("revision")?,
+            reflected_tokens: reflected.max(0) as u64,
+            last_error: row.try_get("last_error")?,
+        })
+    }
+
+    pub async fn save_om_state(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        state: &OmStateRow,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "INSERT INTO om_state \
+             (project_id, generation, current_task, revision, reflected_tokens, last_error, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (project_id) DO UPDATE SET generation = excluded.generation, \
+             current_task = excluded.current_task, revision = excluded.revision, \
+             reflected_tokens = excluded.reflected_tokens, last_error = excluded.last_error, \
+             updated_at = excluded.updated_at",
+        )
+        .bind(project.to_string())
+        .bind(state.generation)
+        .bind(&state.current_task)
+        .bind(state.revision)
+        .bind(state.reflected_tokens as i64)
+        .bind(state.last_error.as_deref())
+        .bind(Timestamp::now().0)
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
+    /// 某一代目前有效的觀察，依順序。
+    pub async fn om_observations(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        generation: i64,
+    ) -> Result<Vec<ObservationRow>, Error> {
+        let rows = sqlx::query(
+            "SELECT id, generation, seq, date, priority, text, pinned, source, state, replaces \
+             FROM om_observations WHERE project_id = ? AND generation = ? AND state = 'active' \
+             ORDER BY seq, created_at, id",
+        )
+        .bind(project.to_string())
+        .bind(generation)
+        .fetch_all(conn)
+        .await?;
+        rows.iter().map(observation_from_row).collect()
+    }
+
+    /// 一條觀察（不論狀態）；不屬於這個 project 時是 `None`。
+    pub async fn om_observation(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        id: ObservationId,
+    ) -> Result<Option<ObservationRow>, Error> {
+        let row = sqlx::query(
+            "SELECT id, generation, seq, date, priority, text, pinned, source, state, replaces \
+             FROM om_observations WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project.to_string())
+        .fetch_optional(conn)
+        .await?;
+        row.as_ref().map(observation_from_row).transpose()
+    }
+
+    /// 這一代下一條觀察的 `seq`。
+    pub async fn om_next_seq(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        generation: i64,
+    ) -> Result<i64, Error> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM om_observations \
+             WHERE project_id = ? AND generation = ?",
+        )
+        .bind(project.to_string())
+        .bind(generation)
+        .fetch_one(conn)
+        .await?;
+        Ok(n)
+    }
+
+    pub async fn insert_observation(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        row: &ObservationRow,
+        through_seq: Option<i64>,
+    ) -> Result<(), Error> {
+        let now = Timestamp::now().0;
+        sqlx::query(
+            "INSERT INTO om_observations \
+             (id, project_id, generation, seq, date, priority, text, pinned, source, state, \
+              replaces, through_seq, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(row.id.to_string())
+        .bind(project.to_string())
+        .bind(row.generation)
+        .bind(row.seq)
+        .bind(&row.date)
+        .bind(priority_str(row.priority))
+        .bind(&row.text)
+        .bind(row.pinned)
+        .bind(row.source.as_str())
+        .bind(row.state.as_str())
+        .bind(row.replaces.map(|r| r.to_string()))
+        .bind(through_seq)
+        .bind(now)
+        .bind(now)
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_observation_state(
+        conn: &mut SqliteConnection,
+        id: ObservationId,
+        state: ObservationState,
+    ) -> Result<(), Error> {
+        sqlx::query("UPDATE om_observations SET state = ?, updated_at = ? WHERE id = ?")
+            .bind(state.as_str())
+            .bind(Timestamp::now().0)
+            .bind(id.to_string())
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_observation_pinned(
+        conn: &mut SqliteConnection,
+        id: ObservationId,
+        pinned: bool,
+    ) -> Result<(), Error> {
+        sqlx::query("UPDATE om_observations SET pinned = ?, updated_at = ? WHERE id = ?")
+            .bind(pinned)
+            .bind(Timestamp::now().0)
+            .bind(id.to_string())
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+
+    /// 某一代所有的觀察（含被取代與刪除的），給測試與稽核用。
+    #[cfg(test)]
+    pub async fn om_generation_rows(
+        &self,
+        project: ProjectId,
+        generation: i64,
+    ) -> Result<Vec<ObservationRow>, Error> {
+        let rows = sqlx::query(
+            "SELECT id, generation, seq, date, priority, text, pinned, source, state, replaces \
+             FROM om_observations WHERE project_id = ? AND generation = ? ORDER BY seq, created_at, id",
+        )
+        .bind(project.to_string())
+        .bind(generation)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(observation_from_row).collect()
     }
 
     // -----------------------------------------------------------------------
@@ -606,6 +996,7 @@ impl Store {
     }
 
     /// 這個 project 的完整原始歷史，依時間排序。
+    #[cfg(test)]
     pub async fn om_raw_history(&self, project: ProjectId) -> Result<Vec<Item>, Error> {
         let rows: Vec<String> =
             sqlx::query_scalar("SELECT item FROM om_raw WHERE project_id = ? ORDER BY seq")
@@ -616,6 +1007,25 @@ impl Store {
             .map(|s| serde_json::from_str(s).map_err(Error::from))
             .collect()
     }
+}
+
+fn observation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ObservationRow, Error> {
+    let priority: String = row.try_get("priority")?;
+    let source: String = row.try_get("source")?;
+    let state: String = row.try_get("state")?;
+    let replaces: Option<String> = row.try_get("replaces")?;
+    Ok(ObservationRow {
+        id: parse_id(row.try_get("id")?)?,
+        generation: row.try_get("generation")?,
+        seq: row.try_get("seq")?,
+        date: row.try_get("date")?,
+        priority: parse_priority(&priority)?,
+        text: row.try_get("text")?,
+        pinned: row.try_get("pinned")?,
+        source: ObservationSource::parse(&source)?,
+        state: ObservationState::parse(&state)?,
+        replaces: replaces.map(parse_id).transpose()?,
+    })
 }
 
 fn project_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ProjectRow, Error> {

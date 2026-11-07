@@ -13,6 +13,8 @@ path = "src/main.rs"
 pots-proto = { path = "../pots-proto" }
 pots-llm = { path = "../pots-llm" }
 async-trait = "0.1"
+# 對話紀錄給 Observer 看時用本機時區（觀察的日期跟著使用者的日子走）。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 dirs = "6"

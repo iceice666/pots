@@ -76,11 +76,55 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             .logout()
             .await
             .map_err(|e| format!("無法登出：{e}")),
-        ClientCommand::SaveProvider { draft } => crate::providers::save(app, draft).await,
-        ClientCommand::DeleteProvider { id } => crate::providers::delete(app, id).await,
-        ClientCommand::SetActiveProvider { id } => crate::providers::set_active(app, id).await,
+        ClientCommand::SaveProvider { draft } => {
+            retry_memory(app, crate::providers::save(app, draft).await).await
+        }
+        ClientCommand::DeleteProvider { id } => {
+            retry_memory(app, crate::providers::delete(app, id).await).await
+        }
+        ClientCommand::SetActiveProvider { id } => {
+            retry_memory(app, crate::providers::set_active(app, id).await).await
+        }
         ClientCommand::TestProvider { .. } => unreachable!("在 handle 處理"),
+        ClientCommand::SetMemoryModel { provider, model } => {
+            retry_memory(
+                app,
+                crate::providers::set_memory(app, provider, model).await,
+            )
+            .await
+        }
+        ClientCommand::PinObservation {
+            project,
+            id,
+            pinned,
+        } => resync_on_error(app, project, app.memory.pin(project, id, pinned).await).await,
+        ClientCommand::EditObservation { project, id, text } => {
+            resync_on_error(app, project, app.memory.edit(project, id, text).await).await
+        }
+        ClientCommand::DeleteObservation { project, id } => {
+            resync_on_error(app, project, app.memory.delete(project, id).await).await
+        }
     }
+}
+
+/// provider 或記憶用的模型改了：整理記憶不用等冷卻結束，馬上再試。
+async fn retry_memory(app: &App, result: Result<(), String>) -> Result<(), String> {
+    if result.is_ok() {
+        app.memory.retry_all().await;
+    }
+    result
+}
+
+/// 觀察的修改被拒絕時，重送一次目前的記憶，讓客戶端丟掉它先改的內容。
+async fn resync_on_error(
+    app: &App,
+    project: ProjectId,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    if result.is_err() && app.store.project(project).await.ok().flatten().is_some() {
+        app.memory.resync(project).await;
+    }
+    result
 }
 
 fn internal(e: crate::Error) -> String {
@@ -112,6 +156,7 @@ async fn create_project(app: &App, name: String) -> Result<(), String> {
             agent_name: row.agent_name.clone(),
             agent_state: AgentState::Idle,
             items: Vec::new(),
+            memory: Default::default(),
         };
         txn.push(|seq| ServerEvent::ProjectAdded { seq, project })
             .await?;
