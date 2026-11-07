@@ -942,7 +942,13 @@ pub enum ServerEvent {
         item_id: ItemId,
         text: String,
     },
-    /// 訊息內容有變（例如工具摘要），整筆替換；串流中重連時也用它補上目前的全文。
+    /// 串流中訊息到目前為止的全文，取代客戶端手上的內容；重連時補送，不寫入事件日誌。
+    StreamingText {
+        scope: StreamScope,
+        item_id: ItemId,
+        text: String,
+    },
+    /// 訊息內容有變（例如工具摘要），整筆替換。
     ItemUpdated {
         seq: u64,
         scope: StreamScope,
@@ -989,7 +995,7 @@ impl ServerEvent {
             | Self::TaskChanged { seq, .. }
             | Self::Inbox { seq, .. }
             | Self::ModelAuth { seq, .. } => Some(*seq),
-            Self::Delta { .. } | Self::Error { .. } => None,
+            Self::Delta { .. } | Self::StreamingText { .. } | Self::Error { .. } => None,
         }
     }
 }

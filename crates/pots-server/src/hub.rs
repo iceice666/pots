@@ -1,0 +1,304 @@
+//! 事件日誌與廣播（`proposal/ux-and-frontend.md#即時協定`）。
+//!
+//! 所有帶 `seq` 的事件都經過 [`LogTxn`]：狀態變更與事件寫在同一個 transaction，
+//! commit 之後才廣播，所以「先寫日誌再廣播」，日誌順序就是廣播順序。快照與補送也在
+//! 同一把鎖下讀，客戶端拿到的狀態與之後收到的事件不會重疊或漏掉。
+//!
+//! `Delta` 不寫日誌，但要和「重連時補送的串流全文」對齊：每個串流中的訊息在記憶體裡
+//! 留一份目前的全文，`Delta` 帶著套用後的長度廣播，連線端據此丟掉已經包含在
+//! `StreamingText` 裡的增量。
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use pots_proto::{
+    AgentState, InstanceSnapshot, ItemId, ModelAuthView, ProjectId, ProjectSnapshot, ServerEvent,
+    StreamItemKind, StreamScope, Timestamp,
+};
+use sqlx::sqlite::SqliteConnection;
+use tokio::sync::{MutexGuard, broadcast};
+
+use crate::Error;
+use crate::store::{Store, event_json};
+
+/// 快照裡每個 project 帶的最近訊息數；更早的走 HTTP 分頁。
+pub const SNAPSHOT_ITEMS: u32 = 100;
+
+/// 廣播佇列長度。連線跟不上（lag）就斷線，讓客戶端用 `Resume` 重連。
+const BROADCAST_CAPACITY: usize = 4096;
+
+/// 廣播給所有連線的訊息。JSON 先序列化好，每條連線共用。
+#[derive(Clone, Debug)]
+pub enum Envelope {
+    Logged {
+        seq: u64,
+        json: Arc<str>,
+        /// `ItemDone` 的 item，連線端據此清掉串流位置。
+        done: Option<ItemId>,
+    },
+    Delta {
+        item: ItemId,
+        /// 套用這個增量後，全文的長度（bytes）。
+        end: usize,
+        json: Arc<str>,
+    },
+}
+
+/// 實例層級、不在資料庫裡的即時狀態。只在持有 [`Hub`] 的鎖時讀寫。
+#[derive(Debug)]
+pub struct HubState {
+    head: u64,
+    pub model_auth: ModelAuthView,
+    agent_states: HashMap<ProjectId, AgentState>,
+}
+
+impl HubState {
+    pub fn agent_state(&self, project: ProjectId) -> AgentState {
+        self.agent_states
+            .get(&project)
+            .copied()
+            .unwrap_or(AgentState::Idle)
+    }
+}
+
+struct Streaming {
+    scope: StreamScope,
+    text: String,
+}
+
+/// 連線開始時要送的內容。
+pub struct Initial {
+    pub frames: Vec<String>,
+    /// 已經用 `StreamingText` 補送到哪個長度。
+    pub stream_pos: HashMap<ItemId, usize>,
+}
+
+/// 實例資訊，快照用。
+#[derive(Clone, Debug)]
+pub struct InstanceInfo {
+    pub id: pots_proto::InstanceId,
+    pub name: String,
+    pub kind: pots_proto::InstanceKind,
+}
+
+pub struct Hub {
+    store: Store,
+    instance: InstanceInfo,
+    tx: broadcast::Sender<Envelope>,
+    state: tokio::sync::Mutex<HubState>,
+    // 鎖順序：先 `state` 再 `streaming`。
+    streaming: Mutex<HashMap<ItemId, Streaming>>,
+}
+
+impl Hub {
+    pub async fn new(
+        store: Store,
+        instance: InstanceInfo,
+        model_auth: ModelAuthView,
+    ) -> Result<Self, Error> {
+        let head = store.event_bounds().await?.map_or(0, |(_, hi)| hi);
+        let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        Ok(Self {
+            store,
+            instance,
+            tx,
+            state: tokio::sync::Mutex::new(HubState {
+                head,
+                model_auth,
+                agent_states: HashMap::new(),
+            }),
+            streaming: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn instance(&self) -> &InstanceInfo {
+        &self.instance
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<Envelope> {
+        self.tx.subscribe()
+    }
+
+    /// 開始一筆「狀態變更加事件」。持有期間其他寫入與新連線都會等待，要盡快 commit。
+    pub async fn begin(&self) -> Result<LogTxn<'_>, Error> {
+        let state = self.state.lock().await;
+        let tx = self.store.begin().await?;
+        Ok(LogTxn {
+            hub: self,
+            state,
+            tx,
+            pending: Vec::new(),
+        })
+    }
+
+    /// 串流增量。訊息不在串流中（已結束）就丟掉。
+    pub fn delta(&self, item: ItemId, text: &str) {
+        let mut streaming = self.streaming.lock().unwrap();
+        let Some(s) = streaming.get_mut(&item) else {
+            return;
+        };
+        s.text.push_str(text);
+        let ev = ServerEvent::Delta {
+            scope: s.scope,
+            item_id: item,
+            text: text.to_string(),
+        };
+        let Ok(json) = event_json(&ev) else { return };
+        // 沒有任何連線時 send 會失敗，不要緊。
+        let _ = self.tx.send(Envelope::Delta {
+            item,
+            end: s.text.len(),
+            json: json.into(),
+        });
+    }
+
+    /// 連線的第一步：決定送快照或補送事件，再補送串流中訊息的全文。
+    /// 呼叫前要先 [`subscribe`](Self::subscribe)，之後廣播收到的事件依 `seq` 去重。
+    pub async fn initial(&self, last_seq: u64) -> Result<(Initial, u64), Error> {
+        let state = self.state.lock().await;
+        let head = state.head;
+        let bounds = self.store.event_bounds().await?;
+        let retained = match bounds {
+            // 日誌從 lo 開始，last_seq 之後的第一筆必須還在。
+            Some((lo, _)) => last_seq + 1 >= lo,
+            None => last_seq == head,
+        };
+        let mut frames = Vec::new();
+        if last_seq == 0 || last_seq > head || !retained {
+            let snapshot = ServerEvent::Snapshot {
+                seq: head,
+                instance: self.snapshot(&state).await?,
+            };
+            frames.push(event_json(&snapshot)?);
+        } else {
+            for (_, json) in self.store.events_after(last_seq).await? {
+                frames.push(json);
+            }
+        }
+
+        let mut stream_pos = HashMap::new();
+        let streaming = self.streaming.lock().unwrap();
+        for (item, s) in streaming.iter() {
+            let ev = ServerEvent::StreamingText {
+                scope: s.scope,
+                item_id: *item,
+                text: s.text.clone(),
+            };
+            frames.push(event_json(&ev)?);
+            stream_pos.insert(*item, s.text.len());
+        }
+        Ok((Initial { frames, stream_pos }, head))
+    }
+
+    async fn snapshot(&self, state: &HubState) -> Result<InstanceSnapshot, Error> {
+        let mut projects = Vec::new();
+        for p in self.store.list_projects().await? {
+            projects.push(ProjectSnapshot {
+                id: p.id,
+                name: p.name,
+                agent_name: p.agent_name,
+                agent_state: state.agent_state(p.id),
+                items: self.store.latest_items(p.id, SNAPSHOT_ITEMS).await?,
+            });
+        }
+        Ok(InstanceSnapshot {
+            id: self.instance.id,
+            name: self.instance.name.clone(),
+            kind: self.instance.kind,
+            projects,
+            model_auth: state.model_auth.clone(),
+        })
+    }
+
+    /// 模型授權狀態有變時寫一筆 `ModelAuth`；`force` 時即使相同也寫（啟動時用）。
+    pub async fn set_model_auth(&self, view: ModelAuthView, force: bool) -> Result<(), Error> {
+        let mut txn = self.begin().await?;
+        if force || txn.state().model_auth != view {
+            txn.push(|seq| ServerEvent::ModelAuth { seq, state: view })
+                .await?;
+        }
+        txn.commit().await
+    }
+}
+
+/// 持有日誌鎖的 transaction。用 [`push`](Self::push) 加事件，[`commit`](Self::commit) 後才廣播。
+pub struct LogTxn<'a> {
+    hub: &'a Hub,
+    state: MutexGuard<'a, HubState>,
+    tx: sqlx::Transaction<'static, sqlx::Sqlite>,
+    pending: Vec<(u64, String, ServerEvent)>,
+}
+
+impl LogTxn<'_> {
+    pub fn conn(&mut self) -> &mut SqliteConnection {
+        &mut self.tx
+    }
+
+    pub fn state(&self) -> &HubState {
+        &self.state
+    }
+
+    /// 配一個序號、寫進事件日誌。`make` 收到的是這個事件的 `seq`。
+    pub async fn push(&mut self, make: impl FnOnce(u64) -> ServerEvent) -> Result<(), Error> {
+        let seq = self.state.head + self.pending.len() as u64 + 1;
+        let ev = make(seq);
+        debug_assert_eq!(ev.seq(), Some(seq));
+        let json = event_json(&ev)?;
+        let stored = match &ev {
+            // 登入網址可能帶 id_token_hint，不落地：日誌與補送只留空網址，
+            // 即時廣播與快照（記憶體）才有完整網址。
+            ServerEvent::ModelAuth {
+                state: ModelAuthView::Pending { .. },
+                ..
+            } => event_json(&ServerEvent::ModelAuth {
+                seq,
+                state: ModelAuthView::Pending { url: String::new() },
+            })?,
+            _ => json.clone(),
+        };
+        Store::insert_event(&mut self.tx, seq, &stored, Timestamp::now()).await?;
+        self.pending.push((seq, json, ev));
+        Ok(())
+    }
+
+    pub async fn commit(mut self) -> Result<(), Error> {
+        self.tx.commit().await?;
+        let mut streaming = self.hub.streaming.lock().unwrap();
+        for (seq, json, ev) in self.pending {
+            self.state.head = seq;
+            let mut done = None;
+            match &ev {
+                ServerEvent::AgentState { project, state, .. } => {
+                    self.state.agent_states.insert(*project, *state);
+                }
+                ServerEvent::ModelAuth { state, .. } => {
+                    self.state.model_auth = state.clone();
+                }
+                ServerEvent::Item { scope, item, .. } => {
+                    if let StreamItemKind::Agent(msg) = &item.kind
+                        && msg.status == pots_proto::MsgStatus::Streaming
+                    {
+                        streaming.insert(
+                            item.id,
+                            Streaming {
+                                scope: *scope,
+                                text: msg.text.clone(),
+                            },
+                        );
+                    }
+                }
+                ServerEvent::ItemDone { item, .. } => {
+                    streaming.remove(&item.id);
+                    done = Some(item.id);
+                }
+                _ => {}
+            }
+            let _ = self.hub.tx.send(Envelope::Logged {
+                seq,
+                json: json.into(),
+                done,
+            });
+        }
+        Ok(())
+    }
+}
