@@ -1,4 +1,4 @@
-//! 色票，取自 `ui/styles/ui.css` 與 `ui/styles/instances.css`。
+//! 色票。
 
 use gpui_kit::{Hsla, rgb};
 

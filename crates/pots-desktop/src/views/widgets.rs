@@ -1,4 +1,4 @@
-//! 依設計稿樣式手刻的小元件。按鈕回傳 `Stateful<Div>`，由呼叫端掛 `on_click`。
+//! 手刻的小元件。按鈕回傳 `Stateful<Div>`，由呼叫端掛 `on_click`。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::tooltip::Tooltip;
