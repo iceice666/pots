@@ -16,7 +16,7 @@ flowchart TB
         scheduler["Run 排程<br/>agent_runs 佇列與 lease"]
         watcher["Watcher<br/>驗簽、正規化、去重、匹配"]
         agents["對話 agent ＋ Planner<br/>對話掛 OM，Planner 管任務樹"]
-        workers["Workers<br/>rig 或 Claude Code adapter"]
+        workers["Workers<br/>內建 worker 或 Claude Code adapter"]
         approver["核准執行器<br/>只執行 hash 相符的動作"]
         om["OM 背景壓縮<br/>Observer / Reflector"]
         sweeper["逾時 Sweeper<br/>每分鐘喚醒過期的等待"]
@@ -38,9 +38,9 @@ flowchart TB
     scheduler -->|"派工、喚醒"| workers
     agents <-->|"載入 / 追加"| om
     service <-->|所有狀態讀寫| db
-    agents -->|rig 模型呼叫| llm
-    om -->|rig 模型呼叫| llm
-    workers -->|rig worker 模型呼叫| llm
+    agents -->|pots-llm 模型呼叫| llm
+    om -->|pots-llm 模型呼叫| llm
+    workers -->|內建 worker 模型呼叫| llm
     workers <-->|adapter 生命週期 / 串流事件| claude
     claude <-->|受授權的 MCP 工具| gateway
     workers -->|node 工具呼叫| hub
@@ -49,7 +49,7 @@ flowchart TB
 
 系統架構 · 單一服務加 SQLite 或 Postgres
 
-ChatGPT Plan provider 只處理 pots 自有 rig loop 的推論；Claude Code adapter 接入另一個完整 agent runtime，兩者不是同一種 provider。ChatGPT 授權由 pots 的受保護憑證層管理，Claude 登入由官方 CLI 管理；Codex 不在本次整合範圍。詳見[Agent 執行層](agent-runtime.md)。
+ChatGPT Plan provider 只處理 pots 自有 loop（`pots-llm`）的推論；Claude Code adapter 接入另一個完整 agent runtime，兩者不是同一種 provider。ChatGPT 授權由 pots 的受保護憑證層管理，Claude 登入由官方 CLI 管理；Codex 不在本次整合範圍。詳見[Agent 執行層](agent-runtime.md)。
 
 agent 之間不直接互相呼叫：它們只透過工具讀寫資料庫中的任務樹，由排程器決定下一個跑誰。核准後的 merge 等動作由核准執行器呼叫 GitHub，不經過 agent。
 
@@ -129,7 +129,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | --- | --- | --- |
 | `external_events` | 正規化後的外部事件 | `id` , `dedupe_key unique` , `kind` , `payload` , `matched_tasks[]` |
 | `approvals` | 核准請求 | `id` , `task_id` , `action jsonb` , `action_hash` , `state` , `expires_at` , `decided_by` |
-| `om_raw` | rig 寫入的原始訊息（含工具呼叫） | `project_id` , `seq` , `message jsonb` , `tokens` , `observed bool` |
+| `om_raw` | agent loop 的原始歷史（人類訊息、模型輸出、工具呼叫與結果） | `project_id` , `seq` , `run_id` , `item` （序列化的 `pots_llm::Item` JSON）, `tokens` , `observed bool` （後兩欄 M1 加入） |
 | `om_observations` | Observer 產出的觀察 | `project_id` , `generation` , `seq` , `date` , `priority` , `text` , `pinned` |
 | `push_subscriptions` | Android 裝置的 UnifiedPush 訂閱（ntfy endpoint 與 Web Push 加密金鑰） | `user_id` , `device_id` , `endpoint` , `p256dh` , `auth` |
 | `artifacts` | 人與 agent 共同編輯的文件（spec、brief、ledger、 report） | `id, project_id, goal_id?, kind, title, rev, body_md` |
@@ -145,15 +145,15 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 
 ## Crate 選型
 
-大多是成熟、維護中的 crate。需要特別管理版本的是 rig，以及仍在預發布階段的 GPUI 相關 crate。
+大多是成熟、維護中的 crate。需要特別管理版本的是仍在預發布階段的 GPUI 相關 crate。模型層不用 agent 框架，理由見[為什麼不用 rig](agent-runtime.md#為什麼不用-rig)。
 
 | 領域 | Crate | 備註 |
 | --- | --- | --- |
 | 非同步執行期 | `tokio` |  |
 | HTTP / WebSocket | `axum` （`ws` feature） | 客戶端的即時協定與 HTTP API |
 | 資料庫 | `sqlx` （SQLite、Postgres） | 依設定選用 SQLite 或 Postgres，兩個 feature 都開；編譯期檢查 SQL，內建 migration |
-| LLM 與 agent | `rig-core` | 釘精確版本；`llm` 模組封裝 ChatGPT Plan Responses 相容層與 API provider |
-| 記憶策略（選用） | `rig-memory` | 只參考其介面，OM 自己實作 |
+| LLM 與 agent | workspace crate `pots-llm` ＋ `reqwest` | `ModelProvider` trait、Responses provider、SIWC 授權與共用的多輪工具迴圈；HTTP、OAuth 與 SSE 直接用 `reqwest` |
+| ID token 驗證 | `jsonwebtoken` | SIWC 的 ID token（RS256，JWKS） |
 | JSON Schema | `schemars` | 工具參數定義 |
 | GitHub API | `octocrab` | GitHub App 認證與 REST |
 | Webhook 驗簽 | `hmac` + `sha2` |  |
@@ -169,7 +169,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | MCP | `rmcp` | M4 供 Claude Code adapter 存取平台工具，伺服器端執行授權 |
 | Git 操作 | `tokio::process` 呼叫 `git` | worktree 等操作直接用 CLI 最穩 |
 | 桌面通知 | `notify-rust` | macOS、Linux、Windows 原生通知；桌面版由服務發出，遠端實例的通知由已連線的客戶端顯示 |
-| 憑證儲存（桌面版與客戶端） | `keyring` | API key、ChatGPT SIWC 憑證與遠端實例的裝置 token；不接管 Claude CLI 登入 |
+| 憑證儲存（桌面版與客戶端） | `keyring` | API key 與遠端實例的裝置 token；不接管 Claude CLI 登入。ChatGPT SIWC 憑證在 M0 是資料目錄裡的 `auth/chatgpt-credentials.json`（`0600`，原子寫入），不放 keyring，也對應 SIWC 官方自架 VM 匯入時傳送憑證檔的做法 |
 | 排程 | `croner` | 解析 cron 字串、計算下一次觸發 |
 | Artifact diff | `similar` | 產生「人類修改」的文字 diff |
 | GitLab API | `reqwest` | 直接呼叫 REST，涵蓋自架實例 |

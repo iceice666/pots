@@ -4,7 +4,12 @@
 
 ## Observational Memory 的 Rust 實作
 
-OM 實作成 rig 的 `ConversationMemory` backend：`append` 只寫入原始訊息並叫醒背景 Observer，`load` 回傳「觀察紀錄 + 未觀察的原始尾巴」。rig 在送出 prompt 前呼叫 `load` 、在成功的一輪之後呼叫 `append` ，而且 `append` 是同步執行的，所以壓縮必須在背景做。
+OM 是 Pots 自己的模組，不依賴 agent 框架的記憶介面。它和 pots-llm 的 loop 只在兩個地方接觸：
+
+- `load`：run 開始前，把「觀察紀錄 + 未觀察的原始尾巴」組成 `Vec<pots_llm::Item>`，當作 `agent::run` 的 `history`。
+- 追加：loop 每送出一個 `AgentEvent::Item`（模型輸出、工具呼叫與結果），伺服器就把它序列化寫進 `om_raw`；人類訊息在 run 開始時寫入。M0 已經這樣持久化每個 `Item`，OM 只要在寫入後叫醒背景 Observer。
+
+追加發生在 run 的關鍵路徑上，所以壓縮必須在背景做。
 
 ### 三層結構
 
@@ -19,46 +24,35 @@ OM 實作成 rig 的 `ConversationMemory` backend：`append` 只寫入原始訊�
 ### 實作骨架
 
 ```rust
-use rig_core::{completion::Message, memory::{ConversationMemory,MemoryError}};
+use pots_llm::Item;
 pub struct ObservationalMemory {
-    db: PgPool,
-    wake: tokio::sync::mpsc::Sender<ProjectId>,
+    db: Pool,
+    wake: tokio::sync::mpsc::Sender<ConvId>,
     cfg: OmConfig,
 }
-impl ConversationMemory for ObservationalMemory {
-    fn load<'a>(&'a self, conv: &'a str)
-        -> WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>>
-    {
-        Box::pin(async move {
-            let pid = ProjectId::parse(conv).map_err(MemoryError::backend)?;
-            let mut snap = self.snapshot(pid).await.map_err(MemoryError::backend)?;
-            if snap.unobserved_tokens > self.cfg.block_after {
-                self.observe_now(pid).await.map_err(MemoryError::backend)?;
-                snap = self.snapshot(pid).await.map_err(MemoryError::backend)?;
-            }
-            // 穩定的記憶區塊放最前面，和 preamble 一起形成可快取的前綴
-            let mut msgs = vec![Message::user(snap.render_memory_block())];
-            msgs.extend(snap.unobserved_raw);
-            Ok(msgs)
-        })
+impl ObservationalMemory {
+    /// run 開始前呼叫；回傳值就是 agent::run 的 history（觸發訊息由呼叫端接在最後）
+    pub async fn load(&self, conv: &ConvId) -> Result<Vec<Item>> {
+        let mut snap = self.snapshot(conv).await?;
+        if snap.unobserved_tokens > self.cfg.block_after {
+            self.observe_now(conv).await?; // Observer 跟不上時的最後手段
+            snap = self.snapshot(conv).await?;
+        }
+        // 穩定的記憶區塊放最前面，和 preamble 一起形成可快取的前綴
+        let mut items = vec![Item::User { text: snap.render_memory_block() }];
+        items.extend(snap.unobserved_raw); // om_raw 裡未觀察的 Item，原樣還原
+        Ok(items)
     }
-    fn append<'a>(&'a self, conv: &'a str, messages: Vec<Message>)
-        -> WasmBoxedFuture<'a, Result<(), MemoryError>>
-    {
-        Box::pin(async move {
-            let pid = ProjectId::parse(conv).map_err(MemoryError::backend)?;
-            self.insert_raw(pid,messages).await.map_err(MemoryError::backend)?;
-            let _ = self.wake.try_send(pid); // Observer 自己判斷是否到閾值
-            Ok(())
-        })
-    }
-    fn clear<'a>(&'a self, _conv: &'a str)
-        -> WasmBoxedFuture<'a, Result<(), MemoryError>>
-    {
-        Box::pin(async { Err(MemoryError::Internal("永久對話不支援 clear".into())) })
+    /// 每個 AgentEvent::Item 寫進 om_raw 之後呼叫
+    pub async fn append(&self, tx: &mut Tx, conv: &ConvId, run: RunId, item: &Item) -> Result<()> {
+        insert_raw(tx, conv, run, serde_json::to_string(item)?).await?;
+        let _ = self.wake.try_send(conv.clone()); // Observer 自己判斷是否到閾值
+        Ok(())
     }
 }
 ```
+
+未觀察尾巴的切點不能落在工具呼叫與它的結果中間；切點前的呼叫與結果一起進觀察，送給模型的歷史才不會有懸空的 `ToolCall`。永久對話沒有 clear。
 
 ### Observer 與 Reflector
 
@@ -88,7 +82,7 @@ Observer 與 Reflector 用 Sonnet、Luna 或 Flash 級別的模型：便宜、�
 
 ### USER.md：跨 project 的使用者偏好
 
-跨 project 的偏好（commit 風格、語言、程式碼習慣、溝通方式）放在一份 USER.md，由你直接編輯。對話 agent、Planner 與 rig worker 都把它放在 preamble 最前面；外部 CLI 則以它們會讀取的使用者層級指示檔形式掛進容器。
+跨 project 的偏好（commit 風格、語言、程式碼習慣、溝通方式）放在一份 USER.md，由你直接編輯。對話 agent、Planner 與內建 worker 都把它放在 preamble 最前面；外部 CLI 則以它們會讀取的使用者層級指示檔形式掛進容器。
 
 - 快取友善。 USER.md 很少變動，放在前綴最前面，快取命中率最高。
 

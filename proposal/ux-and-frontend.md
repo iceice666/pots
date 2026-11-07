@@ -26,7 +26,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 ## 桌面客戶端現況
 
-桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它目前用假資料、還沒接上服務，已有實例直列、頻道、Goal 與任務面板、Artifact 編輯、Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
+桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入。`--mock` 模式用假資料展示其他畫面：實例直列、Goal 與任務面板、Artifact 編輯、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
 
 下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（記憶、電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
 
@@ -58,32 +58,51 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 
 ### 即時協定
 
-客戶端對每個實例各開一條 WebSocket，伺服器推送帶序號的事件。序號是每個實例各自的，客戶端為每條連線分別記錄 `last_seq`：
+客戶端對每個實例各開一條 WebSocket，伺服器推送事件。序號是每個實例各自的，客戶端為每條連線分別記錄 `last_seq`。型別在 [`crates/pots-proto`](../crates/pots-proto/)：
 
 ```rust
-#[derive(Serialize)]
+pub enum StreamScope { Project(ProjectId), Overseer, Task(TaskId) } // 事件屬於哪條對話流
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum ServerEvent {
-    Item        { seq: u64, item: StreamItemView },
-    Delta       { seq: u64, item_id: ItemId, text: String },   // agent 串流
-    ItemDone    { seq: u64, item_id: ItemId, status: MsgStatus },
-    AgentState  { seq: u64, project: ProjectId, state: AgentState },
-    TaskChanged { seq: u64, task: TaskView },
-    Inbox       { seq: u64, pending: u32 },
+    Snapshot      { seq: u64, instance: InstanceSnapshot },              // 整份替換
+    ProjectAdded  { seq: u64, project: ProjectSnapshot },
+    Item          { seq: u64, scope: StreamScope, item: StreamItemView },
+    Delta         { scope: StreamScope, item_id: ItemId, text: String },  // 不記日誌
+    StreamingText { scope: StreamScope, item_id: ItemId, text: String },  // 不記日誌
+    ItemUpdated   { seq: u64, scope: StreamScope, item: StreamItemView }, // 例如工具摘要
+    ItemDone      { seq: u64, scope: StreamScope, item: StreamItemView }, // 最後的完整內容
+    AgentState    { seq: u64, project: ProjectId, state: AgentState },
+    TaskChanged   { seq: u64, task: TaskView },
+    Inbox         { seq: u64, pending: u32 },
+    ModelAuth     { seq: u64, state: ModelAuthView },  // SignedOut | Pending { url } | SignedIn | Error
+    LoginUrl      { url: String },                      // 只回給按下登入的連線；不記日誌
+    Error         { message: String },                  // 指令被拒絕或失敗；不記日誌
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum ClientCommand {
-    Resume  { last_seq: u64 },
-    Send    { project: ProjectId, text: String, mode: SendMode }, // Queue | Steer
-    Decide  { approval: ApprovalId, approve: bool, note: Option<String> },
-    Cancel  { task: TaskId },
+    Resume           { last_seq: u64 },   // 連線後的第一個指令
+    CreateProject    { name: String },
+    Send             { project: ProjectId, id: ItemId, text: String, mode: SendMode }, // Queue | Steer
+    Stop             { project: ProjectId },
+    Decide           { approval: ApprovalId, approve: bool, note: Option<String> },
+    Cancel           { task: TaskId },
+    StartModelLogin,                      // 伺服器回 LoginUrl，並廣播 ModelAuth { Pending }
+    CancelModelLogin,
+    ModelLogout,
 }
 ```
 
-- 斷線重連：客戶端帶 `last_seq` 重連，伺服器從事件日誌補送。差距太大時改為重拉快照。
+- 事件日誌：帶 `seq` 的事件寫進事件日誌，`Resume` 時依序補送；`Delta`、`StreamingText`、`LoginUrl`、`Error` 只對當下的連線有意義，不記日誌。登入網址可能帶 `id_token_hint`，所以日誌裡的 `ModelAuth { Pending }` 不存網址，客戶端開瀏覽器只依 `LoginUrl`。
 
-- 串流：`Delta` 不寫入資料庫的事件日誌，只寫最後的 `ItemDone` 。重連時串流中的訊息以目前的完整文字重送。
+- 訊息狀態：人類訊息進入 agent 歷史時（被某一輪接手，或被「停止」清掉），伺服器記一筆 `ItemUpdated`，客戶端據此收掉「排隊中」。
+
+- 斷線重連：客戶端帶 `last_seq` 重連，伺服器從事件日誌補送。`last_seq` 為 0、太舊（日誌已不含下一筆）或超過伺服器目前的序號時，改送 `Snapshot`，客戶端整份替換。
+
+- 串流：`Delta` 不寫入事件日誌；`ItemDone` 帶最後的完整訊息，重播時不需要 `Delta`。重連時仍在串流中的訊息以 `StreamingText` 送出目前的全文，取代客戶端手上的內容。
+
+- 去重：`Send` 帶客戶端產生的訊息 ID，伺服器用它存這則訊息。客戶端在看到同 ID 的 `Item` 之前都保留這個指令，重連後再送一次；伺服器依 ID 去重。
 
 - 歷史分頁：用 HTTP `GET /projects/:id/items?before=<id>` 以游標向上載入，搭配虛擬捲動。
 

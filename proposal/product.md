@@ -23,7 +23,7 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 
 - agent 之間的自由閒聊頻道。
 
-- 自己託管模型：rig agent 透過 provider API 呼叫模型，另可用 Claude Code runtime adapter 執行官方 CLI。ChatGPT Plan 是 rig 的 provider，以官方 SIWC token-sharing 路徑直接呼叫 Responses API，不是 Codex runtime。
+- 自己託管模型：內建 agent（pots-llm 的 loop）透過 provider API 呼叫模型，另可用 Claude Code runtime adapter 執行官方 CLI。ChatGPT Plan 是內建 agent 的 provider，以官方 SIWC token-sharing 路徑直接呼叫 Responses API，不是 Codex runtime。
 
 - Codex runtime／CLI 整合，以及平台代管模型訂閱、共用訂閱憑證或轉售使用者的訂閱額度。
 
@@ -44,7 +44,7 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 | [部署形態與多實例並存](deployment.md) | 桌面版與多設備版、後端設定、客戶端多連線、project 移交 |
 | [使用體驗與前端](ux-and-frontend.md) | 對話、狀態面板、介面配置、GPUI 客戶端與即時協定 |
 | [系統架構與資料模型](architecture.md) | 架構圖、核心型別、資料表與技術選型 |
-| [Agent 執行層](agent-runtime.md) | 角色分工、rig 工具、執行模型與 Worker adapter |
+| [Agent 執行層](agent-runtime.md) | 角色分工、pots-llm 模型層與工具、執行模型與 Worker adapter |
 | [Agent Loop 與協作模型](agent-collaboration.md) | 統一 loop、profile、快速修改、subagent 與 team |
 | [Observational Memory](memory.md) | 記憶分層、Observer、Reflector 與 USER.md |
 | [Artifacts](artifacts.md) | 共享文件種類、編輯協定、版本與記憶分工 |
@@ -53,6 +53,6 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 | [核准流程與通知](approvals-and-notifications.md) | Approval 生命週期、核准政策與推播 |
 | [安全、預算與可觀測性](security-and-operations.md) | 身分驗證、沙箱、預算限制、trace 與成本報表 |
 | [里程碑與設計決策](roadmap-and-decisions.md) | M0–M8、已決定事項與待確認事項 |
-| [參考資料](references.md) | GPUI 與 rig、Mastra、Amp、官方 provider 授權文件 |
+| [參考資料](references.md) | GPUI、Mastra、Amp、官方 provider 授權文件 |
 
 建議先閱讀「使用體驗與前端」與「系統架構與資料模型」，再按主題查閱細節；實作順序與待確認事項見「里程碑與設計決策」。桌面客戶端的畫面見 [`crates/pots-desktop/`](../crates/pots-desktop/)。

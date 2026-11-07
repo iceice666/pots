@@ -8,7 +8,7 @@
 
 ### 一個 loop
 
-每次執行都是同一個函式：組 context、跑 rig 的多輪工具迴圈、由平台的 gate 在每次工具呼叫前後把關、寫回結果。
+每次執行都是同一個函式：組 context、跑 pots-llm 的多輪工具迴圈（`agent::run`）、由平台的 gate 在每次工具呼叫前後把關、寫回結果。
 
 ```rust
 pub struct AgentProfile {
@@ -33,32 +33,38 @@ pub async fn run_agent(
     trigger: Trigger,
     b: &Backends,
 ) -> Result<RunOutcome> {
-    let ctx   = assemble_context(p, &scope, &trigger, b).await?;
-    let tools = b.registry.toolset(READ_BASE.iter().chain(&p.extra_tools),&scope);
-    let gate  = Gate::new(p, &scope, b.budget_for(&scope));
-    let agent = llm::agent(&p.model)
-        .preamble(&ctx.preamble)
-        .tools(tools)
-        .hook(gate.clone())
-        .default_max_turns(p.max_turns)
-        .build();
-    let reply = match &p.memory {
-        MemoryMode::Om { conv } => agent.prompt(ctx.trigger_msg).conversation(conv.as_str()).await?,
-        MemoryMode::Stateless   => agent.prompt(ctx.trigger_msg).await?,
+    let ctx  = assemble_context(p, &scope, &trigger, b).await?; // preamble + 觸發訊息
+    let gate = Arc::new(Gate::new(p, &scope, b.budget_for(&scope)));
+    let config = pots_llm::agent::RunConfig {
+        provider:     b.llm.provider(&p.model)?,      // Arc<dyn ModelProvider>
+        model:        p.model.slug.clone(),
+        instructions: Some(ctx.preamble),
+        tools:        b.registry.toolset(READ_BASE.iter().chain(&p.extra_tools), &scope),
+        hook:         gate.clone(),
+        max_turns:    p.max_turns,
     };
-    Ok(gate.finish(reply)) // Done | Suspended | NeedsApproval | Cancelled
+    let mut history = match &p.memory {
+        MemoryMode::Om { conv } => b.om.load(conv).await?, // 觀察紀錄 + 未觀察的原始尾巴
+        MemoryMode::Stateless   => Vec::new(),
+    };
+    history.push(Item::User { text: ctx.trigger_msg });
+    // 每個 AgentEvent::Item 由 sink 寫進 om_raw，TextDelta 轉成 UI 串流
+    let (events, sink) = b.run_sink(&scope, &p.memory);
+    let result = pots_llm::agent::run(&config, history, events, b.cancel_for(&scope)).await;
+    sink.flush().await?;
+    Ok(gate.finish(result)) // Done | Suspended | NeedsApproval | Cancelled
 }
 ```
 
-Gate 是 rig 的 `PromptHook` ，負責所有「不能靠 prompt」的規則：
+Gate 實作 pots-llm 的 `Hook`（`before_turn`、`before_tool` 回 `ToolDecision`、`after_tool`），負責所有「不能靠 prompt」的規則：
 
-- 授權。 工具不在 profile 內就拒絕；scope 也在這裡檢查，例如 worker 只能讀寫自己的 worktree。
+- 授權。 工具不在 profile 內就拒絕（`Deny`，理由當作工具結果送回模型）；scope 也在這裡檢查，例如 worker 只能讀寫自己的 worktree。
 
-- 預算與取消。 每輪開始前檢查預算與 cancel、steer 事件，有就乾淨結束。
+- 預算與取消。 每輪開始前（`before_turn`）檢查預算與 steer 事件，有就乾淨結束；取消走 loop 的 cancellation token，在每個 await 點生效。
 
-- 工具類別。 Suspend 類執行後結束本輪；Effect 類不執行，改建核准請求後結束本輪。
+- 工具類別。 Suspend 類回 `AllowThenStop`，執行後結束本輪；Effect 類回 `Stop`，不執行，改建核准請求後結束本輪。
 
-- 追蹤。 每次呼叫寫進 trace。
+- 追蹤。 每次呼叫寫進 trace（`after_tool`）。
 
 外部 coding CLI 用自己的 loop，是唯一的例外；但它拿到的平台工具一樣由 worker profile 決定，透過 MCP 提供，gate 規則在 MCP server 端執行。
 

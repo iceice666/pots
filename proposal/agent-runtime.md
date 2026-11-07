@@ -2,20 +2,20 @@
 
 [← 產品提案索引](product.md)
 
-## Agent 執行層（rig）
+## Agent 執行層（pots-llm）
 
-對話 agent、Planner 與內建 worker 用 rig 實作；ChatGPT Plan provider 提供模型推論，Claude Code adapter 接入外部 coding agent runtime。這是兩種不同層級的整合，不引入 Codex runtime，也不把 Claude 訂閱 token 接成 rig provider。平台能力以 rig `Tool` 暴露給內建 agent，以 MCP 暴露給 Claude Code；watcher 是確定性的 Rust 程式碼，不是 LLM agent。
+對話 agent、Planner 與內建 worker 用 workspace crate `pots-llm` 實作：`ModelProvider` trait 抽象模型推論，`agent::run` 是所有 profile 共用的多輪工具迴圈。ChatGPT Plan provider 提供模型推論，Claude Code adapter 接入外部 coding agent runtime。這是兩種不同層級的整合，不引入 Codex runtime，也不把 Claude 訂閱 token 接成 Pots 的 provider。平台能力以 `pots_llm::agent::Tool` 暴露給內建 agent，以 MCP 暴露給 Claude Code；watcher 是確定性的 Rust 程式碼，不是 LLM agent。
 
 ### 角色
 
 | 角色 | 實作 | 觸發 | 並行度 |
 | --- | --- | --- | --- |
-| 對話 agent | rig agent，掛 OM | 人類訊息、里程碑、升級事件 | 每個 project 同時 1 個 run |
-| Planner | rig agent，不掛 OM；context 只有 Goal brief 與任務樹 | Goal 建立、子任務結束、steer | 每個 Goal 同時 1 個 run |
-| Worker | rig agent，或 Claude Code adapter | 被分派、被喚醒 | 多個，每個任務一個 worktree 與容器；可指定在[託管電腦](computer-nodes.md)上執行 |
-| Operator | rig agent（需支援影像輸入的模型），或 Claude Code 透過 MCP | 被分派、被喚醒 | 每台 node 同時 1 個（display lease） |
+| 對話 agent | 內建 agent（pots-llm 的 loop），掛 OM | 人類訊息、里程碑、升級事件 | 每個 project 同時 1 個 run |
+| Planner | 內建 agent，不掛 OM；context 只有 Goal brief 與任務樹 | Goal 建立、子任務結束、steer | 每個 Goal 同時 1 個 run |
+| Worker | 內建 worker，或 Claude Code adapter | 被分派、被喚醒 | 多個，每個任務一個 worktree 與容器；可指定在[託管電腦](computer-nodes.md)上執行 |
+| Operator | 內建 agent（需支援影像輸入的模型），或 Claude Code 透過 MCP | 被分派、被喚醒 | 每台 node 同時 1 個（display lease） |
 | Watcher | 純 Rust（webhook 或輪詢） | 外部事件 | 不限 |
-| 總管 agent | rig agent，掛自己的 OM（全域對話） | 人類在總管對話中的訊息、自己的排程 | 全域同時 1 個 run |
+| 總管 agent | 內建 agent，掛自己的 OM（全域對話） | 人類在總管對話中的訊息、自己的排程 | 全域同時 1 個 run |
 
 ### 對話 agent 與 Planner 的分工
 
@@ -57,10 +57,31 @@
 
 `get_status` 是所有狀態問題的唯一答案來源，preamble 明確要求「關於任務、PR、CI 的問題先呼叫 `get_status` ，不要從記憶回答」。
 
+### pots-llm：模型介面與共用 loop
+
+模型層是 workspace crate [`crates/pots-llm`](../crates/pots-llm/)，不依賴 agent 框架。
+
+- `provider`：與模型無關的型別。`Item` 是歷史的單位：`User`、`Assistant`、`ToolCall`、`ToolResult`，以及 provider 專屬、須原樣回送的 `Opaque`（例如 Responses 的 reasoning item）。`ModelRequest` 帶 `model`、`instructions`、完整的 `input: Vec<Item>` 與 `tools: Vec<ToolSpec>`。`ModelProvider::stream` 回傳 `StreamEvent` 串流：`TextDelta`、`ItemDone(Item)`、`Completed { usage }`。沒收到 `Completed` 就結束的串流是錯誤，不算成功。
+
+- `LlmError`：`NeedsLogin`、`NotEntitled`、`UsageLimit`、`Unavailable`、`Unsupported`、`Interrupted`、`Cancelled`、`Other`。只有 `Unavailable` 與 `Interrupted` 值得重試同一個請求；訊息不含 token。
+
+- `responses`：ChatGPT Plan 用的 Responses provider。`siwc`：SIWC 登入、憑證儲存與單一 refresh owner。
+
+- `agent::run(config, history, events, cancel)`：一輪是一次模型串流。輸出項目收到 `Completed` 後才依序以 `AgentEvent::Item` 送出並加入歷史；串流失敗時這一輪的項目全部丟棄，歷史裡不會留下沒有結果的工具呼叫。模型要求工具時，依序問 `Hook::before_tool`、執行工具、把 `ToolResult` 放回歷史，再開下一輪；只回文字就以 `RunOutcome::Done` 結束。
+
+- `Hook`：`before_turn` 回 `false` 就乾淨結束（`Stopped`，用於預算、cancel、steer）；`before_tool` 回 `ToolDecision::{Allow, Deny, AllowThenStop, Stop}`；`after_tool` 用於追蹤。`AllowThenStop` 執行後結束本輪，`Stop` 不執行並結束本輪；同一輪剩下的呼叫各補一個「未執行」結果，run 以 `Suspended` 結束。用完 `max_turns` 是 `MaxTurns`。
+
+- 取消在每個 await 點生效；工具階段被取消時，還沒有結果的呼叫先補上「已取消」結果，持久化的歷史保持完整。
+
+- 伺服器把每個 `AgentEvent::Item` 序列化寫進 `om_raw`，`TextDelta` 轉成 UI 的串流事件。
+
+換 provider 只需實作 `ModelProvider`；loop、`Hook`、工具與 OM 不受影響。
+
 ### 工具實作範例
 
 ```rust
-use rig_core::{completion::ToolDefinition, tool::Tool};
+use pots_llm::agent::{Tool, ToolError};
+use pots_llm::ToolSpec;
 use schemars::JsonSchema;
 use serde::Deserialize;
 #[derive(Deserialize, JsonSchema)]
@@ -70,62 +91,79 @@ pub struct WaitArgs {
     timeout_minutes: u32,
 }
 pub struct WaitFor { store: TaskStore }
+#[async_trait::async_trait]
 impl Tool for WaitFor {
-    const NAME: &'static str = "wait_for";
-    type Error = PlatformError;
-    type Args = WaitArgs;
-    type Output = String;
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.into(),
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "wait_for".into(),
             description: "掛起任務直到條件成立（CI 結束、PR 被 review、子任務完成）。 \
                           呼叫後本輪即結束，等待期間不消耗 token。".into(),
             parameters: serde_json::to_value(schemars::schema_for!(WaitArgs))
                 .expect("schema"),
         }
     }
-    async fn call(&self, a: WaitArgs) -> Result<String, PlatformError> {
+    // 參數是模型給的 JSON 字串；錯誤會轉成文字送回模型，讓它自己修正
+    async fn call(&self, arguments: &str) -> Result<String, ToolError> {
+        let a: WaitArgs = serde_json::from_str(arguments)
+            .map_err(|e| ToolError(format!("參數錯誤：{e}")))?;
         let deadline = now() + minutes(a.timeout_minutes);
-        self.store.suspend(a.task_id, a.on, deadline).await?;
+        self.store.suspend(a.task_id, a.on, deadline).await
+            .map_err(|e| ToolError(e.to_string()))?;
         Ok("suspended".into())
     }
 }
 ```
 
+「呼叫後本輪即結束」由 Gate 對 Suspend 類工具回 `ToolDecision::AllowThenStop` 保證，不靠工具本身或 prompt。
+
 ### 組裝對話 agent 與 Planner
 
-下例只示意 rig 的角色與工具組裝，使用 Anthropic API client 不代表以 Claude 訂閱推論。正式組裝由 `llm` 模組選擇 ChatGPT Plan provider 或使用者配置的 API provider；ChatGPT Plan 的相容性要求見下節。
+下例示意角色與工具組裝。provider 由設定選擇：ChatGPT Plan 是 `ResponsesProvider`（SIWC 授權），其他 API provider 各自實作 `ModelProvider`；ChatGPT Plan 的相容性要求見下節。
 
 ```rust
-use rig_core::{client::{CompletionClient, ProviderClient},completion::Prompt, providers::anthropic};
-let client = anthropic::Client::from_env()?;
+use std::sync::Arc;
+use pots_llm::{Item, ModelProvider};
+use pots_llm::agent::{self, RunConfig};
+let provider: Arc<dyn ModelProvider> = llm.provider(&cfg.provider)?;
+let (events, rx) = tokio::sync::mpsc::unbounded_channel(); // AgentEvent → UI 串流與 om_raw
 // 對話 agent：掛 OM，負責和人類討論、建立與調整 Goal
-let chat_agent = client
-    .agent(&cfg.chat_model)
-    .preamble(&compose_preamble(&user_md, &project.instructions))
-    .tool(GetStatus::new(store.clone()))
-    .tool(CreateGoal::new(store.clone()))
-    .tool(SteerGoal::new(store.clone()))
-    .tool(Recall::new(db.clone()))
-    .memory(om.clone())              // 見 memory.md 的 Observational Memory 章節
-    .default_max_turns(8)
-    .build();
-let reply = chat_agent
-    .prompt(human_text)
-    .conversation(project.id.to_string())
-    .await?;
+let chat = RunConfig {
+    provider: provider.clone(),
+    model: cfg.chat_model.clone(),
+    instructions: Some(compose_preamble(&user_md, &project.instructions)),
+    tools: vec![
+        Arc::new(GetStatus::new(store.clone())),
+        Arc::new(CreateGoal::new(store.clone())),
+        Arc::new(SteerGoal::new(store.clone())),
+        Arc::new(Recall::new(db.clone())),
+    ],
+    hook: Arc::new(Gate::new(&CHAT, &scope, budget)),
+    max_turns: 8,
+};
+// 歷史 = OM 的記憶區塊 + 未觀察的原始尾巴 + 觸發訊息，見 memory.md
+let mut history = om.load(project.id).await?;
+history.push(Item::User { text: human_text });
+let result = agent::run(&chat, history, events.clone(), cancel.clone()).await?;
 // Planner：不掛 OM，每次 run 都從 Goal brief 與任務樹重建 context
-let planner = client
-    .agent(&cfg.planner_model)
-    .preamble(&compose_preamble(&user_md, PLANNER_INSTRUCTIONS))
-    .tool(GetStatus::new(store.clone()))
-    .tool(CreateTask::new(store.clone()))
-    .tool(CancelTask::new(store.clone()))
-    .tool(RequestApproval::new(store.clone()))
-    .tool(PostMilestone::new(store.clone()))
-    .default_max_turns(12)
-    .build();
+let planner = RunConfig {
+    provider,
+    model: cfg.planner_model.clone(),
+    instructions: Some(compose_preamble(&user_md, PLANNER_INSTRUCTIONS)),
+    tools: vec![
+        Arc::new(GetStatus::new(store.clone())),
+        Arc::new(CreateTask::new(store.clone())),
+        Arc::new(CancelTask::new(store.clone())),
+        Arc::new(RequestApproval::new(store.clone())),
+        Arc::new(PostMilestone::new(store.clone())),
+    ],
+    hook: Arc::new(Gate::new(&PLANNER, &scope, budget)),
+    max_turns: 12,
+};
+let history = vec![Item::User { text: render_brief_and_tree(&goal, &trigger) }];
+agent::run(&planner, history, events, cancel).await?;
 ```
+
+M0 還沒有 OM：對話 agent 的歷史直接取該 project 在 `om_raw` 的全部項目。
 
 ### 執行模型
 
@@ -133,31 +171,39 @@ let planner = client
 
 2. lease 過期（程序當掉）時，任務回到 `Planned` 重新分派，`attempts` 加一。
 
-3. `wait_for` 之後必須結束本輪：用 rig 的 `PromptHook` 在工具呼叫後中止多輪迴圈，而不是靠 prompt 要求模型自己停。
+3. `wait_for` 之後必須結束本輪：pots-llm 的 `Hook`（Gate）對它回 `ToolDecision::AllowThenStop`，loop 執行工具後即以 `RunOutcome::Suspended` 結束，而不是靠 prompt 要求模型自己停。
 
 4. 喚醒時建立新的 run，帶入「你在等什麼、結果是什麼」作為觸發訊息。
 
-### ChatGPT Plan provider：rig 的模型推論後端
+### ChatGPT Plan provider：內建 agent 的模型推論後端
 
 pots 採開源、本機或使用者自行架設的模式。透過官方 **Sign in with ChatGPT（SIWC）** 取得 ChatGPT plan usage 授權，直接呼叫 Responses API；不讀取 Codex 的 `auth.json`、不使用 ChatGPT 網頁 cookie，也不依賴 Codex CLI 或 app-server。這不授予存取使用者既有 ChatGPT 對話的權限。收費或平台代管服務不在本次範圍，若改變產品模式需重新確認資格。
 
-- **責任邊界。** Provider 只將 rig 請求映射為模型請求，把 SSE 轉成文字、工具呼叫、usage 與完成／錯誤事件；工具執行、多輪 loop、OM 與任務狀態仍由 pots 管理。對話 agent、Planner、總管、Observer／Reflector 與 rig worker 可依角色選用此 provider，但須驗證模型與能力，不假設所有角色皆可直接替換。
-- **授權。** 使用系統瀏覽器與官方 OAuth／PKCE 流程。先保存穩定的 `ext_agent_host_id`；首次以動態註冊取得 issued `client_id`，往後沿用該帳號／workspace 註冊。每次登入驗證 `state`、OIDC `nonce`、ID token 簽章／issuer／audience／期限，以及實際授予的 `chatgpt.tokens.use.direct` scope；登入成功不等於取得訂閱推論權限。
-- **憑證。** 帳號授權、憑證儲存／refresh、推論 adapter 分層。每個註冊的 refresh 由單一 owner 協調，原子替換 access token、輪替後的 refresh token、期限與 scopes；多個 run 不各自更新同一份憑證。秘密不進 prompt、資料匯出或 trace，部署方式見[部署](deployment.md)。
-- **Responses 相容層。** 目前 preview 的 HTTP 請求須 `store: false`、`stream: true`，完整必要歷史放入 `input` 陣列，不依賴 `previous_response_id`；使用 `instructions` 或 developer message，不送明確的 system message item。依官方限制處理 function/custom tool 的 namespace 或 `additional_tools`，工具結果由 pots 回送。
-- **能力限制。** 不照搬一般 API provider 的參數；目前 `temperature`、`max_output_tokens` 等不支援，會改變語意的要求須明確報錯或在配置時拒絕。不依賴 hosted MCP、file search、Code Interpreter 或 Responses `tool_search`；pots 本機工具與 MCP 的執行不等於這些 hosted tools。模型列舉不當作 entitlement 保證，以實際請求結果判斷。
-- **實作順序。** 先檢查釘選 rig 版本的 request、SSE 與 tool call 介面；能重用則重用，否則在 `llm` 模組實作專用 provider，不只是替既有 API client 換 token。驗收包含串流回答、工具往返、多輪歷史、取消、斷流、並行 refresh、重啟、撤銷與額度不足。
-- **失敗與預算。** 區分需要登入、授權撤銷、額度不足、暫時限流、模型／workspace 不允許；訂閱額度不等於 API 餘額或無限用量。額度不足時排隊或升級給人類，API fallback 須先有使用者授權與金額上限。
+- **責任邊界。** Provider（`pots_llm::responses::ResponsesProvider`）只把 `ModelRequest` 映射為 Responses 請求，把 SSE 轉成 `StreamEvent`（文字增量、完整的輸出項目、usage 與完成），錯誤轉成 `LlmError`；工具執行、多輪 loop、OM 與任務狀態仍由 pots 管理。對話 agent、Planner、總管、Observer／Reflector 與內建 worker 可依角色選用此 provider，但須驗證模型與能力，不假設所有角色皆可直接替換。
+- **授權。** 使用系統瀏覽器與官方 OAuth／PKCE 流程；登入成功不等於取得訂閱推論權限。依官方文件核對（2026-11-07）的約定：
+  - 動態註冊就是瀏覽器授權請求本身：首次帶 `client_id=dynamic_agent_client`、`agent_name_hint=Pots` 與 `ext_agent_host_id`，issued `client_id`（`oaiapp_...`）從 callback 帶回，之後沿用。沒有另外的註冊 POST，`dynamic_agent_client` 不是要保存的 ID。
+  - scope 為 `openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`，`resource=https://api.openai.com/v1`；PKCE S256，每次登入產生新的 `state` 與 `nonce`。
+  - callback 是 loopback `http://127.0.0.1:<port>/auth/callback`，只有 port 可以變，不用 `localhost`；授權請求與 code exchange 帶完全相同的 URI。
+  - Host ID 格式 `urn:uuid:<v4>`，第一次登入前產生，與憑證分開存在 `data_dir/host-id`，登出也不刪。
+  - ID token 以 JWKS 驗證 RS256 簽章、issuer、audience（issued client ID）、期限與 nonce；帳號身分以驗證過的 `sub` 為準，不是 email。推論前確認 token 回應實際授予 `chatgpt.tokens.use.direct`。
+  - refresh 會輪替 refresh token：同一份授權只有一個 refresh owner，新的 access／refresh token、期限與 scopes 一起原子寫入。
+  - 登出時撤銷 refresh token，清掉本機 token，保留 issued client ID 與 Host ID；撤銷未確認時明確告知使用者。
+- **憑證。** 帳號授權、憑證儲存／refresh、推論 adapter 分層。行程內由 `SiwcAuth` 以一把 async mutex 序列化 refresh，多個 run 不各自更新同一份憑證；推論回 401 時強制 refresh 一次再重送。M0 的憑證是資料目錄裡的 `auth/chatgpt-credentials.json`（`0600`，原子寫入）。秘密不進 prompt、資料匯出或 trace，部署方式見[部署](deployment.md)。
+- **推論端點。** `POST https://api.openai.com/v1/responses`，只帶 `Authorization: Bearer <access token>`；是公開的 Responses API，不是 ChatGPT 的 `backend-api`。`GET /v1/models` 回傳 `models` 陣列（不是一般 API 的 `data`），取 `visibility == "list"` 的項目、保留伺服器順序；未設 `POTS_CHAT_MODEL` 時，Pots 選清單的第一個。模型列舉不當作 entitlement 保證，以實際請求結果判斷。
+- **Responses 相容層。** 請求一律 `store: false`、`stream: true`，完整必要歷史放入 `input`，不用 `previous_response_id`；指示放頂層 `instructions`，不送 system message item。所有 Pots 工具放進名為 `pots` 的 namespace，回送 `function_call` 時補上 `namespace`，工具結果以 `function_call_output` 回送。reasoning item 存成 `Item::Opaque`，有加密內容時拿掉 `id` 原樣回送。只有 `response.completed` 代表成功；`response.failed`、`response.incomplete` 或提前結束的串流都是失敗。
+- **能力限制。** 不送 `temperature`、`top_p`、`max_output_tokens`、`max_tool_calls`、`metadata`、`truncation`、`user`、`background`、`conversation`、`prompt` 等不支援的參數（省略而非送 `null`）；會改變語意的要求須明確報錯或在配置時拒絕。不依賴 hosted MCP、file search、Code Interpreter 或 Responses `tool_search`；pots 本機工具與 MCP 的執行不等於這些 hosted tools。
+- **實作。** provider 與 OAuth 都在 `pots-llm` 裡直接用 `reqwest` 實作，請求 body 與 SSE 解碼是純函式，可以單獨測試。驗收包含串流回答、工具往返、多輪歷史、取消、斷流、並行 refresh、重啟、撤銷與額度不足。
+- **失敗與預算。** 錯誤碼對應到 `LlmError`：額度用完（`subscription_sharing_usage_limit_exceeded`）→ `UsageLimit`；不符資格、路由不支援或 scope 未授權 → `NotEntitled`；暫時無法使用 → `Unavailable`（保留憑證，稍後有限重試）；不支援的能力 → `Unsupported`（重送同一請求沒有用）；身分失效 → `NeedsLogin`。plan 錯誤只停止推論，絕不自動改走其他計費路徑；訂閱額度不等於 API 餘額或無限用量。額度不足時排隊或升級給人類，API fallback 須先有使用者授權與金額上限。
 
-上述為設計與待驗證項目，非已完成的帳號測試。官方 preview 與資格可能變動，實作時重查[官方來源](references.md#帳號與模型整合)。
+M0 已依上述約定實作，並對假的 OAuth 與 Responses 伺服器測試。尚未對正式服務驗證的有：實際登入流程、`include: ["reasoning.encrypted_content"]` 是否被接受（做成選項，預設開啟）、`/models` 的實際回應格式，以及各模型對工具與 namespace 的實際行為。官方 preview 與資格可能變動，發佈前重查[官方來源](references.md#帳號與模型整合)。
 
-### Worker adapter：內建 rig 與外部 coding CLI
+### Worker adapter：內建 worker 與外部 coding CLI
 
-Worker 有兩種後端，由 project 設定選擇；執行位置（Pots 主機或某台 node）另由 `ExecTarget` 決定，見[託管電腦](computer-nodes.md#coding-任務)。Claude Code adapter 執行官方 coding agent，rig worker 用於備援與輕量任務。模型 provider 與 worker backend 分開配置；選擇 ChatGPT Plan 不會啟動 Codex，選擇 Claude Code 也不會把它變成 rig 的 completion provider。
+Worker 有兩種後端，由 project 設定選擇；執行位置（Pots 主機或某台 node）另由 `ExecTarget` 決定，見[託管電腦](computer-nodes.md#coding-任務)。Claude Code adapter 執行官方 coding agent，內建 worker 用於備援與輕量任務。模型 provider 與 worker backend 分開配置；選擇 ChatGPT Plan 不會啟動 Codex，選擇 Claude Code 也不會把它變成 Pots 的 `ModelProvider`。
 
 ```rust
 pub enum WorkerBackend {
-    Rig(RigWorkerConfig),            // 在行程內執行
+    Builtin(BuiltinWorkerConfig),    // pots-llm 的 loop，在行程內執行
     ClaudeCode { image: String },    // 在容器內以非互動模式執行
 }
 pub enum WorkerEvent {
@@ -179,17 +225,20 @@ pub trait OutputParser {
 
 - 等待 CI。 不讓 CLI 行程掛著等幾十分鐘。CLI 呼叫 `wait_for` 後，由平台持久化等待條件並受控結束本輪；保存 session ID、官方 session 資料、worktree、必要設定與 run 對應，事件到了再續接。不能只保存 ID 就刪掉容器內歷史。中斷與重試須核對已完成操作，避免重複副作用。
 
-- 成本與用量。 區分訂閱額度、API 計費與可能的額外付費用量，不把 CLI 的成本估計當帳單。訂閱 worker 以執行時間、次數與並行數限制預算；額度不足時排隊或交給人類，只有預先授權的 fallback 才可改派產生 API 費用的 rig worker。
+- 成本與用量。 區分訂閱額度、API 計費與可能的額外付費用量，不把 CLI 的成本估計當帳單。訂閱 worker 以執行時間、次數與並行數限制預算；額度不足時排隊或交給人類，只有預先授權的 fallback 才可改派產生 API 費用的內建 worker。
 
-- 登入與憑證。 使用者在原版 Claude Code 走 Anthropic 官方登入；CLI 自行管理登入狀態，pots 不提供 Claude token 匯入、不代收／解析／轉送 Claude.ai 憑證，也不將它們供 rig 使用。CLI 的登入與 session 儲存由使用者專屬執行環境持久化，不採「所有憑證唯讀掛載」的通用方案。容器登入、refresh 與重建續接須做原型驗證。
+- 登入與憑證。 使用者在原版 Claude Code 走 Anthropic 官方登入；CLI 自行管理登入狀態，pots 不提供 Claude token 匯入、不代收／解析／轉送 Claude.ai 憑證，也不將它們供內建 agent 使用。CLI 的登入與 session 儲存由使用者專屬執行環境持久化，不採「所有憑證唯讀掛載」的通用方案。容器登入、refresh 與重建續接須做原型驗證。
 
 - 條款邊界。 依官方規範執行未修改的 Claude Code，不限制其內建驗證方法；使用者以自己的帳號或 API key 登入，pots 不代付、轉售或中介其用量。平台承載 Claude Code 須遵守適用商業條款；個人訂閱不當作無限制的自動化服務帳號，正式使用前重查[官方規範](references.md#帳號與模型整合)。
 
 - 權限。 CLI 權限設定、容器檔案與網路隔離、MCP 伺服器端授權共同限制能力；不把提示詞或 CLI allowlist 當唯一沙箱。merge、部署等動作一律走平台的核准流程，CLI 拿不到對應權限。非互動模式可能載入 repo 的 hooks／MCP，啟動前須檢查設定，避免未信任的專案內容取得額外能力。
 
-### rig 版本注意
+### 為什麼不用 rig
 
-rig-core 仍在 1.0 之前，撰寫時最新為 0.45；近期版本的 import 路徑是 `rig_core::` ，較舊的範例寫 `rig::` 。API 變動頻繁，建議釘死精確版本，並把 rig 包在自己的 `llm` 模組後面，升級時只改一處。上面範例的方法名稱（`memory` 、`conversation` 、`default_max_turns` ）以釘
+早期設計以 rig 為 agent 框架，M0 實作時改為自有的 `pots-llm`：
 
-選版本的文件為準。
+- rig-core 0.46 重寫成 Model／Wire／Transport，agent runtime 拆到 rig-agent，原本的 builder、`ConversationMemory`、`PromptHook` 寫法都不再適用。
+- SIWC 對 Responses 請求的限制多（`store: false`、`stream: true`、不送 system item、工具要放 namespace、許多參數會被拒絕），直接組請求比較容易保證。評估時也發現 rig 從正規化的 tool call 重建 `function_call` 時會丟掉 `namespace`。
+
+provider 仍是可插拔的：其他 API provider 實作 `ModelProvider` 即可接上同一個 loop。之後 rig 穩定、或需要大量 provider 時可以重新評估，接法是寫一個包住 rig 的 `ModelProvider`，不影響 loop 與工具。
 

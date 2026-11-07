@@ -30,7 +30,7 @@ Pots 有兩種部署形態，兩者長期並存，桌面版不是搬上伺服器
 - **同一個執行檔，以子行程啟動。** 桌面 app 用 `--serve` 參數啟動自己的子行程來跑服務，客戶端照樣經由 loopback 的 WebSocket 與 HTTP API 連線，不走行程內的捷徑。這樣桌面版和多設備版共用同一條程式路徑與協定，UI 當掉或重新開啟也不會中斷正在跑的 agent run。
 - **常駐。** 關閉視窗時服務繼續在背景執行，系統匣或選單列顯示狀態，從那裡才能真正結束服務。結束前若還有進行中的 run，要先列出來給你確認。
 - **單一實例。** 資料目錄用檔案鎖保護。同一個資料目錄只能有一個服務；第二個 app 開啟時直接連上已在跑的那一個。
-- **本機存取保護。** 服務綁定 loopback 的隨機 port。啟動 token 寫在只有自己能讀的檔案（Unix `0600`），客戶端連線時必須帶上。服務同時檢查 `Host` 與 `Origin` 標頭，擋下瀏覽器頁面發出的跨站請求與 DNS rebinding；「只綁 127.0.0.1」本身不足以構成存取控制。
+- **本機存取保護。** 服務綁定 `127.0.0.1` 的隨機 port。啟動 token 與 port 寫在資料目錄的 `server.json`（Unix `0600`，原子寫入），除了 `/healthz`，每個請求（含 WebSocket 升級）都要帶 `Authorization: Bearer <token>`，以固定時間比較。`Host` 必須剛好是 `127.0.0.1:<port>` 或 `localhost:<port>`，擋下 DNS rebinding；帶任何 `Origin` 標頭的請求一律拒絕——原生客戶端不送 `Origin`，瀏覽器一定會送，這同時擋下跨站請求。「只綁 127.0.0.1」本身不足以構成存取控制。
 - **Node 專用 listener（選用）。** 桌面版要接[託管電腦](computer-nodes.md)時，可以在私有網路介面上另開一個 listener。這個 listener 只接受已配對 node 的 Ed25519 簽章連線，不提供客戶端 API，所以桌面版不必為了 node 而對外開放登入。
 
 ### 模型授權與持久化邊界
@@ -39,10 +39,10 @@ Pots 是使用者自行執行的開源軟體；上述部署形態不代表 Pots 
 
 **每個實例各自授權。** 桌面版和多設備版是兩個 runtime 安裝實例，ChatGPT 授權、Host ID 與 Claude Code 登入狀態各有一份，彼此不共用、不同步。
 
-- **ChatGPT Plan provider（rig）**：採官方 Sign in with ChatGPT（SIWC）開源 token-sharing 流程，由 Pots 管理取得的 OAuth 狀態，直接呼叫 Responses API；不透過 Codex CLI，也不讀取 Codex 私有憑證。每份授權只設一個 refresh owner：多 runner 時要協調成單一更新者，token 輪替時原子更新持久 secret store，避免併發 refresh 或重啟後拿舊的 refresh token 去用。會輪替的 token 不可只放在唯讀環境變數或唯讀掛載內。兩個實例同時使用時，必須是兩份獨立授權，不可複製同一份 refresh token 給兩個實例。
+- **ChatGPT Plan provider（pots-llm）**：採官方 Sign in with ChatGPT（SIWC）開源 token-sharing 流程，由 Pots 管理取得的 OAuth 狀態，直接呼叫 Responses API；不透過 Codex CLI，也不讀取 Codex 私有憑證。每份授權只設一個 refresh owner：多 runner 時要協調成單一更新者，token 輪替時原子更新持久 secret store，避免併發 refresh 或重啟後拿舊的 refresh token 去用。會輪替的 token 不可只放在唯讀環境變數或唯讀掛載內。兩個實例同時使用時，必須是兩份獨立授權，不可複製同一份 refresh token 給兩個實例。M0 把憑證存在資料目錄的 `auth/chatgpt-credentials.json`（`0600`，原子寫入），Host ID 另存在 `host-id`。
 - **Host ID**：綁定持久的 runtime 安裝實例，跨重啟保存，不為每個 task container 重新建立。自架 VM 使用自己的 Host ID，不複製桌面版的 Host ID。
-- **自架登入**：SIWC 的瀏覽器登入使用本機 loopback callback，不能把伺服器網址當成 callback 任意替換。自架 VM 依[官方指南](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)，在本機完成瀏覽器流程，再透過 SSH 把授權安全匯入 VM，並依指南使用 VM 自己的 Host ID。這是一個獨立、明確的授權設定流程，不是一般的資料搬移或 project 移交。
-- **Claude Code runtime adapter**：登入、token 更新與 session storage 由原始官方 Claude Code CLI 管理；Pots 啟動 CLI 並串接 runtime 結果，不把訂閱 token 抽出成 rig provider 憑證。CLI 的官方登入狀態與 session 儲存需要受保護、可寫入的持久位置，跨 runtime 重啟保留，不能簡化成通用的唯讀 credentials 掛載。
+- **自架登入**：SIWC 的瀏覽器登入使用本機 loopback callback，不能把伺服器網址當成 callback 任意替換。自架 VM 依[官方指南](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)，在本機完成瀏覽器流程，再透過 SSH 把憑證檔安全匯入 VM，並依指南使用 VM 自己的 Host ID（不覆蓋 VM 的 `host-id`）；之後由 VM 負責 refresh，本機不再使用同一份授權。這是一個獨立、明確的授權設定流程，不是一般的資料搬移或 project 移交。
+- **Claude Code runtime adapter**：登入、token 更新與 session storage 由原始官方 Claude Code CLI 管理；Pots 啟動 CLI 並串接 runtime 結果，不把訂閱 token 抽出成 Pots 的 provider 憑證。CLI 的官方登入狀態與 session 儲存需要受保護、可寫入的持久位置，跨 runtime 重啟保留，不能簡化成通用的唯讀 credentials 掛載。
 - **資料與秘密分離**：API key、OAuth access／refresh token、Claude CLI 登入狀態、客戶端裝置 token 等秘密，不納入一般 `export`／`import`、project 移交包或專案 artifact。換實例時要在目標實例另外完成官方授權，或走明確的安全匯入流程；日誌與錯誤訊息也不得洩露 token。
 
 以上為設計要求，不代表端到端授權、輪替與自架流程已驗證；SIWC preview 限制與官方文件見[參考資料](references.md#帳號與模型整合)。

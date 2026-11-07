@@ -27,7 +27,7 @@
 flowchart LR
     subgraph pots["Pots 服務（桌面版或多設備版實例）"]
         sched["Run 排程"]
-        op["operator / worker agent<br/>（rig loop 或 Claude Code adapter）"]
+        op["operator / worker agent<br/>（pots-llm loop 或 Claude Code adapter）"]
         gate["Gate + 核准執行器"]
         hub["Node Hub<br/>連線、lease、健康狀態"]
     end
@@ -84,7 +84,7 @@ Node 上不存放任何模型憑證：截圖與畫面資訊回傳 Pots，由 Pot
 
 - **結構化資訊優先，截圖其次。** 每次觀察都盡量附上 AX 樹，讓模型用元素 ID 操作，比只看像素可靠也便宜；AX 資訊不完整的 app（部分 Electron、遊戲、畫布型 app）才退回座標操作。
 - **每一步都留下證據。** 每次 `ui_act` 前後各存一張截圖，寫進 trace 與 `run_media`，在「為什麼」面板可以逐步回放。
-- **模型需求。** operator 必須用支援影像輸入與工具呼叫的模型。Pots 以一般 function tool 加影像輸入實作，不依賴任何 provider 的 hosted computer-use 工具，因此 rig 的各個 provider 都能用；ChatGPT Plan provider 在 SIWC preview 下是否支援影像輸入，必須實測確認。
+- **模型需求。** operator 必須用支援影像輸入與工具呼叫的模型。Pots 以一般 function tool 加影像輸入實作，不依賴任何 provider 的 hosted computer-use 工具，因此任何支援影像輸入的 `ModelProvider` 都能用；ChatGPT Plan provider 在 SIWC preview 下是否支援影像輸入，必須實測確認。
 - **Claude Code 也能用。** Claude Code 透過 Pots 的 MCP server 拿到同一組 node 工具，Gate 規則一樣在伺服器端執行。
 
 ### 一次只有一個 GUI 任務：display lease
