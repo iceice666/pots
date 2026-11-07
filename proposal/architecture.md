@@ -118,7 +118,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `tasks` | 任務樹節點 | `id` , `goal_id` , `parent_id` , `assignee` , `state jsonb` , `attempts` , `spent_tokens` |
 | `task_events` | 任務狀態變化的只增日誌（稽核與重播） | `task_id` , `seq` , `from` , `to` , `cause` |
 | `agent_runs` | agent 執行佇列（`FOR UPDATE SKIP LOCKED` ） | `id` , `agent` , `task_id?` , `trigger` , `state` , `lease_until` |
-| `model_connections` | 設定頁新增的 API provider（OpenAI／Anthropic 相容）的非秘密設定；內建的 ChatGPT 不是一列 | `id, user_id, kind, name, base_url, model, secret_ref, created_at, updated_at` |
+| `model_connections` | 設定視窗新增的 API provider（OpenAI／Anthropic 相容）的非秘密設定；內建的 ChatGPT 不是一列 | `id, user_id, kind, name, base_url, model, secret_ref, created_at, updated_at` |
 | `instance_settings` | 實例層級的設定（使用中的 provider、ChatGPT 的模型） | `key, value` |
 | `worker_sessions` | 外部 runtime 的續接與 run 對應 | `id, user_id, task_id, run_id, backend, external_session_id, state_ref, worktree_ref` |
 | `nodes` | 託管電腦的註冊、能力、政策與狀態 | `id, user_id, name, os, capabilities, pubkey, policy, status, last_seen` |

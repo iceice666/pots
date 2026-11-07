@@ -55,7 +55,7 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 | 總管 | 左欄入口的獨立畫面，和對話流一樣佔中欄，右欄是專案概況與記憶；任何畫面都可用快捷鍵切過去 | 底部分頁「總管」 | 同一個實例內跨 project 的永久對話，依目前選取的實例切換 |
 | 自動化 | 左欄「排程」「Listener」進入的實例層級畫面，佔中欄，可依專案篩選；project 頻道的「自動化」分頁只看這個 project。點一列在右欄看細節 | 同左 | 排程與 listener 列表、批次暫停狀態；可停用、刪除、看條件與觸發紀錄，待核准的 listener 可以直接核准 |
 | 電腦 | 左欄入口的實例層級畫面，佔中欄 | 同左 | 託管電腦的連線狀態、lease 持有者、即時縮圖、權限檢查；「接手」、「交還」與「停止」 |
-| 設定 | 左欄最下方的入口，實例層級畫面，佔中欄 | 「設定」分頁 | 模型 provider：內建的 ChatGPT 方案（登入、登出、模型）與新增的 OpenAI／Anthropic 相容 API（base URL、API key、模型、測試連線），選一個「使用中」。還沒有使用中的 provider 時，Inbox 有一筆「設定模型 provider」指向這裡 |
+| 設定 | 左欄最下方的入口，打開蓋在主畫面上的設定視窗：左邊是類別（模型 Provider、關於），右邊是內容；點背景、右上角或按 Esc 關閉 | 「設定」分頁 | 屬於目前實例的設定。模型 provider：內建的 ChatGPT 方案（登入、登出、模型）與新增的 OpenAI／Anthropic 相容 API（base URL、API key、模型、測試連線），選一個「使用中」。還沒有使用中的 provider 時，Inbox 有一筆「設定模型 provider」指向這裡 |
 
 ### 即時協定
 

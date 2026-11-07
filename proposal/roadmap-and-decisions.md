@@ -54,7 +54,7 @@ M5 之前的 merge 一律由你在 GitHub 上手動完成，所以即使核准�
 
 LLM 層要用 rig 這類 agent 框架，還是自己寫？rig-core 0.46 重寫成 Model／Wire／Transport、agent runtime 拆到 rig-agent，原本依賴的 builder、`ConversationMemory`、`PromptHook` 都不再適用；SIWC 對 Responses 的限制多，rig 重建 `function_call` 時又會丟掉 `namespace`。→ 決定：不用 rig。workspace crate `pots-llm` 提供與模型無關的 `ModelProvider` trait、Responses provider、SIWC 授權與共用的多輪工具迴圈（`agent::run`，以 `Hook` 把關）；其他 API provider 實作 `ModelProvider` 即可接上，之後可重新評估 rig。見[為什麼不用 rig](agent-runtime.md#為什麼不用-rig)。
 
-模型 provider 怎麼設定？原本第一次使用就要求登入 ChatGPT。→ 決定：每個實例在設定頁（左欄最下方）管理 provider，內建 ChatGPT 方案，另外可以新增 OpenAI 相容（Chat Completions）與 Anthropic 相容（Messages）的 API，選一個「使用中」給對話 agent。API key 存在資料目錄的 `0600` 檔案，客戶端只看得到末四碼；不做 provider 之間的自動 fallback。見[模型 provider 設定](agent-runtime.md#模型-provider-設定)。
+模型 provider 怎麼設定？原本第一次使用就要求登入 ChatGPT。→ 決定：每個實例在設定視窗（左欄最下方打開，左邊是類別）管理 provider，內建 ChatGPT 方案，另外可以新增 OpenAI 相容（Chat Completions）與 Anthropic 相容（Messages）的 API，選一個「使用中」給對話 agent。API key 存在資料目錄的 `0600` 檔案，客戶端只看得到末四碼；不做 provider 之間的自動 fallback。見[模型 provider 設定](agent-runtime.md#模型-provider-設定)。
 
 手機客戶端與推播。候選是 gpui-mobile 共用 GPUI 介面、輕量 Web 核准頁（PWA 加 Web Push），或原生 Android。→ 決定：原生 Android（Kotlin 加 Jetpack Compose，[`android/`](../android/)），推播用 UnifiedPush，以 ntfy 當 distributor，伺服器端用 VAPID 與 RFC 8291 加密送出，不依賴 FCM；iOS 不在 v1 範圍。見[手機推播](approvals-and-notifications.md#手機推播)。
 

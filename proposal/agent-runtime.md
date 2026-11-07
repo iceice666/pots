@@ -189,7 +189,7 @@ pots 採開源、本機或使用者自行架設的模式。透過官方 **Sign i
   - refresh 會輪替 refresh token：同一份授權只有一個 refresh owner，新的 access／refresh token、期限與 scopes 一起原子寫入。
   - 登出時撤銷 refresh token，清掉本機 token，保留 issued client ID 與 Host ID；撤銷未確認時明確告知使用者。
 - **憑證。** 帳號授權、憑證儲存／refresh、推論 adapter 分層。行程內由 `SiwcAuth` 以一把 async mutex 序列化 refresh，多個 run 不各自更新同一份憑證；推論回 401 時強制 refresh 一次再重送。M0 的憑證是資料目錄裡的 `auth/chatgpt-credentials.json`（`0600`，原子寫入）。秘密不進 prompt、資料匯出或 trace，部署方式見[部署](deployment.md)。
-- **推論端點。** `POST https://api.openai.com/v1/responses`，只帶 `Authorization: Bearer <access token>`；是公開的 Responses API，不是 ChatGPT 的 `backend-api`。`GET /v1/models` 回傳 `models` 陣列（不是一般 API 的 `data`），取 `visibility == "list"` 的項目、保留伺服器順序；設定頁沒有指定模型（也沒有 `POTS_CHAT_MODEL`）時，Pots 選清單的第一個。模型列舉不當作 entitlement 保證，以實際請求結果判斷。
+- **推論端點。** `POST https://api.openai.com/v1/responses`，只帶 `Authorization: Bearer <access token>`；是公開的 Responses API，不是 ChatGPT 的 `backend-api`。`GET /v1/models` 回傳 `models` 陣列（不是一般 API 的 `data`），取 `visibility == "list"` 的項目、保留伺服器順序；設定視窗沒有指定模型（也沒有 `POTS_CHAT_MODEL`）時，Pots 選清單的第一個。模型列舉不當作 entitlement 保證，以實際請求結果判斷。
 - **Responses 相容層。** 請求一律 `store: false`、`stream: true`，完整必要歷史放入 `input`，不用 `previous_response_id`；指示放頂層 `instructions`，不送 system message item。所有 Pots 工具放進名為 `pots` 的 namespace，回送 `function_call` 時補上 `namespace`，工具結果以 `function_call_output` 回送。reasoning item 存成 `Item::Opaque`，有加密內容時拿掉 `id` 原樣回送。只有 `response.completed` 代表成功；`response.failed`、`response.incomplete` 或提前結束的串流都是失敗。
 - **能力限制。** 不送 `temperature`、`top_p`、`max_output_tokens`、`max_tool_calls`、`metadata`、`truncation`、`user`、`background`、`conversation`、`prompt` 等不支援的參數（省略而非送 `null`）；會改變語意的要求須明確報錯或在配置時拒絕。不依賴 hosted MCP、file search、Code Interpreter 或 Responses `tool_search`；pots 本機工具與 MCP 的執行不等於這些 hosted tools。
 - **實作。** provider 與 OAuth 都在 `pots-llm` 裡直接用 `reqwest` 實作，請求 body 與 SSE 解碼是純函式，可以單獨測試。驗收包含串流回答、工具往返、多輪歷史、取消、斷流、並行 refresh、重啟、撤銷與額度不足。
@@ -199,7 +199,7 @@ M0 已依上述約定實作，並對假的 OAuth 與 Responses 伺服器測試�
 
 ### 模型 provider 設定
 
-每個實例在設定頁管理自己的模型 provider，對話 agent 用「使用中」的那一個。provider 的非秘密設定存在 `model_connections`，使用中的 provider 與 ChatGPT 的模型存在 `instance_settings`；客戶端只看得到 API key 的末四碼。
+每個實例在設定視窗管理自己的模型 provider，對話 agent 用「使用中」的那一個。provider 的非秘密設定存在 `model_connections`，使用中的 provider 與 ChatGPT 的模型存在 `instance_settings`；客戶端只看得到 API key 的末四碼。
 
 | 種類 | 實作 | 端點 | 授權 |
 | --- | --- | --- | --- |
@@ -210,9 +210,9 @@ M0 已依上述約定實作，並對假的 OAuth 與 Responses 伺服器測試�
 - **對應。** `instructions` 在 OpenAI 相容 API 是第一則 `system` 訊息，在 Anthropic 是頂層 `system`。同一輪的文字與工具呼叫合成一則 assistant 訊息；工具結果在 OpenAI 是 `tool` 角色，在 Anthropic 是 user 訊息裡的 `tool_result`，相鄰同角色的訊息合併。其他 provider 的 `Item::Opaque` 略過。Anthropic 請求必帶 `max_tokens`，預設 8192。
 - **串流。** OpenAI 相容 API 以 `data: [DONE]` 或 `finish_reason` 結束；Anthropic 以 `message_stop` 結束。之前就斷掉的串流是 `Interrupted`。
 - **錯誤。** 401／403 → `InvalidCredentials`（請你到設定檢查 key）；400／404／422 → `Unsupported`；429 → `Unavailable`，帳單或額度不足另外標示；5xx 與 Anthropic 的 529 → `Unavailable`。錯誤訊息帶服務回的說明，不帶 key。
-- **測試連線。** 設定頁的「測試連線」呼叫 `GET {base_url}/models`（Anthropic 是 `/v1/models`，會跟著分頁），回傳可用的模型讓你挑；不會儲存。
+- **測試連線。** 設定視窗的「測試連線」呼叫 `GET {base_url}/models`（Anthropic 是 `/v1/models`，會跟著分頁），回傳可用的模型讓你挑；不會儲存。
 - **秘密。** API key 存在 `data_dir/auth/providers/<id>.json`（`0600`、原子寫入），刪除 provider 時一起刪掉；不進事件日誌、快照、日誌或錯誤訊息。
-- **沒有自動 fallback。** 使用中的 provider 失敗就失敗，不會改用其他 provider；換 provider 一律由你在設定頁切換。
+- **沒有自動 fallback。** 使用中的 provider 失敗就失敗，不會改用其他 provider；換 provider 一律由你在設定視窗切換。
 
 ### Worker adapter：內建 worker 與外部 coding CLI
 

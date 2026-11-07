@@ -20,7 +20,7 @@ Pots 有兩種部署形態，兩者長期並存，桌面版不是搬上伺服器
 | Pots 存取與登入 | 啟動時產生的本機 token，免登入；模型 provider 仍須另行授權 | passkey 或 forward-auth；原生客戶端用可撤銷的裝置 token；不取代模型 provider 授權 | 同左 |
 | 外部事件 | 輪詢與 IMAP IDLE（GitHub 用 PAT 或 `gh` 的登入） | 輪詢；有公開網址時優先用 webhook | 各來源優先用 webhook，輪詢作備援 |
 | 通知 | 作業系統桌面通知 | Android 推播（UnifiedPush，經 ntfy）；已連線的桌面客戶端顯示原生通知 | 同左 |
-| 憑證 | 靜態 API key 在設定頁輸入，存成資料目錄裡 `0600` 的檔案；會輪替的 OAuth token 存在可寫入的持久 secret store | 靜態 API key 用 secret 檔等方式注入；會輪替的 OAuth token 存在可寫入的持久 secret store | 同左 |
+| 憑證 | 靜態 API key 在設定視窗輸入，存成資料目錄裡 `0600` 的檔案；會輪替的 OAuth token 存在可寫入的持久 secret store | 靜態 API key 用 secret 檔等方式注入；會輪替的 OAuth token 存在可寫入的持久 secret store | 同左 |
 | Worker 沙箱 | 本機 Docker/Podman | 伺服器上的 Docker/Podman | 同左 |
 
 表中三欄是三組預設組合，不是寫死的模式。各項後端可以獨立選擇，例如家裡 NAS 上跑「SQLite 加 passkey 加 ntfy 推播」就是合理的多設備版，不必為了多設備就上 Postgres。不合理的組合在啟動時直接拒絕，規則見[設定驗證](#設定驗證)。
