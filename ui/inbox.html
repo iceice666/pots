@@ -6,47 +6,55 @@
   <title>Inbox</title>
   <link rel="stylesheet" href="styles/base.css">
   <link rel="stylesheet" href="styles/ui.css">
+  <link rel="stylesheet" href="styles/instances.css">
 </head>
 <body>
 <div class="ui-001">
 
-<nav aria-label="工作區" class="ui-002">
-<div class="ui-003">
-<span class="ui-004">我的工作區</span>
-<span class="ui-005">單機</span>
-</div>
-<a href="channel.html" class="ui-006">
-<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg>
-<span>總管</span>
+<nav aria-label="實例" class="rail">
+<a href="inbox.html" aria-current="page" title="全部實例的 Inbox" aria-label="全部實例的 Inbox，5 件待處理" class="rail-item">
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg>
+<span aria-hidden="true" class="rail-badge">5</span>
 </a>
+<div aria-hidden="true" class="rail-sep"></div>
+<a href="#laptop" title="我的筆電（桌面版）" aria-label="我的筆電，桌面版，2 件待處理" class="rail-item">
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="1.5"></rect><path d="M2 19h20"></path></svg>
+<span aria-hidden="true" class="rail-badge">2</span>
+</a>
+<a href="channel.html" title="家用伺服器（多設備版）" aria-label="家用伺服器，多設備版，3 件待處理" class="rail-item">
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.5"></rect><rect x="3" y="13" width="18" height="7" rx="1.5"></rect><path d="M7 7.5h.01M7 16.5h.01"></path></svg>
+<span aria-hidden="true" class="rail-badge">3</span>
+</a>
+<a href="#add-instance" title="加入實例" aria-label="加入實例" class="rail-item rail-add">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+</a>
+</nav>
+
+<nav aria-label="Inbox 篩選" class="ui-002">
+<div class="ui-003">
+<span class="ui-004">Inbox</span>
+<span class="ui-005">所有實例</span>
+</div>
 <a href="inbox.html" aria-current="page" class="ui-009">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg>
-<span>Inbox</span>
+<span>全部實例</span>
+<span class="ui-007">5</span>
+</a>
+<div class="ui-008">實例</div>
+<a href="#laptop" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="1.5"></rect><path d="M2 19h20"></path></svg>
+<span>我的筆電</span>
+<span class="ui-007">2</span>
+</a>
+<a href="inbox.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.5"></rect><rect x="3" y="13" width="18" height="7" rx="1.5"></rect><path d="M7 7.5h.01M7 16.5h.01"></path></svg>
+<span>家用伺服器</span>
 <span class="ui-007">3</span>
-</a>
-<div class="ui-008">專案</div>
-<a href="channel.html" class="ui-006">
-<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
-<span>auth-service</span>
-<span class="ui-007">1</span>
-</a>
-<a href="channel.html" class="ui-006">
-<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
-<span>web-app</span>
-<span class="ui-010">需要你</span>
-</a>
-<a href="channel.html" class="ui-006">
-<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
-<span>infra</span>
-</a>
-<a href="channel.html" class="ui-006">
-<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
-<span>docs-site</span>
 </a>
 <div class="ui-012">
 <div aria-hidden="true" class="ui-013">你</div>
 <span class="ui-014">你</span>
-<span class="ui-011">localhost</span>
+<span class="ui-011">2 個實例已連線</span>
 </div>
 </nav>
 
@@ -54,12 +62,12 @@
 <header class="ui-173">
 <div class="ui-100">
 <h1 class="ui-174">Inbox</h1>
-<p class="ui-175">需要你決定的事。一般進度不會出現在這裡。</p>
+<p class="ui-175">需要你決定的事，合併所有已連線的實例。一般進度不會出現在這裡。</p>
 </div>
 <div role="tablist" aria-label="篩選" class="ui-064">
-<button type="button" role="tab" aria-selected="true" class="ui-176">全部 4</button>
-<button type="button" role="tab" aria-selected="false" class="ui-177">核准 2</button>
-<button type="button" role="tab" aria-selected="false" class="ui-177">需要你處理 1</button>
+<button type="button" role="tab" aria-selected="true" class="ui-176">全部 6</button>
+<button type="button" role="tab" aria-selected="false" class="ui-177">核准 3</button>
+<button type="button" role="tab" aria-selected="false" class="ui-177">需要你處理 2</button>
 <button type="button" role="tab" aria-selected="false" class="ui-177">找你的訊息 1</button>
 </div>
 </header>
@@ -69,6 +77,7 @@
 <article class="ui-179">
 <div class="ui-180">
 <span class="ui-181">核准</span>
+<span class="inst-chip">家用伺服器</span>
 <span class="ui-137"># auth-service</span>
 <span class="ui-081">· OAuth 登入遷移</span>
 <span class="ui-182">2 分鐘前</span>
@@ -85,6 +94,24 @@
 <article class="ui-179">
 <div class="ui-180">
 <span class="ui-181">核准</span>
+<span class="inst-chip">我的筆電</span>
+<span class="ui-137"># dotfiles</span>
+<span class="ui-081">· 整理 shell 設定</span>
+<span class="ui-182">25 分鐘前</span>
+</div>
+<div class="ui-049">Merge PR #9 到 main</div>
+<div class="ui-183">合併重複的 alias，移除過期的 PATH 設定 · CI 4 / 4 通過 · +36 −58</div>
+<div class="ui-064">
+<button type="button" class="ui-065">核准</button>
+<button type="button" class="ui-066">拒絕</button>
+<a href="#laptop" class="ui-184">在頻道中查看</a>
+</div>
+</article>
+
+<article class="ui-179">
+<div class="ui-180">
+<span class="ui-181">核准</span>
+<span class="inst-chip">家用伺服器</span>
 <span class="ui-137"># infra</span>
 <span class="ui-081">· 新的 listener</span>
 <span class="ui-182">1 小時前</span>
@@ -106,6 +133,7 @@
 <article class="ui-186">
 <div class="ui-180">
 <span class="ui-187">需要你處理</span>
+<span class="inst-chip">家用伺服器</span>
 <span class="ui-137"># web-app</span>
 <span class="ui-081">· 結帳頁改版</span>
 <span class="ui-182">3 小時前</span>
@@ -119,9 +147,26 @@
 </div>
 </article>
 
+<article class="ui-186">
+<div class="ui-180">
+<span class="ui-187">需要你處理</span>
+<span class="inst-chip">我的筆電</span>
+<span class="ui-137"># side-project</span>
+<span class="ui-081">· 匯出功能</span>
+<span class="ui-182">5 小時前</span>
+</div>
+<div class="ui-049">這台電腦的 Claude Code 尚未登入，worker 無法開工</div>
+<div class="ui-183">每個實例各自登入，家用伺服器的登入不會帶到這裡。請在這台電腦上用官方 CLI 完成登入。</div>
+<div class="ui-064">
+<button type="button" class="ui-065">開始登入</button>
+<button type="button" class="ui-066">看 thread</button>
+</div>
+</article>
+
 <article class="ui-179">
 <div class="ui-180">
 <span class="ui-189">找你</span>
+<span class="inst-chip">家用伺服器</span>
 <span class="ui-137">總管</span>
 <span class="ui-182">今天 08:30</span>
 </div>
