@@ -40,6 +40,12 @@
 
 - 只透過任務樹派工。 它用 `create_goal` 在指定 project 開 Goal，該 project 的對話裡同時出現一張 Goal 卡片並註明來自總管。它不直接指揮 Planner 或 worker，維持「任務樹是唯一真相」。
 
+- 取消 Goal。 用 `cancel_goal` 取消任一 project 的 Goal，該 project 的對話裡出現取消卡片並註明來自總管。個別任務的取消仍由該 Goal 的 Planner 負責。
+
+- 暫停自動化。 `pause_automations` 暫停指定 project 或所有 project 的排程與 listener，可帶 `until` 指定自動恢復時間；`resume_automations` 提前恢復。暫停期間錯過的觸發不補跑，自動化頁面顯示暫停橫幅，你也可以直接按「立即恢復」。
+
+- 自己的排程。 用 `schedule` 建立 owner 為 `Global` 的排程，例如每天早上的跨 project 摘要；醒來時在總管對話裡帶著 OM 繼續。
+
 - 權限。 可以讀所有 project 的狀態與歷史，但核准一律仍在原 project 的核准卡片或 Inbox 完成。
 
 ### 平台工具

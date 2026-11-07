@@ -67,12 +67,9 @@ Gate 是 rig 的 `PromptHook` ，負責所有「不能靠 prompt」的規則：
 | Profile | 記憶 | 唯讀基礎集之外的工具 | 可開 |
 | --- | --- | --- | --- |
 | chat | OM（project 對話） | `create_goal` 、`steer_goal` 、 `cancel_goal` 、`quick_fix` 、 `write_artifact` （Spec）、 `propose_user_md_edit` 、 `propose_project_note` 、 `schedule` 、`create_listener` | subagent |
-
-| Profile | 記憶 | 唯讀基礎集之外的工具 | 可開 |
-| --- | --- | --- | --- |
 | planner | 無狀態（讀 Brief、 Ledger、任務樹） | `create_task` 、`cancel_task` 、 `post_to_team` 、 `request_approval` 、 `post_milestone` 、`escalate` 、 `complete_goal` 、`write_artifact` （Ledger）、 `propose_project_note` 、`schedule` | subagent、 team 任務 |
 | worker | 無狀態（讀任務 thread） | `edit_file` 、`run` 、`open_pr` 、 `wait_for` 、`post_to_team` 、 `report_progress` 、 `complete_task` 、`fail_task` 、 `escalate` 、`write_artifact` （Report） | 唯讀 subagent |
-| global | OM（全域對話） | `create_goal` （任一 project）、 `archive_goal` 、 `pause_automations` | subagent |
+| global | OM（全域對話） | `create_goal` （任一 project）、 `cancel_goal` （任一 project）、 `archive_goal` 、 `pause_automations` 、 `resume_automations` 、 `schedule` （全域） | subagent |
 | explorer | 無狀態 | 無 | 不可 |
 | reviewer | 無狀態 | 無（只回傳審查意見） | 不可 |
 
@@ -154,9 +151,6 @@ flowchart TB
 | context | 自己的記憶或 Brief | 只有主 agent 給的說明 | 任務描述、Brief、 team 貼文 |
 | 能做什麼 | 依 profile | 預設唯讀（explorer、 reviewer） | 依 worker profile，可寫入 |
 | 結果去哪 | 對話或 artifact | 只回到主 agent 的 context | 任務結果、Report、 team 貼文 |
-
-|  | 主 agent | Subagent | Team 成員 |
-| --- | --- | --- | --- |
 | 平台紀錄 | `agent_runs` | 子 run （`parent_run_id` ），不建任務 | `tasks` 與 `agent_runs` |
 
 - subagent 是用來保持主 agent 的 context 乾淨。 讀大量程式碼、整理 CI log、審查 diff，把結論帶回來；主 agent 收到的是結論，不是過程。
