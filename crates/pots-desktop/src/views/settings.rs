@@ -4,6 +4,8 @@
 //! 內建的 ChatGPT 方案在第一張，可以登入、登出、指定模型；另外可以新增 OpenAI 或
 //! Anthropic 相容的 API。對話 agent 用「使用中」的那一個。API key 只送給服務、存在
 //! 實例的資料目錄，畫面上只看得到末四碼。
+//!
+//! 「記憶」類別：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
@@ -14,7 +16,7 @@ use gpui_kit::{
 };
 
 use super::widgets::{icon, link_button, primary_button, secondary_button, tag};
-use crate::app::{PotsApp, ProviderEditor, ProviderTest, SettingsTab};
+use crate::app::{MemoryModelEditor, PotsApp, ProviderEditor, ProviderTest, SettingsTab};
 use crate::model::*;
 use crate::theme;
 
@@ -124,6 +126,7 @@ impl PotsApp {
             let selected = t == tab;
             let glyph = match t {
                 SettingsTab::Providers => IconName::Sparkles,
+                SettingsTab::Memory => IconName::Brain,
                 SettingsTab::About => IconName::Info,
             };
             nav = nav.child(
@@ -161,6 +164,7 @@ impl PotsApp {
 
         let body = match tab {
             SettingsTab::Providers => self.render_providers_section(cx).into_any_element(),
+            SettingsTab::Memory => self.render_memory_section(cx).into_any_element(),
             SettingsTab::About => self.render_about_section().into_any_element(),
         };
         let content = div()
@@ -318,6 +322,216 @@ impl PotsApp {
         }
 
         list
+    }
+
+    fn render_memory_section(&self, cx: &mut Context<Self>) -> Div {
+        let inst = self.current_instance();
+        let providers = &inst.providers;
+        let describe = |id: Option<ProviderId>, model: &str| -> String {
+            let Some(p) = id.and_then(|id| providers.get(id)) else {
+                return "還沒有使用中的 provider".into();
+            };
+            let model = if !model.is_empty() {
+                model.to_string()
+            } else if !p.model.is_empty() {
+                p.model.clone()
+            } else if p.kind == ProviderKind::ChatGpt {
+                "自動".into()
+            } else {
+                "未設定模型".into()
+            };
+            format!("{} · {model}", p.name)
+        };
+        let current = &providers.memory;
+        let (label, detail) = match current.provider {
+            None => (
+                "跟對話 agent 相同".to_string(),
+                format!("目前：{}", describe(providers.active, "")),
+            ),
+            Some(id) => (describe(Some(id), &current.model), String::new()),
+        };
+
+        let mut model_card = card()
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .font_weight(FontWeight::BOLD)
+                    .child("整理記憶的模型"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(theme::text_muted())
+                    .child(
+                        "Observer 與 Reflector 在背景把對話整理成觀察。建議用便宜、快速、context 夠長的模型，\
+                         和對話 agent 分開設定。",
+                    ),
+            );
+        match &self.memory_model_editor {
+            None => {
+                model_card = model_card
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(detail_row("模型", label))
+                            .when(!detail.is_empty(), |d| d.child(detail_row("", detail))),
+                    )
+                    .child(
+                        div().child(
+                            link_button("memory-model-edit", "變更")
+                                .pl(px(0.))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.edit_memory_model(window, cx)
+                                })),
+                        ),
+                    );
+            }
+            Some(editor) => {
+                model_card = model_card.child(self.render_memory_model_editor(editor, cx));
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(model_card)
+            .child(
+                card()
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("什麼時候整理（預設值）"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .text_size(px(13.))
+                            .text_color(theme::text_muted())
+                            .child("還沒整理的對話超過約 3 萬 token 時，Observer 把較早的部分整理成觀察；最近 12 則一直保留原文。")
+                            .child("觀察超過約 4 萬 token 時，Reflector 把它們合併、去重；釘選的觀察一定保留。")
+                            .child("每個 project 的觀察在頻道的「記憶」分頁，可以釘選、修正或刪除。"),
+                    ),
+            )
+    }
+
+    fn render_memory_model_editor(
+        &self,
+        editor: &MemoryModelEditor,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let providers = &self.current_instance().providers;
+        let option = |key: String,
+                      label: String,
+                      value: Option<ProviderId>,
+                      cx: &mut Context<Self>| {
+            let selected = editor.provider == value;
+            div()
+                .id(SharedString::from(key))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .border_1()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .when_else(
+                    selected,
+                    |d| d.border_color(theme::accent()).bg(theme::accent_soft()),
+                    |d| {
+                        d.border_color(theme::border())
+                            .bg(theme::white())
+                            .hover(|s| s.bg(theme::subtle_bg()))
+                    },
+                )
+                .child(icon(
+                    if selected {
+                        IconName::CircleCheck
+                    } else {
+                        IconName::Square
+                    },
+                    14.,
+                    if selected {
+                        theme::accent()
+                    } else {
+                        theme::text_muted()
+                    },
+                ))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.pick_memory_provider(value, cx)))
+        };
+
+        let mut options = div().flex().flex_col().gap(px(6.)).child(option(
+            "memory-provider-same".into(),
+            "跟對話 agent 相同".into(),
+            None,
+            cx,
+        ));
+        for p in &providers.items {
+            let label = match p.kind {
+                ProviderKind::ChatGpt => p.kind.label().to_string(),
+                kind => format!("{}（{}）", p.name, kind.label()),
+            };
+            options = options.child(option(
+                format!("memory-provider-{}", p.id),
+                label,
+                Some(p.id),
+                cx,
+            ));
+        }
+
+        let mut form = div().flex().flex_col().gap(px(12.)).child(field(
+            "Provider",
+            None,
+            options.into_any_element(),
+        ));
+        if editor.provider.is_some() {
+            form = form.child(field(
+                "模型",
+                Some("例如 gpt-4.1-mini、claude-haiku-4-5；留空用這個 provider 設定的模型"),
+                Input::new(&editor.model).into_any_element(),
+            ));
+        }
+        if let Some(error) = &editor.error {
+            form = form.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(13.))
+                    .text_color(theme::danger())
+                    .child(icon(IconName::CircleAlert, 14., theme::danger()))
+                    .child(error.clone()),
+            );
+        }
+        form.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    primary_button(
+                        "memory-model-save",
+                        if editor.saving {
+                            "儲存中…"
+                        } else {
+                            "儲存"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.save_memory_model(cx))),
+                )
+                .child(
+                    link_button("memory-model-cancel", "取消")
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_memory_model_edit(cx))),
+                ),
+        )
     }
 
     fn render_about_section(&self) -> Div {

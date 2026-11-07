@@ -20,6 +20,8 @@ pub struct Applied {
     pub providers_changed: bool,
     /// `TestProvider` 的結果：請求編號與可用模型或錯誤。
     pub provider_test: Option<(u64, Result<Vec<ModelOption>, String>)>,
+    /// 這個 project 的記憶整份換了（`Memory` 事件）。
+    pub memory_changed: Option<ProjectId>,
 }
 
 /// 本地時區相對 UTC 的秒數。
@@ -90,6 +92,7 @@ impl Sync {
             items: p.items.into_iter().map(|i| self.localize(i)).collect(),
             goals: vec![],
             artifacts: vec![],
+            memory: p.memory,
         }
     }
 
@@ -221,6 +224,14 @@ impl Sync {
             }
             ServerEvent::ProviderTest { request, result } => {
                 out.provider_test = Some((request, result));
+            }
+            ServerEvent::Memory {
+                project, memory, ..
+            } => {
+                if let Some(p) = store.project_mut(instance, project) {
+                    p.memory = memory;
+                }
+                out.memory_changed = Some(project);
             }
             ServerEvent::Error { message } => out.toast = Some(message),
             // M0 還沒有任務樹與核准。
@@ -398,6 +409,7 @@ mod tests {
                     agent_name: "Pots".into(),
                     agent_state: AgentState::Idle,
                     items: vec![],
+                    memory: MemoryView::default(),
                 }],
                 model_auth: auth,
                 providers: chatgpt_active(),
@@ -416,7 +428,47 @@ mod tests {
                 model: String::new(),
                 key_hint: None,
             }],
+            memory: MemoryModelView::default(),
         }
+    }
+
+    #[test]
+    fn memory_event_replaces_project_memory() {
+        let inst = InstanceId::from_u64(1);
+        let project = ProjectId::from_u64(2);
+        let mut store = empty_store(inst);
+        let sync = Sync::new(0);
+        sync.apply(
+            &mut store,
+            inst,
+            snapshot(inst, project, ModelAuthView::SignedOut),
+        );
+        let memory = MemoryView {
+            generation: 1,
+            current_task: "寫測試".into(),
+            observations: vec![ObservationView {
+                id: ObservationId::from_u64(9),
+                date: "2026-11-07".into(),
+                priority: Priority::High,
+                text: "用 SQLite".into(),
+                pinned: true,
+                edited: false,
+            }],
+            tokens: 40,
+            error: None,
+        };
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::Memory {
+                seq: 4,
+                project,
+                memory: memory.clone(),
+            },
+        );
+        assert_eq!(out.memory_changed, Some(project));
+        assert_eq!(store.project(inst, project).unwrap().memory, memory);
+        assert_eq!(store.instance(inst).unwrap().last_seq, 4);
     }
 
     #[test]

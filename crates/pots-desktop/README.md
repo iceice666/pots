@@ -34,7 +34,8 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | 實例與 project | 本機實例、建立 project、project 列表 |
 | 頻道對話 | 傳訊息（排隊／改方向）、串流回覆、工具摘要、停止 |
 | Inbox | 還沒設定 provider、ChatGPT 需要登入時的提示 |
-| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；「關於」：版本與實例資訊 |
+| 記憶 | 頻道的「記憶」分頁：Observer 整理出的觀察與「目前在做什麼」，可以釘選、修正（Enter 儲存）、刪除；整理失敗時顯示原因 |
+| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；「記憶」：整理記憶用的 provider 與模型（預設跟對話相同）；「關於」：版本與實例資訊 |
 | 其他 | Goal、任務、Artifact、自動化、總管在 live 模式是空的，等之後的里程碑 |
 
 ## 已有的畫面（`--mock` 假資料）
@@ -49,9 +50,10 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | 自動化 | 左欄「排程」「Listener」進實例的自動化頁：依專案篩選、批次暫停橫幅（立即恢復）、排程表（開關啟用）、listener 表；點一列在右欄看條件、動作、上限與觸發紀錄，可以停用、刪除；待核准的 listener 可以直接核准或拒絕，和 Inbox 那筆同步。頻道「自動化」分頁是同一份資料，只看這個 project（含套用到所有專案的 listener） |
 | 任務 thread | 狀態、分支、耗時與花費、進度步驟、這個任務的對話；取消任務、直接對 worker 說話 |
 | Inbox | 全域或單一實例、依類型篩選；核准、拒絕、再試一次等動作會更新所有徽章與對話中的核准卡 |
+| 記憶 | auth-service 有一份假的記憶（含釘選與修正過的觀察）；釘選、修正、刪除只改本地狀態 |
 | 總管 | 左欄「總管」或 ⌘⇧O（其他平台 Ctrl+Shift+O）切換過去，和頻道一樣佔中欄；右欄是專案概況（點了進該 project）與總管記得的事。在總管畫面切換實例會留在新實例的總管 |
 
-「記憶」分頁還沒實作，只顯示說明。「看 diff」「看 trace」「版本紀錄」「比較差異」「看提案」「新增 listener」「編輯條件」「改時間」「加入實例」、實例選單等按鈕還沒實作，點了會在底部提示。
+「看 diff」「看 trace」「版本紀錄」「比較差異」「看提案」「新增 listener」「編輯條件」「改時間」「加入實例」、實例選單等按鈕還沒實作，點了會在底部提示。
 
 Artifact 的編輯與自動化的開關、刪除、恢復只改本地狀態：這些走 HTTP API，提案裡還沒定義，所以不會記進 `Store::outbox`。
 
@@ -59,10 +61,10 @@ Artifact 的編輯與自動化的開關、刪除、恢復只改本地狀態：�
 
 - `src/model.rs`：客戶端的整體狀態 `Store`；view model 與即時協定在 [`pots-proto`](../pots-proto/)。使用者動作把要送出的指令記在 `Store::outbox`，live 模式下每次重繪前送給服務。
 - `src/connection.rs`：一個實例的 WebSocket 連線，跑在自己的執行緒與 tokio runtime；斷線自動重連並帶 `Resume { last_seq }`。
-- `src/sync.rs`：把 `ServerEvent` 套用到 `Store`（快照換掉暫用的實例 ID、串流文字、provider 與登入狀態轉成 Inbox 提示、UTC 轉本地時間）。
+- `src/sync.rs`：把 `ServerEvent` 套用到 `Store`（快照換掉暫用的實例 ID、串流文字、provider 與登入狀態轉成 Inbox 提示、`Memory` 整份替換 project 的記憶、UTC 轉本地時間）。
 - `src/mock.rs`：假資料。
 - `src/app.rs`：根視圖 `PotsApp`，持有 `Store` 與 UI 狀態（目前畫面、右欄、篩選、輸入框）。
-- `src/views/`：各區塊的 render；`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`widgets.rs` 是手刻的小元件，`theme.rs` 是色票。
+- `src/views/`：各區塊的 render；`memory.rs` 是「記憶」分頁，`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`widgets.rs` 是手刻的小元件，`theme.rs` 是色票。
 
 ## 驗證
 

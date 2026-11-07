@@ -58,19 +58,41 @@ pub enum Screen {
 pub enum SettingsTab {
     /// 模型 provider：ChatGPT 方案與 API provider。
     Providers,
+    /// Observational Memory：整理記憶用的模型。
+    Memory,
     /// 版本與目前實例的資訊。
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [Self; 2] = [Self::Providers, Self::About];
+    pub const ALL: [Self; 3] = [Self::Providers, Self::Memory, Self::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Providers => "模型 Provider",
+            Self::Memory => "記憶",
             Self::About => "關於",
         }
     }
+}
+
+/// 設定視窗「記憶」類別正在改的整理記憶模型。
+pub struct MemoryModelEditor {
+    /// `None`：跟對話 agent 相同。
+    pub provider: Option<ProviderId>,
+    /// 留空用該 provider 設定的模型。
+    pub model: Entity<InputState>,
+    /// 已送出 `SetMemoryModel`、等服務回 `Providers`。
+    pub saving: bool,
+    pub error: Option<String>,
+}
+
+/// 「記憶」分頁正在修正的觀察。
+pub struct ObservationEditor {
+    pub project: ProjectId,
+    pub id: ObservationId,
+    pub input: Entity<InputState>,
+    _subscription: Subscription,
 }
 
 /// 設定頁正在新增或修改的 provider。
@@ -192,6 +214,8 @@ pub struct PotsApp {
     /// 設定視窗開著時是目前的類別；`None` 是關著。
     pub settings: Option<SettingsTab>,
     pub provider_editor: Option<ProviderEditor>,
+    pub memory_model_editor: Option<MemoryModelEditor>,
+    pub observation_editor: Option<ObservationEditor>,
     next_test_request: u64,
     /// 左欄「新增專案」的輸入框；`None` 時顯示按鈕。
     pub new_project: Option<(Entity<InputState>, Subscription)>,
@@ -290,6 +314,8 @@ impl PotsApp {
             new_project: None,
             settings: None,
             provider_editor: None,
+            memory_model_editor: None,
+            observation_editor: None,
             next_test_request: 0,
             stream_scroll: ScrollHandle::new(),
             overseer_scroll: ScrollHandle::new(),
@@ -373,6 +399,13 @@ impl PotsApp {
                         editor.error = Some("連線中斷，請再儲存一次".into());
                     }
                 }
+                if state != ConnectionState::Connected
+                    && let Some(editor) = &mut self.memory_model_editor
+                    && editor.saving
+                {
+                    editor.saving = false;
+                    editor.error = Some("連線中斷，請再儲存一次".into());
+                }
                 if let Some(i) = self.store.instance_mut(instance) {
                     i.connection = state;
                     i.host = match state {
@@ -401,13 +434,33 @@ impl PotsApp {
                 }
                 if let Some(toast) = applied.toast {
                     // 儲存 provider 被拒絕：原因顯示在表單裡。
-                    match &mut self.provider_editor {
-                        Some(editor) if editor.saving => {
+                    match (&mut self.provider_editor, &mut self.memory_model_editor) {
+                        (Some(editor), _) if editor.saving => {
+                            editor.saving = false;
+                            editor.error = Some(toast);
+                        }
+                        (_, Some(editor)) if editor.saving => {
                             editor.saving = false;
                             editor.error = Some(toast);
                         }
                         _ => self.toast = Some(toast),
                     }
+                }
+                if applied.providers_changed
+                    && self.memory_model_editor.as_ref().is_some_and(|e| e.saving)
+                {
+                    self.memory_model_editor = None;
+                }
+                // 修正到一半的觀察被整理掉了（例如反思成新的一代）：收起輸入框。
+                if let Some(project) = applied.memory_changed
+                    && let Some(editor) = &self.observation_editor
+                    && editor.project == project
+                    && self
+                        .store
+                        .project(live.instance, project)
+                        .is_none_or(|p| !p.memory.observations.iter().any(|o| o.id == editor.id))
+                {
+                    self.observation_editor = None;
                 }
                 if applied.providers_changed
                     && let Some(editor) = &self.provider_editor
@@ -529,10 +582,144 @@ impl PotsApp {
         cx.notify();
     }
 
-    /// 關掉設定視窗，丟掉打到一半的 provider 表單（可能含 API key）。
+    /// 關掉設定視窗，丟掉打到一半的 provider 表單（可能含 API key）與記憶模型表單。
     pub fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings = None;
         self.provider_editor = None;
+        self.memory_model_editor = None;
+        cx.notify();
+    }
+
+    /// 開啟「整理記憶的模型」表單，帶入目前的設定。
+    pub fn edit_memory_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.current_instance().providers.memory.clone();
+        let model = cx.new(|cx| {
+            let mut state =
+                InputState::new(window, cx).placeholder("留空用這個 provider 設定的模型");
+            state.set_value(current.model.clone(), window, cx);
+            state
+        });
+        self.memory_model_editor = Some(MemoryModelEditor {
+            provider: current.provider,
+            model,
+            saving: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// 表單裡選一個 provider；`None` 是跟對話 agent 相同。
+    pub fn pick_memory_provider(&mut self, provider: Option<ProviderId>, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.memory_model_editor {
+            editor.provider = provider;
+            editor.error = None;
+        }
+        cx.notify();
+    }
+
+    pub fn save_memory_model(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = &self.memory_model_editor else {
+            return;
+        };
+        let provider = editor.provider;
+        let model = if provider.is_some() {
+            editor.model.read(cx).value().trim().to_string()
+        } else {
+            String::new()
+        };
+        let sent = self.settings_command(
+            ClientCommand::SetMemoryModel { provider, model },
+            "儲存記憶模型",
+            cx,
+        );
+        if let Some(editor) = &mut self.memory_model_editor {
+            editor.saving = sent;
+            editor.error = None;
+        }
+    }
+
+    pub fn cancel_memory_model_edit(&mut self, cx: &mut Context<Self>) {
+        self.memory_model_editor = None;
+        cx.notify();
+    }
+
+    // ---- 記憶分頁 -------------------------------------------------------------
+
+    pub fn pin_observation(&mut self, id: ObservationId, pinned: bool, cx: &mut Context<Self>) {
+        let Screen::Project(project) = self.screen else {
+            return;
+        };
+        self.store
+            .pin_observation(self.instance, project, id, pinned);
+        cx.notify();
+    }
+
+    pub fn delete_observation(&mut self, id: ObservationId, cx: &mut Context<Self>) {
+        let Screen::Project(project) = self.screen else {
+            return;
+        };
+        if self.observation_editor.as_ref().is_some_and(|e| e.id == id) {
+            self.observation_editor = None;
+        }
+        self.store.delete_observation(self.instance, project, id);
+        cx.notify();
+    }
+
+    /// 開始修正一條觀察：文字變成輸入框，Enter 儲存。
+    pub fn edit_observation(
+        &mut self,
+        id: ObservationId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Screen::Project(project) = self.screen else {
+            return;
+        };
+        let Some(text) = self
+            .store
+            .project(self.instance, project)
+            .and_then(|p| p.memory.observations.iter().find(|o| o.id == id))
+            .map(|o| o.text.clone())
+        else {
+            return;
+        };
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("觀察的內容");
+            state.set_value(text, window, cx);
+            state
+        });
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let subscription = cx.subscribe(&input, |this, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.save_observation_edit(cx);
+            }
+        });
+        self.observation_editor = Some(ObservationEditor {
+            project,
+            id,
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    pub fn save_observation_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.observation_editor.take() else {
+            return;
+        };
+        let text = editor.input.read(cx).value().to_string();
+        if let Err(message) =
+            self.store
+                .edit_observation(self.instance, editor.project, editor.id, text)
+        {
+            self.toast = Some(message);
+            self.observation_editor = Some(editor);
+        }
+        cx.notify();
+    }
+
+    pub fn cancel_observation_edit(&mut self, cx: &mut Context<Self>) {
+        self.observation_editor = None;
         cx.notify();
     }
 
@@ -747,6 +934,7 @@ impl PotsApp {
         // provider 設定屬於實例：換實例時丟掉打到一半的表單（可能含 API key）。
         if id != self.instance {
             self.provider_editor = None;
+            self.memory_model_editor = None;
         }
         self.instance = id;
         // 在總管或自動化畫面切換實例時，留在新實例的同一個畫面。
@@ -783,6 +971,7 @@ impl PotsApp {
         self.instance = instance;
         self.screen = Screen::Project(project);
         self.channel_tab = ChannelTab::Chat;
+        self.observation_editor = None;
         // 有進行中的 Goal 時預設在右欄打開。
         self.panel = self
             .store

@@ -131,7 +131,11 @@ impl PotsApp {
                     ))
                     .child(tab_item(
                         "tab-memory",
-                        "記憶".into(),
+                        if p.memory.observations.is_empty() {
+                            "記憶".to_string()
+                        } else {
+                            format!("記憶 {}", p.memory.observations.len())
+                        },
                         ChannelTab::Memory,
                         cx,
                     )),
@@ -149,11 +153,7 @@ impl PotsApp {
             ChannelTab::Goals => self.render_goal_list(p, cx).into_any_element(),
             ChannelTab::Artifacts => self.render_artifact_list(p, cx),
             ChannelTab::Automations => self.render_project_automations(p, cx),
-            ChannelTab::Memory => empty_state(
-                "agent 記得什麼",
-                "Observational Memory 的觀察紀錄，可查看、修正、釘選或刪除。M1 實作。",
-            )
-            .into_any_element(),
+            ChannelTab::Memory => self.render_memory_tab(p, cx),
         };
 
         div()

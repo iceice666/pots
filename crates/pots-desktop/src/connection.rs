@@ -346,6 +346,7 @@ mod tests {
                     agent_name: String::new(),
                     agent_state: AgentState::Idle,
                     items: vec![StreamItemView { id: b, ..echo }],
+                    memory: MemoryView::default(),
                 }],
                 model_auth: ModelAuthView::SignedOut,
                 providers: ProvidersView::default(),

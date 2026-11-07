@@ -4,6 +4,7 @@ mod artifact;
 mod automation;
 mod channel;
 mod inbox;
+mod memory;
 mod nav;
 mod overlay;
 mod overseer;

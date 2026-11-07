@@ -401,11 +401,31 @@ mod shots {
         });
         s.shot("10-channel-automations");
 
+        // 「記憶」分頁：觀察紀錄，修正其中一條。
+        s.update(|app, window, cx| {
+            app.channel_tab = ChannelTab::Memory;
+            app.open_panel(None, cx);
+            let second = app
+                .current_project()
+                .and_then(|p| p.memory.observations.get(1))
+                .map(|o| o.id)
+                .expect("auth-service 有記憶");
+            app.edit_observation(second, window, cx);
+        });
+        s.shot("10a-channel-memory");
+        s.update(|app, _, cx| app.cancel_observation_edit(cx));
+
         s.update(|app, _, cx| app.open_settings(SettingsTab::Providers, cx));
         s.shot("10b-settings");
 
         s.update(|app, _, cx| app.open_settings(SettingsTab::About, cx));
         s.shot("10c-settings-about");
+
+        s.update(|app, window, cx| {
+            app.open_settings(SettingsTab::Memory, cx);
+            app.edit_memory_model(window, cx);
+        });
+        s.shot("10d-settings-memory");
 
         s.update(|app, _, cx| app.close_settings(cx));
         assert!(s.view_settings_closed(), "關閉後沒有設定視窗");

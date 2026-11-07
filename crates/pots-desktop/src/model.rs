@@ -1,4 +1,7 @@
 //! 客戶端整體狀態。型別定義在 [`pots_proto`]。
+//!
+//! 觀察的釘選／修正／刪除先改本地，服務接受後用 `Memory` 事件整份替換；被拒絕時服務也會
+//! 重送一次 `Memory`，本地的修改就被蓋回去。
 
 pub use pots_proto::*;
 use serde::{Deserialize, Serialize};
@@ -246,6 +249,90 @@ impl Store {
                 mode,
             },
         ));
+    }
+
+    fn observation_mut(
+        &mut self,
+        instance: InstanceId,
+        project: ProjectId,
+        id: ObservationId,
+    ) -> Option<&mut ObservationView> {
+        self.project_mut(instance, project)?
+            .memory
+            .observations
+            .iter_mut()
+            .find(|o| o.id == id)
+    }
+
+    /// 釘選或取消釘選一條觀察。先改本地，服務回 `Memory` 時整份替換。
+    pub fn pin_observation(
+        &mut self,
+        instance: InstanceId,
+        project: ProjectId,
+        id: ObservationId,
+        pinned: bool,
+    ) {
+        let Some(o) = self.observation_mut(instance, project, id) else {
+            return;
+        };
+        o.pinned = pinned;
+        self.outbox.push((
+            instance,
+            ClientCommand::PinObservation {
+                project,
+                id,
+                pinned,
+            },
+        ));
+    }
+
+    /// 修正一條觀察的文字。和服務一樣把連續的空白（含換行）合成一個空格。
+    /// 空的或太長時不送出，回傳原因。
+    pub fn edit_observation(
+        &mut self,
+        instance: InstanceId,
+        project: ProjectId,
+        id: ObservationId,
+        text: String,
+    ) -> Result<(), String> {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return Err("觀察不能是空的；不要這條請按「刪除」。".into());
+        }
+        if text.chars().count() > MAX_OBSERVATION_CHARS {
+            return Err(format!("一條觀察最多 {MAX_OBSERVATION_CHARS} 個字"));
+        }
+        let Some(o) = self.observation_mut(instance, project, id) else {
+            return Ok(());
+        };
+        if o.text == text {
+            return Ok(());
+        }
+        o.text = text.clone();
+        o.edited = true;
+        self.outbox.push((
+            instance,
+            ClientCommand::EditObservation { project, id, text },
+        ));
+        Ok(())
+    }
+
+    pub fn delete_observation(
+        &mut self,
+        instance: InstanceId,
+        project: ProjectId,
+        id: ObservationId,
+    ) {
+        let Some(p) = self.project_mut(instance, project) else {
+            return;
+        };
+        let before = p.memory.observations.len();
+        p.memory.observations.retain(|o| o.id != id);
+        if p.memory.observations.len() == before {
+            return;
+        }
+        self.outbox
+            .push((instance, ClientCommand::DeleteObservation { project, id }));
     }
 
     pub fn send_to_overseer(&mut self, instance: InstanceId, text: String) {

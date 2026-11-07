@@ -20,6 +20,63 @@ fn mock_providers(extra: Option<ProviderView>) -> ProvidersView {
     ProvidersView {
         active: Some(ProviderId::CHATGPT),
         items,
+        memory: MemoryModelView::default(),
+    }
+}
+
+/// auth-service 對話 agent 的記憶。
+fn auth_memory(ids: &mut Ids) -> MemoryView {
+    let mut obs =
+        |date: &str, priority: Priority, text: &str, pinned: bool, edited: bool| ObservationView {
+            id: ObservationId::from_u64(ids.next()),
+            date: date.into(),
+            priority,
+            text: text.into(),
+            pinned,
+            edited,
+        };
+    MemoryView {
+        generation: 1,
+        current_task: "等整合測試的 CI 結果，之後串上前端登入按鈕。".into(),
+        observations: vec![
+            obs(
+                "2026-10-28",
+                Priority::High,
+                "登入改成 OAuth，先支援 Google；舊的密碼登入保留三個月後移除。",
+                true,
+                false,
+            ),
+            obs(
+                "2026-10-30",
+                Priority::High,
+                "session 存在 Redis，不用 JWT；有效期 14 天。",
+                false,
+                true,
+            ),
+            obs(
+                "2026-11-02",
+                Priority::Medium,
+                "callback 路徑定為 /auth/google/callback，staging 與 production 各一組 client ID。",
+                false,
+                false,
+            ),
+            obs(
+                "2026-11-05",
+                Priority::Medium,
+                "後端 OAuth 流程已合併（PR #38），整合測試還在跑。",
+                false,
+                false,
+            ),
+            obs(
+                "2026-11-06",
+                Priority::Low,
+                "整合測試用 staging 的測試帳號，不碰正式的 Google 專案。",
+                false,
+                false,
+            ),
+        ],
+        tokens: 412,
+        error: None,
     }
 }
 
@@ -421,6 +478,7 @@ pub fn store() -> Store {
     streaming.status = MsgStatus::Streaming;
 
     let auth_service = ProjectView {
+        memory: auth_memory(&mut ids),
         id: auth,
         name: "auth-service".into(),
         agent_name: "auth-service agent".into(),
@@ -513,6 +571,7 @@ pub fn store() -> Store {
     let checkout_goal = GoalId::from_u64(ids.next());
     let flaky_task = TaskId::from_u64(ids.next());
     let web_app = ProjectView {
+        memory: MemoryView::default(),
         id: web,
         name: "web-app".into(),
         agent_name: "web-app agent".into(),
@@ -609,6 +668,7 @@ pub fn store() -> Store {
     };
 
     let infra = ProjectView {
+        memory: MemoryView::default(),
         id: ProjectId::from_u64(ids.next()),
         name: "infra".into(),
         agent_name: "infra agent".into(),
@@ -654,6 +714,7 @@ pub fn store() -> Store {
     let infra_id = infra.id;
 
     let docs = ProjectView {
+        memory: MemoryView::default(),
         id: ProjectId::from_u64(ids.next()),
         name: "docs-site".into(),
         agent_name: "docs-site agent".into(),
@@ -798,6 +859,7 @@ pub fn store() -> Store {
     );
     dotfiles_reply.cards.push(Card::Approval { id: pr9 });
     let dotfiles = ProjectView {
+        memory: MemoryView::default(),
         id: dotfiles_id,
         name: "dotfiles".into(),
         agent_name: "dotfiles agent".into(),
@@ -853,6 +915,7 @@ pub fn store() -> Store {
     };
     let side_id = ProjectId::from_u64(ids.next());
     let side = ProjectView {
+        memory: MemoryView::default(),
         id: side_id,
         name: "side-project".into(),
         agent_name: "side-project agent".into(),
@@ -1204,6 +1267,68 @@ pub fn store() -> Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observation_edits_update_locally_and_queue_commands() {
+        let mut store = store();
+        let (inst, project) = store
+            .instances
+            .iter()
+            .find_map(|i| {
+                i.projects
+                    .iter()
+                    .find(|p| !p.memory.observations.is_empty())
+                    .map(|p| (i.id, p.id))
+            })
+            .expect("有一個 project 有記憶");
+        let ids: Vec<_> = store.project(inst, project).unwrap().memory.observations[..3]
+            .iter()
+            .map(|o| o.id)
+            .collect();
+        store.outbox.clear();
+
+        store.pin_observation(inst, project, ids[1], true);
+        store
+            .edit_observation(inst, project, ids[2], "  改過的\n  ".into())
+            .unwrap();
+        store
+            .edit_observation(inst, project, ids[2], "改過的".into())
+            .unwrap();
+        assert!(
+            store
+                .edit_observation(inst, project, ids[2], " ".into())
+                .is_err()
+        );
+        assert!(
+            store
+                .edit_observation(
+                    inst,
+                    project,
+                    ids[2],
+                    "長".repeat(MAX_OBSERVATION_CHARS + 1)
+                )
+                .is_err()
+        );
+        store.delete_observation(inst, project, ids[0]);
+        store.delete_observation(inst, project, ids[0]);
+
+        let memory = &store.project(inst, project).unwrap().memory;
+        assert!(!memory.observations.iter().any(|o| o.id == ids[0]));
+        assert!(memory.observations[0].pinned);
+        assert_eq!(memory.observations[1].text, "改過的");
+        assert!(memory.observations[1].edited);
+        let kinds: Vec<_> = store
+            .outbox
+            .iter()
+            .map(|(_, c)| match c {
+                ClientCommand::PinObservation { pinned: true, .. } => "pin",
+                ClientCommand::EditObservation { text, .. } if text == "改過的" => "edit",
+                ClientCommand::DeleteObservation { .. } => "delete",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["pin", "edit", "delete"]);
+    }
 
     #[test]
     fn approval_cards_resolve() {
