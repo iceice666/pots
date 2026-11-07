@@ -12,7 +12,8 @@
 | --- | --- | --- | --- |
 | 對話 agent | rig agent，掛 OM | 人類訊息、里程碑、升級事件 | 每個 project 同時 1 個 run |
 | Planner | rig agent，不掛 OM；context 只有 Goal brief 與任務樹 | Goal 建立、子任務結束、steer | 每個 Goal 同時 1 個 run |
-| Worker | rig agent，或 Claude Code adapter | 被分派、被喚醒 | 多個，每個任務一個 worktree 與容器 |
+| Worker | rig agent，或 Claude Code adapter | 被分派、被喚醒 | 多個，每個任務一個 worktree 與容器；可指定在[託管電腦](computer-nodes.md)上執行 |
+| Operator | rig agent（需支援影像輸入的模型），或 Claude Code 透過 MCP | 被分派、被喚醒 | 每台 node 同時 1 個（display lease） |
 | Watcher | 純 Rust（webhook 或輪詢） | 外部事件 | 不限 |
 | 總管 agent | rig agent，掛自己的 OM（全域對話） | 人類在總管對話中的訊息、自己的排程 | 全域同時 1 個 run |
 
@@ -150,7 +151,7 @@ pots 採開源、本機或使用者自行架設的模式。透過官方 **Sign i
 
 ### Worker adapter：內建 rig 與外部 coding CLI
 
-Worker 有兩種後端，由 project 設定選擇：Claude Code adapter 執行官方 coding agent，rig worker 用於備援與輕量任務。模型 provider 與 worker backend 分開配置；選擇 ChatGPT Plan 不會啟動 Codex，選擇 Claude Code 也不會把它變成 rig 的 completion provider。
+Worker 有兩種後端，由 project 設定選擇；執行位置（Pots 主機或某台 node）另由 `ExecTarget` 決定，見[託管電腦](computer-nodes.md#coding-任務)。Claude Code adapter 執行官方 coding agent，rig worker 用於備援與輕量任務。模型 provider 與 worker backend 分開配置；選擇 ChatGPT Plan 不會啟動 Codex，選擇 Claude Code 也不會把它變成 rig 的 completion provider。
 
 ```rust
 pub enum WorkerBackend {

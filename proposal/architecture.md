@@ -20,7 +20,10 @@ flowchart TB
         approver["核准執行器<br/>只執行 hash 相符的動作"]
         om["OM 背景壓縮<br/>Observer / Reflector"]
         sweeper["逾時 Sweeper<br/>每分鐘喚醒過期的等待"]
+        hub["Node Hub<br/>託管電腦的連線與 lease"]
     end
+
+    node["託管電腦（pots-node）<br/>GUI 操作、指令、容器"]
 
     db[("SQLite 或 Postgres（唯一真相）<br/>任務樹、對話流、事件、核准、OM 記憶")]
     llm["模型推論<br/>ChatGPT Plan（SIWC / Responses）或 API provider"]
@@ -40,6 +43,8 @@ flowchart TB
     workers -->|rig worker 模型呼叫| llm
     workers <-->|adapter 生命週期 / 串流事件| claude
     claude <-->|受授權的 MCP 工具| gateway
+    workers -->|node 工具呼叫| hub
+    hub <-->|"WSS，node 主動連出"| node
 ```
 
 系統架構 · 單一服務加 SQLite 或 Postgres
@@ -112,6 +117,9 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `agent_runs` | agent 執行佇列（`FOR UPDATE SKIP LOCKED` ） | `id` , `agent` , `task_id?` , `trigger` , `state` , `lease_until` |
 | `model_connections` | 模型授權連線的非秘密 metadata | `id, user_id, kind, issuer, subject, client_id, host_id, scopes, status, secret_ref` |
 | `worker_sessions` | 外部 runtime 的續接與 run 對應 | `id, user_id, task_id, run_id, backend, external_session_id, state_ref, worktree_ref` |
+| `nodes` | 託管電腦的註冊、能力、政策與狀態 | `id, user_id, name, os, capabilities, pubkey, policy, status, last_seen` |
+| `node_leases` | node 的 display 等資源由誰持有 | `node_id, resource, holder, until` |
+| `run_media` | 截圖等二進位證據（存在檔案儲存區） | `id, run_id, kind, sha256, path, at` |
 | `subscriptions` | 任務訂閱的外部資源 | `task_id` , `resource_key` （如 `gh:owner/repo@sha` ） |
 
 | 表 | 用途 | 關鍵欄位 |
@@ -165,4 +173,6 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | 收信 | `async-imap` 、`mail-parser` | IMAP IDLE 長連線與郵件解析 |
 | 寄信 | `lettre` | SMTP，核准後才由平台寄出 |
 | RSS／Atom | `feed-rs` | 狀態頁與公告 feed |
+| macOS 系統 API（pots-node） | `objc2` 系列 binding | ScreenCaptureKit 擷取螢幕、Accessibility（AX）樹、CGEvent 輸入事件 |
+| Node 身分 | `ed25519-dalek` | 配對與連線 challenge 簽章 |
 

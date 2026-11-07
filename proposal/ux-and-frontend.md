@@ -62,6 +62,7 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 | Artifact 面板 | 右欄（取代狀態面板） | 全螢幕頁 | Markdown 編輯器、版本與 diff、 agent 正在寫入的提示 |
 | 總管 | 快捷鍵叫出的浮動對話框 | 底部分頁「總管」 | 跨 project 的永久對話 |
 | 自動化 | 狀態面板的分頁 | 同左 | 排程與 listener 列表，可暫停、刪除、看觸發紀錄 |
+| 電腦 | 狀態面板的分頁 | 同左 | 託管電腦的連線狀態、lease 持有者、即時縮圖、權限檢查；「接手」、「交還」與「停止」 |
 
 ### 即時協定
 

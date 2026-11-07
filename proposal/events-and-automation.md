@@ -21,7 +21,7 @@ pub enum Trust {
 }
 #[async_trait]
 pub trait SourceConnector: Send + Sync {
-    fn kind(&self) -> SourceKind; // Github | Gitlab | Imap | StatusPage | HttpProbe | Webhook | Rss
+    fn kind(&self) -> SourceKind; // Github | Gitlab | Imap | StatusPage | HttpProbe | Webhook | Rss | Node
     fn ingest(&self) -> &[Ingest]; // 支援的接收方式，依偏好排序
     fn trust(&self, raw: &RawEvent) -> Trust;
     async fn verify(&self, req: &PushRequest) -> Result<()>; // 驗簽或驗 token
@@ -47,6 +47,7 @@ pub trait SourceConnector: Send + Sync {
 | 第三方監測（例如 Downdetector） | 只用對方正式提供的 API 或 feed | 回報量異常 | `get_source_status` | 無 | 先確認服務條款與是否需要付費方案；沒有正式管道就不接 |
 | 通用 webhook | 每個 source 一個 URL 與 secret；單機版需 tunnel | 自訂 | 無 | 無 | 用設定把 JSON 欄位對應成事件 |
 | RSS／Atom | 輪詢 | 新項目 | 無 | 無 | release note、公告 |
+| 託管電腦（Node） | node 主動連出的 WebSocket 心跳 | 上線、離線、權限失效、資源不足、找不到顯示器 | `screen_observe` （只限 operator） | 無（GUI 副作用走 `gui_checkpoint`） | trust 為 Owned，見[託管電腦](computer-nodes.md#健康狀態與事件) |
 
 通用 webhook 的欄位對應寫在設定檔，用 JSON pointer 指定：
 

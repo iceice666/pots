@@ -30,6 +30,17 @@
 - [Claude Code：Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)：官方 CLI 與訂閱授權的使用邊界；Pots 不抽取 Claude 訂閱 token 供自建 provider 使用。
 - [Claude Code：Run Claude Code programmatically](https://code.claude.com/docs/en/headless)：官方 CLI 的程式化執行介面，供 runtime adapter 參考；登入與 session storage 仍由官方 CLI 管理。
 
+## 託管電腦（macOS）
+
+下列為第三方整理，核對日期為 **2026-11-07**；macOS 權限行為會隨版本改變，實作前須以 Apple 官方文件與實機測試為準。
+
+- [Der Flounder：Sequoia 15.1 的 `forceBypassScreenCaptureAlert`](https://derflounder.wordpress.com/2024/10/31/managing-user-notifications-for-apps-which-request-screen-access-on-macos-sequoia-15-1/)：螢幕錄製權限的定期重新授權提示，以及描述檔的關閉方式。
+- [Breeze RMM：macOS Permissions](https://docs.breezermm.com/agents/macos-permissions/)：輔助使用可以用 MDM PPPC 授權，螢幕錄製只能由使用者手動核准。
+- [Crabfleet：Screen-Recording Indicator & ScreenCaptureKit](https://docs.crabfleet.ai/screen-recording-indicator.html)：錄製指示燈不能隱藏、定期重新授權提示，以及內建 Screen Sharing 的差異。
+- [macrun：Auto-login on a headless Mac](https://macrun.dev/blog/auto-login-on-a-headless-mac)：FileVault 與自動登入衝突、無人值守登入常見的失敗原因。
+- [macrun：Always-on Mac for AI agents](https://macrun.dev/guides/always-on-mac-for-ai-agents)：不睡眠、自動登入、程序監管與人類接手。
+- [SideMini：Mac mini without a monitor](https://sidemini.com/blog/use-mac-mini-without-monitor/)：沒有顯示器時的畫面問題，以及假螢幕與虛擬顯示器。
+
 ## 參考資料
 
 - [rig-core Tool trait（docs.rs, 0.37）](https://docs.rs/rig-core/0.37.0/src/rig_core/tool/mod.rs.html)

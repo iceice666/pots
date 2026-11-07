@@ -3,7 +3,7 @@
 
 ## 概述
 
-Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一 Rust 服務，不提供平台代管或訂閱額度轉售：第一階段在本機以 SQLite 單機執行，調整順手後再搬成以 Postgres 為後端的自架平台（見[分階段策略](deployment.md)）。人類在每個 project 的一條連續對話裡，和負責該 project 的 agent 討論功能、核准動作、查看進度；Planner 在背景負責規劃並分派 worker，watcher 把 GitHub、GitLab、郵件、服務狀態等外部來源轉成事件。
+Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一 Rust 服務，不提供平台代管或訂閱額度轉售：第一階段在本機以 SQLite 單機執行，調整順手後再搬成以 Postgres 為後端的自架平台（見[分階段策略](deployment.md)）。人類在每個 project 的一條連續對話裡，和負責該 project 的 agent 討論功能、核准動作、查看進度；Planner 在背景負責規劃並分派 worker，watcher 把 GitHub、GitLab、郵件、服務狀態等外部來源轉成事件。你也可以把閒置的電腦交給 Pots 當成[託管電腦（Node）](computer-nodes.md)，讓 agent 在上面操作桌面應用程式與寫程式。
 
 ### 目標（v1）
 
@@ -48,6 +48,7 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 | [Agent Loop 與協作模型](agent-collaboration.md) | 統一 loop、profile、快速修改、subagent 與 team |
 | [Observational Memory](memory.md) | 記憶分層、Observer、Reflector 與 USER.md |
 | [Artifacts](artifacts.md) | 共享文件種類、編輯協定、版本與記憶分工 |
+| [託管電腦（Node）](computer-nodes.md) | 閒置電腦作為 agent 的身體：computer use、coding、display lease、人類接手、macOS 佈建 |
 | [外部事件與自動化](events-and-automation.md) | Connector、事件管線、喚醒、自我排程與 listener |
 | [核准流程與通知](approvals-and-notifications.md) | Approval 生命週期、核准政策與推播 |
 | [安全、預算與可觀測性](security-and-operations.md) | 身分驗證、沙箱、預算限制、trace 與成本報表 |
