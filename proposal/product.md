@@ -3,7 +3,7 @@
 
 ## 概述
 
-Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一 Rust 服務，不提供平台代管或訂閱額度轉售：第一階段在本機以 SQLite 單機執行，調整順手後再搬成以 Postgres 為後端的自架平台（見[分階段策略](deployment.md)）。人類在每個 project 的一條連續對話裡，和負責該 project 的 agent 討論功能、核准動作、查看進度；Planner 在背景負責規劃並分派 worker，watcher 把 GitHub、GitLab、郵件、服務狀態等外部來源轉成事件。你也可以把閒置的電腦交給 Pots 當成[託管電腦（Node）](computer-nodes.md)，讓 agent 在上面操作桌面應用程式與寫程式。
+Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一 Rust 服務，不提供平台代管或訂閱額度轉售。有兩種長期並存的形態：桌面版是內嵌服務的桌面 app；多設備版自架在常開的機器上。同一個客戶端可以同時連兩者，每個 project 歸屬其中一個實例（見[部署形態](deployment.md)）。人類在每個 project 的一條連續對話裡，和負責該 project 的 agent 討論功能、核准動作、查看進度；Planner 在背景負責規劃並分派 worker，watcher 把 GitHub、GitLab、郵件、服務狀態等外部來源轉成事件。你也可以把閒置的電腦交給 Pots 當成[託管電腦（Node）](computer-nodes.md)，讓 agent 在上面操作桌面應用程式與寫程式。
 
 ### 目標（v1）
 
@@ -13,11 +13,11 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 
 - 跑通一條完整路徑：一句話 → 開 PR → 等 CI → 失敗自動修 → 成功後請人類核准 merge。
 
-- 單機版是一個 binary 加一個 SQLite 檔，直接在本機執行；自架版換成 Postgres，以 `docker compose up` 啟動服務。這是程式部署方式，不代表模型立即可用：仍須完成所選 provider 的授權；Claude Code adapter 須由使用者透過官方 CLI 登入，ChatGPT Plan provider 須完成官方 Sign in with ChatGPT（SIWC）授權。
+- 桌面版是一個 app 加一個 SQLite 檔，安裝後即可使用；多設備版是同一份程式碼的 `pots-server`，可以用單一 binary 加 SQLite，或用 Postgres 搭配 `docker compose up` 啟動。這是程式部署方式，不代表模型立即可用：仍須完成所選 provider 的授權；Claude Code adapter 須由使用者透過官方 CLI 登入，ChatGPT Plan provider 須完成官方 Sign in with ChatGPT（SIWC）授權。
 
 ### 非目標（v1）
 
-- 多租戶、多人協作、公開註冊、聯邦。資料模型仍預留多人擴充（見[已決定事項](roadmap-and-decisions.md#已決定事項)）。
+- 多租戶、多人協作、公開註冊、聯邦，以及實例之間的資料同步（並存靠 project 歸屬與移交）。資料模型仍預留多人擴充（見[已決定事項](roadmap-and-decisions.md#已決定事項)）。
 
 - 語音與視訊。
 
@@ -41,7 +41,7 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 
 | 文件 | 內容 |
 | --- | --- |
-| [部署模式與分階段策略](deployment.md) | 單機與自架差異、後端介面、資料搬移 |
+| [部署形態與多實例並存](deployment.md) | 桌面版與多設備版、後端設定、客戶端多連線、project 移交 |
 | [使用體驗與前端](ux-and-frontend.md) | 對話、狀態面板、參考 UI、GPUI 客戶端與即時協定 |
 | [系統架構與資料模型](architecture.md) | 架構圖、核心型別、資料表與技術選型 |
 | [Agent 執行層](agent-runtime.md) | 角色分工、rig 工具、執行模型與 Worker adapter |
@@ -52,7 +52,7 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 | [外部事件與自動化](events-and-automation.md) | Connector、事件管線、喚醒、自我排程與 listener |
 | [核准流程與通知](approvals-and-notifications.md) | Approval 生命週期、核准政策與推播 |
 | [安全、預算與可觀測性](security-and-operations.md) | 身分驗證、沙箱、預算限制、trace 與成本報表 |
-| [里程碑與設計決策](roadmap-and-decisions.md) | M0–M7、已決定事項與待確認事項 |
+| [里程碑與設計決策](roadmap-and-decisions.md) | M0–M8、已決定事項與待確認事項 |
 | [參考資料](references.md) | 專案內 UI 設計稿與 rig、Mastra、Amp、官方 provider 授權文件 |
 
 建議先閱讀「使用體驗與前端」與「系統架構與資料模型」，再按主題查閱細節；實作順序與待確認事項見「里程碑與設計決策」。參考 UI 位於 [`ui/`](../ui/)，可直接開啟[畫面總覽](../ui/index.html)，或查看[預覽說明](../ui/README.md)。

@@ -39,13 +39,13 @@ pub trait SourceConnector: Send + Sync {
 
 | Connector | 接收方式 | 主要事件 | 唯讀工具 | 對外動作（需核准） | 備註 |
 | --- | --- | --- | --- | --- | --- |
-| GitHub | App webhook；單機版輪詢 | PR、 issue、 review、留言、check suite | `get_change` 、 `get_ci_log` | merge、留言 | 驗 `X-Hub-Signature-256` ，用 `X-GitHub-Delivery` 去重 |
-| GitLab（含自架實例） | project 或 group webhook；單機版輪詢 | MR、 issue、留言、 pipeline | `get_change` 、 `get_ci_log` | merge、留言 | 驗 `X-Gitlab-Token` ；MR 與 PR 共用通用的 Change 模型 |
+| GitHub | App webhook；沒有公開網址時輪詢 | PR、 issue、 review、留言、check suite | `get_change` 、 `get_ci_log` | merge、留言 | 驗 `X-Hub-Signature-256` ，用 `X-GitHub-Delivery` 去重 |
+| GitLab（含自架實例） | project 或 group webhook；沒有公開網址時輪詢 | MR、 issue、留言、 pipeline | `get_change` 、 `get_ci_log` | merge、留言 | 驗 `X-Gitlab-Token` ；MR 與 PR 共用通用的 Change 模型 |
 | 郵件 | IMAP IDLE，兩種模式都能用 | 指定資料夾或 label 的新郵件 | `search_mail` 、 `read_mail` | `reply_mail` 、 `send_mail` | 只收白名單資料夾；檢查 DKIM 與 SPF 結果；附件不自動開啟 |
 | 狀態頁 | 輪詢 JSON 或 RSS；有 webhook 就用 | incident 開啟、更新、解決；元件狀態變化 | `get_source_status` | 無 | 追蹤你依賴的上游服務，例如 LLM provider、雲端 |
 | HTTP 探測 | 平台定時請求指定 URL | 失敗、恢復、延遲超標 | `get_source_status` | 無 | 用連續失敗次數防抖 |
 | 第三方監測（例如 Downdetector） | 只用對方正式提供的 API 或 feed | 回報量異常 | `get_source_status` | 無 | 先確認服務條款與是否需要付費方案；沒有正式管道就不接 |
-| 通用 webhook | 每個 source 一個 URL 與 secret；單機版需 tunnel | 自訂 | 無 | 無 | 用設定把 JSON 欄位對應成事件 |
+| 通用 webhook | 每個 source 一個 URL 與 secret；沒有公開網址時需 tunnel | 自訂 | 無 | 無 | 用設定把 JSON 欄位對應成事件 |
 | RSS／Atom | 輪詢 | 新項目 | 無 | 無 | release note、公告 |
 | 託管電腦（Node） | node 主動連出的 WebSocket 心跳 | 上線、離線、權限失效、資源不足、找不到顯示器 | `screen_observe` （只限 operator） | 無（GUI 副作用走 `gui_checkpoint`） | trust 為 Owned，見[託管電腦](computer-nodes.md#健康狀態與事件) |
 
@@ -165,7 +165,7 @@ pub struct Schedule {
 
 - 透明。 agent 建立排程時對話裡出現一張卡片；狀態面板有「排程」分頁，可以暫停、刪除、改時間。
 
-- 單機版的錯過觸發。 電腦睡眠期間錯過的觸發，醒來後每個排程只補跑一次，不逐次補。
+- 桌面版的錯過觸發。 電腦睡眠期間錯過的觸發，醒來後每個排程只補跑一次，不逐次補。
 
 - 批次暫停。 總管可用 `pause_automations` 一次暫停多個 project 的排程與 listener，可設定 `until` 自動恢復，或用 `resume_automations` 提前恢復。刻意暫停期間錯過的觸發不補跑，恢復後從下一次正常時間開始。
 
@@ -203,7 +203,9 @@ pub struct Listener {
 
 - 防失控。 每次觸發有預算上限，每小時觸發次數有上限；超過就暫停該 listener 並通知你。
 
-- 單機版。 GitHub、GitLab、狀態頁、RSS 用輪詢，郵件用 IMAP IDLE，HTTP 探測照常執行；通用 webhook 需要 tunnel，或等自架版再接。
+- 桌面版與沒有公開網址的實例。 GitHub、GitLab、狀態頁、RSS 用輪詢，郵件用 IMAP IDLE，HTTP 探測照常執行；通用 webhook 需要 tunnel，或把該 project 移交到有公開網址的多設備版。
+
+- 一個來源只由一個實例監看。 sources、schedules、listeners 跟著 project 歸屬走；project 移交時，來源實例先停用它們，目標實例經你確認後再啟用，避免同一個事件被兩個實例各處理一次。
 
 - 範例。
 

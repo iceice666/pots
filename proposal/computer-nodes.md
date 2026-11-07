@@ -18,13 +18,14 @@
 
 - **Node 是執行位置，不是新的 agent。** 誰來規劃、誰來核准都不變；任務仍由 Planner 用 `create_task` 建立，只是 worker 的執行位置從「Pots 主機上的容器」變成「某台 node」。
 - **任務樹仍是唯一真相。** Node 上不保存任何只有它才有的狀態：程式碼改動推到任務分支，截圖與紀錄回傳 Pots，產出寫成 artifact。整台 node 隨時可以清空。
-- **Pots 必須在線。** Node 自己不跑模型、不做決定；Pots 停止時（例如單機版所在的筆電睡眠），node 只會閒置等待。若要 24 小時不停，Pots 本身也必須放在常開的機器上（見[部署](deployment.md)）。
+- **Pots 必須在線。** Node 自己不跑模型、不做決定；Pots 停止時（例如桌面版所在的筆電睡眠），node 只會閒置等待。若要 24 小時不停，node 就要配對到跑在常開機器上的實例（見[部署](deployment.md)）。
+- **一台 node 只配對一個實例。** 桌面版和多設備版並存時，每台 node 只屬於其中一個實例，display lease 才不會被兩個實例同時搶用。要換實例就先解除配對再重新配對；project 移交時不會帶走 node。
 
 ## 架構
 
 ```mermaid
 flowchart LR
-    subgraph pots["Pots 服務（你的主機或自架伺服器）"]
+    subgraph pots["Pots 服務（桌面版或多設備版實例）"]
         sched["Run 排程"]
         op["operator / worker agent<br/>（rig loop 或 Claude Code adapter）"]
         gate["Gate + 核准執行器"]
@@ -50,7 +51,7 @@ flowchart LR
     human -.->|"接手：Screen Sharing（VNC）"| node
 ```
 
-- **連線方向。** 由 node 主動連出到 Pots 的 WebSocket，不必在 node 開任何對外的 port，NAT 後面也能用。網路走 Tailscale 等私有網路；單機版 Pots 必須額外綁定該私有網路介面，不對公網開放。
+- **連線方向。** 由 node 主動連出到 Pots 的 WebSocket，不必在 node 開任何對外的 port，NAT 後面也能用。網路走 Tailscale 等私有網路。桌面版要在該私有網路介面上開啟 [node 專用 listener](deployment.md#桌面版app-內嵌服務)，它只接受 node 簽章連線，不對公網開放，也不提供客戶端 API。
 - **Node Hub。** Pots 內的新模組，管理 node 的註冊、連線、心跳、lease 與指令轉送。agent 的工具呼叫經過 Gate 之後，才由 Hub 轉成 node 指令。
 - **pots-node。** Rust 寫成的 daemon，以 LaunchAgent 跑在 node 已登入的 GUI session 裡；擷取螢幕與送出輸入事件都必須在 GUI session 內，LaunchDaemon 做不到。另有一個小型 LaunchDaemon 當看門狗，負責重啟與回報健康狀態。
 

@@ -4,14 +4,14 @@
 
 ## 系統架構總覽
 
-整個平台是一個 Rust 服務加 SQLite（單機）或 Postgres（自架）。人類訊息經 Gateway、外部事件經 Watcher 進入，全部變成 `agent_runs` 佇列裡的工作，再由 Run 排程交給對話 agent、Planner 或 worker。
+整個平台是一個 Rust 服務加 SQLite 或 Postgres。桌面版由桌面 app 內嵌這個服務，多設備版則獨立部署。下圖是一個實例的內部，客戶端可以同時連好幾個這樣的實例（見[多實例並存](deployment.md#多實例並存)）。人類訊息經 Gateway、外部事件經 Watcher 進入，全部變成 `agent_runs` 佇列裡的工作，再由 Run 排程交給對話 agent、Planner 或 worker。
 
 ```mermaid
 flowchart TB
-    human["人類（GPUI 桌面客戶端）<br/>對話、核准、看進度<br/>手機客戶端待定"]
+    human["人類（GPUI 桌面客戶端，可同時連多個實例）<br/>對話、核准、看進度<br/>手機客戶端待定"]
     sources["外部來源<br/>GitHub、GitLab、郵件、狀態頁"]
 
-    subgraph service["單一 Rust 服務"]
+    subgraph service["單一 Rust 服務（桌面版內嵌或獨立部署）"]
         gateway["Gateway（axum）<br/>WebSocket、HTTP、通知"]
         scheduler["Run 排程<br/>agent_runs 佇列與 lease"]
         watcher["Watcher<br/>驗簽、正規化、去重、匹配"]
@@ -109,7 +109,10 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 
 | 表 | 用途 | 關鍵欄位 |
 | --- | --- | --- |
-| `projects` | 一個 project 對應一個對話 agent 與一條對話 | `id` , `name` , `instructions` , `repos[]` , `budget` |
+| `instance` | 本實例的永久身分（只有一列） | `id` , `name` , `created_at` |
+| `projects` | 一個 project 對應一個對話 agent 與一條對話 | `id` , `name` , `instructions` , `repos[]` , `budget` , `residency` （`active` ｜ `moving` ｜ `moved`） |
+| `project_transfers` | project 移交紀錄（移出、移入、取回） | `id` , `project_id` , `direction` , `peer_instance` , `peer_url` , `state` , `at` |
+| `client_devices` | 客戶端裝置 token，可撤銷 | `id` , `user_id` , `name` , `token_hash` , `last_seen` , `revoked_at` |
 | `stream_items` | UI 顯示的完整對話流 | `id` , `project_id` , `thread_of` , `author` , `kind` , `body jsonb` , `status` |
 | `goals` | 人類意圖的根節點 | `id` , `project_id` , `title` , `state` , `brief, budget_tokens` , `spent_tokens` |
 | `tasks` | 任務樹節點 | `id` , `goal_id` , `parent_id` , `assignee` , `state jsonb` , `attempts` , `spent_tokens` |
@@ -148,7 +151,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | --- | --- | --- |
 | 非同步執行期 | `tokio` |  |
 | HTTP / WebSocket | `axum` （`ws` feature） | 客戶端的即時協定與 HTTP API |
-| 資料庫 | `sqlx` （Postgres） | 單機版 SQLite、自架版 Postgres，兩個 feature 都開；編譯期檢查 SQL，內建 migration |
+| 資料庫 | `sqlx` （SQLite、Postgres） | 依設定選用 SQLite 或 Postgres，兩個 feature 都開；編譯期檢查 SQL，內建 migration |
 | LLM 與 agent | `rig-core` | 釘精確版本；`llm` 模組封裝 ChatGPT Plan Responses 相容層與 API provider |
 | 記憶策略（選用） | `rig-memory` | 只參考其介面，OM 自己實作 |
 | JSON Schema | `schemars` | 工具參數定義 |
@@ -165,8 +168,8 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | Artifact 編輯器 | `gpui-kit-markdown-editor` | 區塊式所見即所得 Markdown；0.1.x，釘精確版本 |
 | MCP | `rmcp` | M4 供 Claude Code adapter 存取平台工具，伺服器端執行授權 |
 | Git 操作 | `tokio::process` 呼叫 `git` | worktree 等操作直接用 CLI 最穩 |
-| 桌面通知（單機版） | `notify-rust` | macOS、Linux、Windows 原生通知 |
-| 憑證儲存（單機版） | `keyring` | API key 與 ChatGPT SIWC 憑證；不接管 Claude CLI 登入 |
+| 桌面通知 | `notify-rust` | macOS、Linux、Windows 原生通知；桌面版由服務發出，遠端實例的通知由已連線的客戶端顯示 |
+| 憑證儲存（桌面版與客戶端） | `keyring` | API key、ChatGPT SIWC 憑證與遠端實例的裝置 token；不接管 Claude CLI 登入 |
 | 排程 | `croner` | 解析 cron 字串、計算下一次觸發 |
 | Artifact diff | `similar` | 產生「人類修改」的文字 diff |
 | GitLab API | `reqwest` | 直接呼叫 REST，涵蓋自架實例 |

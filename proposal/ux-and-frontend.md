@@ -41,7 +41,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 ## 前端
 
-桌面客戶端用 Rust 的 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)，元件庫用 [GPUI Kit](https://github.com/longbridge/gpui-kit)，是原生程式而非 WebView。客戶端只透過下方的[即時協定](#即時協定)與 HTTP API 和服務溝通：單機版連 localhost，自架版連伺服器網址。
+桌面客戶端用 Rust 的 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)，元件庫用 [GPUI Kit](https://github.com/longbridge/gpui-kit)，是原生程式而非 WebView。客戶端只透過下方的[即時協定](#即時協定)與 HTTP API 和服務溝通。桌面版的 app 自己內嵌一個服務並經 loopback 連線，另外也可以同時連上任意數量的遠端實例，連線管理見[客戶端多連線](deployment.md#客戶端多連線)。
 
 Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-markdown-editor/latest)：區塊式所見即所得，直接以 Markdown 讀寫，支援標題、巢狀清單、待辦、表格、程式碼區塊、跨區塊選取與輸入法。評估用的原型在 [`prototypes/gpui-editor/`](../prototypes/gpui-editor/)，已在 macOS 實測中文輸入法可用；選型過程見[已決定事項](roadmap-and-decisions.md#已決定事項)。
 
@@ -51,22 +51,23 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 
 | 區塊 | 桌面 | 手機 | 內容 |
 | --- | --- | --- | --- |
-| Project 列表 | 左欄 | 底部分頁「Projects」 | 每個 project 一列，待核准數與未讀徽章 |
+| 實例直列 | 最左側窄欄，只連一個實例時隱藏 | Projects 分頁頂端的切換器，只連一個實例時隱藏 | 全域 Inbox、各實例圖示（待核准徽章、離線警示）、加入實例 |
+| Project 列表 | 左欄（目前實例） | 底部分頁「Projects」 | 頂端是實例名稱與形態，點下去是實例選單；每個 project 一列，待核准數與未讀徽章；已移交的 project 顯示新位置 |
 | 對話流 | 中欄 | 點進 project | 連續對話 + 內嵌卡片，頂端顯示 agent 狀態 |
 
 | 區塊 | 桌面 | 手機 | 內容 |
 | --- | --- | --- | --- |
 | 狀態面板 | 右欄 | 對話頁的上拉抽屜 | 進行中的 Goal、任務樹、關聯 PR 與 CI 結果 |
-| Inbox | 頂部圖示 | 底部分頁「Inbox」 | 所有 project 的待核准，依時間排序 |
+| Inbox | 實例直列最上方（全域）；左欄裡的 Inbox 只看目前實例 | 底部分頁「Inbox」 | 所有已連線實例、所有 project 的待核准，依時間排序並標示所屬實例，可依實例篩選 |
 | 記憶面板 | 狀態面板的分頁 | 同左 | 觀察紀錄，可編輯、釘選、刪除 |
 | Artifact 面板 | 右欄（取代狀態面板） | 全螢幕頁 | Markdown 編輯器、版本與 diff、 agent 正在寫入的提示 |
-| 總管 | 快捷鍵叫出的浮動對話框 | 底部分頁「總管」 | 跨 project 的永久對話 |
+| 總管 | 快捷鍵叫出的浮動對話框 | 底部分頁「總管」 | 同一個實例內跨 project 的永久對話，依目前選取的實例切換 |
 | 自動化 | 狀態面板的分頁 | 同左 | 排程與 listener 列表，可暫停、刪除、看觸發紀錄 |
 | 電腦 | 狀態面板的分頁 | 同左 | 託管電腦的連線狀態、lease 持有者、即時縮圖、權限檢查；「接手」、「交還」與「停止」 |
 
 ### 即時協定
 
-每個客戶端一條 WebSocket，伺服器推送帶序號的事件：
+客戶端對每個實例各開一條 WebSocket，伺服器推送帶序號的事件。序號是每個實例各自的，客戶端為每條連線分別記錄 `last_seq`：
 
 ```rust
 #[derive(Serialize)]
