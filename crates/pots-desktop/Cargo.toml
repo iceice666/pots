@@ -6,16 +6,26 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 gpui-kit.workspace = true
 pots-proto.workspace = true
+pots-server = { path = "../pots-server" }
+dirs = "6"
 gpui-kit-markdown-editor.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio-tungstenite = "0.30"
+tracing = "0.1"
 
 [dev-dependencies]
-serde_json.workspace = true
 # 離屏 renderer 與 HeadlessAppContext。
 gpui-kit = { workspace = true, features = ["test-support"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+pots-llm = { path = "../pots-llm", features = ["test-util"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 # 用離屏 renderer 把主要畫面存成 PNG：
 #   cargo test -p pots-desktop --test screenshots

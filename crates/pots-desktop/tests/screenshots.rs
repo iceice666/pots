@@ -37,6 +37,12 @@ mod shots {
 
     impl Shooter {
         fn new() -> Self {
+            Self::with(|window, cx| PotsApp::new(mock::store(), window, cx))
+        }
+
+        fn with(
+            make: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::Context<PotsApp>) -> PotsApp,
+        ) -> Self {
             let mut cx = HeadlessAppContext::with_platform(
                 gpui_kit::platform::current_platform(true).text_system(),
                 Arc::new(gpui_kit::assets::AllAssets),
@@ -59,7 +65,7 @@ mod shots {
                             ..Default::default()
                         },
                         cx,
-                        |window, cx| cx.new(|cx| PotsApp::new(mock::store(), window, cx)),
+                        |window, cx| cx.new(|cx| make(window, cx)),
                     )
                 })
                 .expect("open window");
@@ -85,6 +91,20 @@ mod shots {
                 .expect("update window");
         }
 
+        /// 等連線執行緒送來的事件套用完，直到 `done` 成立（最多 10 秒）。
+        fn wait_until(&mut self, what: &str, done: impl Fn(&PotsApp) -> bool) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                self.cx.run_until_parked();
+                let view = self.view.clone();
+                if self.cx.update(|cx| done(view.read(cx))) {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "等不到：{what}");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
         fn shot(&mut self, name: &str) {
             // 兩次 frame：第一次排版，第二次套用 scroll_to_bottom 等延後的捲動。
             for _ in 0..2 {
@@ -104,6 +124,91 @@ mod shots {
     }
 
     pub fn run() {
+        mock_screens();
+        live_screens();
+    }
+
+    /// 連到真正的服務（腳本化的模型），走一次「建立 project → 傳訊息 → 收到串流回覆」。
+    fn live_screens() {
+        use pots_desktop::connection::{Endpoint, Target};
+        use pots_desktop::model::*;
+        use pots_llm::testing::{ScriptedProvider, ScriptedTurn};
+
+        struct Fixed(Target);
+        impl Endpoint for Fixed {
+            fn locate(&mut self) -> Result<Target, String> {
+                Ok(self.0.clone())
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let handle = runtime
+            .block_on(pots_server::start(
+                pots_server::Config::desktop(dir.path()),
+                pots_server::Deps {
+                    provider: ScriptedProvider::new([ScriptedTurn::new().text_deltas([
+                        "收到！",
+                        "這是接上本機服務後的第一則回覆，",
+                        "串流與事件日誌都走真的 WebSocket。",
+                    ])]),
+                    model: "scripted".into(),
+                    model_auth: Arc::new(pots_server::FakeModelAuth::signed_out()),
+                },
+            ))
+            .expect("start server");
+        let target = Target {
+            addr: handle.addr,
+            token: handle.token.as_str().to_string(),
+        };
+
+        let mut s = Shooter::with(move |window, cx| PotsApp::new_live(Fixed(target), window, cx));
+        s.wait_until("快照與登入提示", |app| {
+            app.current_instance().connection == ConnectionState::Connected
+                && app.store.pending(None) == 1
+        });
+        s.shot("11-live-signed-out");
+
+        s.update(|app, _, cx| {
+            let instance = app.instance;
+            app.store.outbox.push((
+                instance,
+                ClientCommand::CreateProject {
+                    name: "pots".into(),
+                },
+            ));
+            cx.notify();
+        });
+        s.wait_until("建立 project", |app| {
+            !app.current_instance().projects.is_empty()
+        });
+        s.update(|app, window, cx| {
+            let instance = app.instance;
+            let project = app.current_instance().projects[0].id;
+            app.open_project(instance, project, window, cx);
+            app.composer.update(cx, |state, cx| {
+                state.set_value("你好，接上了嗎？", window, cx)
+            });
+            app.send_composer(window, cx);
+        });
+        s.wait_until("agent 回覆完成", |app| {
+            app.current_project().is_some_and(|p| {
+                p.agent_state == AgentState::Idle
+                    && p.items.iter().any(|i| {
+                        matches!(&i.kind, StreamItemKind::Agent(m) if m.status == MsgStatus::Done)
+                    })
+            })
+        });
+        s.shot("12-live-chat");
+
+        handle.shutdown();
+        runtime.block_on(handle.wait()).expect("shutdown");
+    }
+
+    fn mock_screens() {
         let mut s = Shooter::new();
         s.shot("01-channel-goal");
 

@@ -4,7 +4,9 @@
 //! [`model::Store::outbox`]，還沒有連到任何服務。
 
 pub mod app;
+pub mod connection;
 pub mod mock;
 pub mod model;
+pub mod sync;
 mod theme;
 mod views;

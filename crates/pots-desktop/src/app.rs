@@ -1,6 +1,9 @@
 //! 根視圖：持有 [`Store`] 與所有 UI 狀態，各區塊的 render 拆在 `views/`。
 
 use std::collections::HashSet;
+use std::time::Duration;
+
+use futures::StreamExt as _;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -12,7 +15,9 @@ use gpui_kit::{
 
 use markdown_editor::{BlockEditorEvent, BlockEditorState};
 
+use crate::connection::{self, ConnEvent, Connection, Endpoint};
 use crate::model::*;
+use crate::sync::{self, Sync};
 use crate::theme;
 
 gpui_kit::actions!(pots, [OpenOverseer]);
@@ -100,8 +105,21 @@ pub enum InboxFilter {
     Kind(InboxKind),
 }
 
+/// 連著真正的服務時的狀態；假資料模式是 `None`。
+pub struct Live {
+    pub conn: Connection,
+    pub sync: Sync,
+    /// 這條連線的實例在 `Store` 裡目前的 ID（收到快照前是暫用的）。
+    pub instance: InstanceId,
+    /// 你按了「開始登入」，收到登入網址時要開瀏覽器。
+    login_requested: bool,
+    /// 你剛建立、還沒收到 `ProjectAdded` 的 project 名稱。
+    creating: Option<String>,
+}
+
 pub struct PotsApp {
     pub store: Store,
+    pub live: Option<Live>,
     /// 側欄目前顯示的實例。
     pub instance: InstanceId,
     pub screen: Screen,
@@ -122,6 +140,8 @@ pub struct PotsApp {
     pub goal_note: Entity<InputState>,
     pub worker_note: Entity<InputState>,
     pub overseer_input: Entity<TextareaState>,
+    /// 左欄「新增專案」的輸入框；`None` 時顯示按鈕。
+    pub new_project: Option<(Entity<InputState>, Subscription)>,
     pub stream_scroll: ScrollHandle,
     pub overseer_scroll: ScrollHandle,
     pub automations_scroll: ScrollHandle,
@@ -198,6 +218,7 @@ impl PotsApp {
 
         let mut this = Self {
             store,
+            live: None,
             instance,
             screen: project.map_or(Screen::Inbox(None), Screen::Project),
             channel_tab: ChannelTab::Chat,
@@ -213,6 +234,7 @@ impl PotsApp {
             goal_note,
             worker_note,
             overseer_input,
+            new_project: None,
             stream_scroll: ScrollHandle::new(),
             overseer_scroll: ScrollHandle::new(),
             automations_scroll: ScrollHandle::new(),
@@ -223,6 +245,184 @@ impl PotsApp {
             this.open_project(instance, p, window, cx);
         }
         this
+    }
+
+    /// 連到真正的服務。視窗先顯示「連線中」的本機實例，收到快照後換成伺服器的資料。
+    pub fn new_live(endpoint: impl Endpoint, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let offset = sync::local_offset_secs();
+        let placeholder = InstanceId::new();
+        let store = Store {
+            now: Timestamp(Timestamp::now().0 + offset),
+            instances: vec![sync::placeholder_instance(placeholder, "本機")],
+            inbox: vec![],
+            outbox: vec![],
+        };
+        let mut this = Self::new(store, window, cx);
+        this.screen = Screen::Inbox(Some(placeholder));
+
+        let (conn, mut events) = connection::spawn(endpoint);
+        this.live = Some(Live {
+            conn,
+            sync: Sync::new(offset),
+            instance: placeholder,
+            login_requested: false,
+            creating: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = events.next().await {
+                if this
+                    .update_in(cx, |app, window, cx| app.on_conn_event(event, window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // 相對時間（「2 分鐘前」）要跟著走。
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(30))
+                    .await;
+                let alive = this.update(cx, |app, cx| {
+                    app.store.now = Timestamp(Timestamp::now().0 + offset);
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        this
+    }
+
+    fn on_conn_event(&mut self, event: ConnEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else {
+            return;
+        };
+        let instance = live.instance;
+        match event {
+            ConnEvent::State(state) => {
+                if let Some(i) = self.store.instance_mut(instance) {
+                    i.connection = state;
+                    i.host = match state {
+                        ConnectionState::Connected => "這台電腦".into(),
+                        ConnectionState::Reconnecting => "重新連線中…".into(),
+                        ConnectionState::Offline => "離線".into(),
+                    };
+                }
+            }
+            ConnEvent::Problem(problem) => self.toast = Some(problem),
+            ConnEvent::Server(event) => {
+                let applied = live.sync.apply(&mut self.store, instance, event);
+                if let Some((old, new)) = applied.rekeyed {
+                    live.instance = new;
+                    if self.instance == old {
+                        self.instance = new;
+                    }
+                    if self.screen == Screen::Inbox(Some(old)) {
+                        self.screen = Screen::Inbox(Some(new));
+                    }
+                }
+                if let Some(url) = applied.login_url
+                    && std::mem::take(&mut live.login_requested)
+                {
+                    cx.open_url(&url);
+                }
+                if let Some(toast) = applied.toast {
+                    self.toast = Some(toast);
+                }
+                let created = applied.project_added.filter(|p| {
+                    let name = self
+                        .store
+                        .project(live.instance, *p)
+                        .map(|p| p.name.as_str());
+                    live.creating.is_some() && live.creating.as_deref() == name
+                });
+                let current_missing = match self.screen {
+                    Screen::Project(p) => self.store.project(live.instance, p).is_none(),
+                    _ => false,
+                };
+                let first = self
+                    .store
+                    .instance(live.instance)
+                    .and_then(|i| i.projects.first())
+                    .map(|p| p.id);
+                let instance = live.instance;
+                if let Some(p) = created {
+                    live.creating = None;
+                    self.open_project(instance, p, window, cx);
+                } else if current_missing
+                    || (applied.rekeyed.is_some()
+                        && self.screen == Screen::Inbox(Some(instance))
+                        && self.store.pending(Some(instance)) == 0)
+                {
+                    // 快照換掉了目前的 project，或剛連上而且沒有待處理的事：開第一個 project。
+                    match first {
+                        Some(p) => self.open_project(instance, p, window, cx),
+                        None => self.open_inbox(Some(instance), cx),
+                    }
+                }
+                if matches!(self.screen, Screen::Project(_)) {
+                    self.stream_scroll.scroll_to_bottom();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 把使用者動作累積的指令送給服務。假資料模式不送，留在 outbox 方便測試。
+    fn flush_outbox(&mut self) {
+        let Some(live) = &mut self.live else {
+            return;
+        };
+        for (instance, command) in self.store.outbox.drain(..) {
+            if instance != live.instance {
+                continue;
+            }
+            if matches!(command, ClientCommand::StartModelLogin) {
+                live.login_requested = true;
+            }
+            live.conn.send(command);
+        }
+    }
+
+    /// 左欄「新增專案」：顯示輸入框。
+    pub fn begin_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("專案名稱，Enter 建立"));
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe(&input, |this, input, ev: &InputEvent, cx| match ev {
+            InputEvent::PressEnter { .. } => {
+                let name = input.read(cx).value().trim().to_string();
+                this.new_project = None;
+                if !name.is_empty() {
+                    this.create_project(name, cx);
+                }
+                cx.notify();
+            }
+            InputEvent::Blur => {
+                this.new_project = None;
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.new_project = Some((input, sub));
+        cx.notify();
+    }
+
+    fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else {
+            self.notify_unimplemented("新增專案", cx);
+            return;
+        };
+        live.creating = Some(name.clone());
+        let instance = live.instance;
+        self.store
+            .outbox
+            .push((instance, ClientCommand::CreateProject { name }));
+        cx.notify();
     }
 
     // ---- 查詢 ---------------------------------------------------------------
@@ -530,6 +730,14 @@ impl PotsApp {
         let Screen::Project(project) = self.screen else {
             return;
         };
+        if self.live.is_some() {
+            // 狀態由伺服器回報，這裡只送出指令。
+            self.store
+                .outbox
+                .push((self.instance, ClientCommand::Stop { project }));
+            cx.notify();
+            return;
+        }
         if let Some(p) = self.store.project_mut(self.instance, project) {
             p.agent_state = AgentState::Idle;
             for item in &mut p.items {
@@ -611,6 +819,8 @@ impl Focusable for PotsApp {
 
 impl Render for PotsApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每個使用者動作都會 notify 而重繪，在這裡把它們累積的指令送出。
+        self.flush_outbox();
         let multi = self.store.instances.len() > 1;
         let center = match self.screen {
             Screen::Inbox(scope) => self.render_inbox(scope, cx).into_any_element(),

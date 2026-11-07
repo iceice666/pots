@@ -1,6 +1,7 @@
 //! 最左側的實例直列與左欄（目前實例的 project 列表／全域 Inbox 篩選）。
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -315,6 +316,32 @@ impl PotsApp {
                         this.open_project(instance_id, pid, window, cx)
                     })),
             );
+        }
+
+        if self.live.is_some() {
+            nav = match &self.new_project {
+                Some((input, _)) => nav.child(
+                    div()
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(6.))
+                        .bg(theme::white())
+                        .text_color(theme::text())
+                        .child(Input::new(input).appearance(false)),
+                ),
+                None => nav.child(
+                    sidebar_row("nav-new-project".into(), false)
+                        .child(icon(IconName::Plus, 16., theme::text_dim_on_dark()))
+                        .child(
+                            div()
+                                .text_color(theme::text_dim_on_dark())
+                                .child("新增專案"),
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.begin_new_project(window, cx)),
+                        ),
+                ),
+            };
         }
 
         let on_automations =

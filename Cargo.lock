@@ -5706,13 +5706,17 @@ name = "pots-desktop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dirs 6.0.0",
  "futures",
  "gpui-kit",
  "gpui-kit-markdown-editor",
  "image",
+ "pots-llm",
  "pots-proto",
+ "pots-server",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
@@ -5777,6 +5781,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

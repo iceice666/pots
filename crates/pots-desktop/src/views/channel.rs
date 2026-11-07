@@ -82,7 +82,8 @@ impl PotsApp {
                             .ml_auto()
                             .text_size(px(13.))
                             .text_color(theme::text_muted())
-                            .child(p.budget.label()),
+                            // 還沒有預算的實例（M6 之前）不顯示。
+                            .when(p.budget.limit_cents > 0, |d| d.child(p.budget.label())),
                     )
                     .when(busy, |d| {
                         d.child(

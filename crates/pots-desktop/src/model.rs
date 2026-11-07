@@ -314,6 +314,14 @@ impl Store {
         if !item.is_open() {
             return false;
         }
+        // 模型登入：交給伺服器，這筆等它回報登入完成才收掉。
+        if action == InboxAction::StartLogin
+            && id == crate::sync::model_login_item_id(item.instance)
+        {
+            let instance = item.instance;
+            self.outbox.push((instance, ClientCommand::StartModelLogin));
+            return true;
+        }
         let decision = match action {
             InboxAction::Approve => Decision::Approved,
             InboxAction::Reject => Decision::Rejected,
