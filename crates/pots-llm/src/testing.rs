@@ -87,44 +87,95 @@ impl ModelProvider for ScriptedProvider {
         let turn = lock(&self.turns)
             .pop_front()
             .ok_or_else(|| LlmError::Other("ScriptedProvider：腳本已用完".into()))?;
-        if let Some(error) = turn.reject {
-            return Err(error);
-        }
-        let mut steps: VecDeque<Step> = turn.steps.into();
-        match turn.end {
-            End::Completed(usage) => steps.push_back(Step::Event(StreamEvent::Completed { usage })),
-            End::Error(error) => steps.push_back(Step::Error(error)),
-            End::Eof => {}
-        }
-        Ok(Box::pin(futures::stream::unfold(
-            (steps, cancel),
-            |(mut steps, cancel)| async move {
-                loop {
-                    if cancel.is_cancelled() && !steps.is_empty() {
+        play(turn, cancel)
+    }
+}
+
+type ReplyFn = dyn Fn(&ModelRequest) -> ScriptedTurn + Send + Sync;
+
+/// 依請求內容決定回應的 provider：每次 [`ModelProvider::stream`] 用閉包產生這一輪，
+/// 並記錄收到的 [`ModelRequest`]。適合同時有好幾種請求、順序不固定的測試（例如對話
+/// agent 與背景的記憶整理共用一個 provider）。
+pub struct FnProvider {
+    name: String,
+    reply: Box<ReplyFn>,
+    requests: Mutex<Vec<ModelRequest>>,
+}
+
+impl FnProvider {
+    pub fn new(
+        name: impl Into<String>,
+        reply: impl Fn(&ModelRequest) -> ScriptedTurn + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.into(),
+            reply: Box::new(reply),
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// 到目前為止收到的請求，依呼叫順序。
+    pub fn requests(&self) -> Vec<ModelRequest> {
+        lock(&self.requests).clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for FnProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        cancel: CancellationToken,
+    ) -> Result<EventStream, LlmError> {
+        let turn = (self.reply)(&request);
+        lock(&self.requests).push(request);
+        play(turn, cancel)
+    }
+}
+
+/// 把一輪腳本變成串流。
+fn play(turn: ScriptedTurn, cancel: CancellationToken) -> Result<EventStream, LlmError> {
+    if let Some(error) = turn.reject {
+        return Err(error);
+    }
+    let mut steps: VecDeque<Step> = turn.steps.into();
+    match turn.end {
+        End::Completed(usage) => steps.push_back(Step::Event(StreamEvent::Completed { usage })),
+        End::Error(error) => steps.push_back(Step::Error(error)),
+        End::Eof => {}
+    }
+    Ok(Box::pin(futures::stream::unfold(
+        (steps, cancel),
+        |(mut steps, cancel)| async move {
+            loop {
+                if cancel.is_cancelled() && !steps.is_empty() {
+                    steps.clear();
+                    return Some((Err(LlmError::Cancelled), (steps, cancel)));
+                }
+                match steps.pop_front()? {
+                    Step::Event(event) => return Some((Ok(event), (steps, cancel))),
+                    Step::Error(error) => {
                         steps.clear();
-                        return Some((Err(LlmError::Cancelled), (steps, cancel)));
+                        return Some((Err(error), (steps, cancel)));
                     }
-                    match steps.pop_front()? {
-                        Step::Event(event) => return Some((Ok(event), (steps, cancel))),
-                        Step::Error(error) => {
-                            steps.clear();
-                            return Some((Err(error), (steps, cancel)));
+                    Step::Delay(duration) => {
+                        tokio::select! {
+                            () = tokio::time::sleep(duration) => {}
+                            () = cancel.cancelled() => {}
                         }
-                        Step::Delay(duration) => {
-                            tokio::select! {
-                                () = tokio::time::sleep(duration) => {}
-                                () = cancel.cancelled() => {}
-                            }
-                        }
-                        Step::Hang => {
-                            cancel.cancelled().await;
-                            steps.push_front(Step::Hang);
-                        }
+                    }
+                    Step::Hang => {
+                        cancel.cancelled().await;
+                        steps.push_front(Step::Hang);
                     }
                 }
-            },
-        )))
-    }
+            }
+        },
+    )))
 }
 
 /// 腳本裡的一輪模型串流。預設以 [`StreamEvent::Completed`] 正常結束。
