@@ -10,12 +10,24 @@
 | --- | --- | --- |
 | 執行方式 | 本機執行一個 binary，桌面客戶端連 localhost | 同一個 binary，以 docker compose 部署在伺服器 |
 | 資料庫 | SQLite（WAL 模式），一個檔案 | Postgres |
-| 存取與登入 | 只綁 127.0.0.1，不需登入 | 反向代理加 TLS，passkey 或 forward-auth |
+| Pots 應用程式存取與登入 | 只綁 127.0.0.1，不需 Pots 登入；模型 provider 仍須另行授權 | 反向代理加 TLS，passkey 或 forward-auth；不取代模型 provider 授權 |
 | 外部事件 | 輪詢與 IMAP IDLE（GitHub 用 PAT 或 `gh` 的登入） | 各來源優先用 webhook，輪詢作備援 |
 | 通知 | 作業系統桌面通知 | 手機推播（方式待定，候選為 Web Push） |
 | 工作佇列 | 行程內排程器，SQLite 表作持久化 | `FOR UPDATE SKIP LOCKED` ，可多個 runner |
-| 憑證 | 本機設定檔或 OS keychain | 環境變數或 secret 檔 |
+| 憑證 | 靜態 API key 使用受保護設定或 OS keychain；可輪替 OAuth token 使用可寫入的持久 secret store | 靜態 API key 使用 secret 檔等注入；可輪替 OAuth token 使用可寫入的持久 secret store |
 | Worker 沙箱 | 本機 Docker/Podman | 伺服器上的 Docker/Podman |
+
+### 模型授權與持久化邊界
+
+Pots 是使用者自行執行的開源軟體；上述自架模式不代表 Pots 營運平台代管、轉售訂閱或共用訂閱憑證。啟動 binary／Compose 只完成服務部署，還須完成各 provider 的官方授權。`Backends.auth` 只處理 Pots 的存取控制，不能代替下列模型授權。
+
+- **ChatGPT Plan provider（rig）**：採官方 Sign in with ChatGPT（SIWC）開源 token-sharing 流程，由 Pots 管理取得的 OAuth 狀態，直接呼叫 Responses API；不透過 Codex CLI，也不讀取 Codex 私有憑證。每份授權只設一個 refresh owner（多 runner 時仍須協調成單一更新者），在 token 輪替時原子更新持久 secret store，避免併發 refresh 或重啟後使用舊 refresh token。不可把會輪替的 token 僅放在唯讀環境變數或唯讀掛載內。
+- **Host ID**：綁定持久 runtime 安裝實例並跨重啟保存，不為每個 task container 重新建立。自架 VM 使用自己的 Host ID，不複製本機 runtime 的 Host ID。
+- **自架登入**：SIWC 的瀏覽器登入使用本機 loopback callback，不能把伺服器網址當成 callback 任意替換。自架 VM 依[官方指南](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)，在本機完成瀏覽器流程，再透過 SSH 將授權安全匯入 VM，並依指南使用 VM 自己的 Host ID；這是獨立、明確的授權設定流程，不是一般資料搬移。
+- **Claude Code runtime adapter**：登入、token 更新與 session storage 由原始官方 Claude Code CLI 管理；Pots 啟動 CLI 並串接 runtime 結果，不把訂閱 token 抽出成 rig provider 憑證。CLI 的官方登入狀態與 session 儲存須有受保護、可寫入的持久化位置，跨 runtime 重啟保留，不能簡化成通用的唯讀 credentials 掛載。
+- **資料與秘密分離**：API key、OAuth access／refresh token、Claude CLI 登入狀態等秘密，不納入一般 `export`／`import` 或專案 artifact。搬家時另外完成官方授權或明確的安全匯入；日誌與錯誤訊息也不得洩露 token。
+
+以上為設計要求，不代表端到端授權、輪替與自架流程已驗證；SIWC preview 限制與官方文件見[參考資料](references.md#帳號與模型整合)。
 
 ### 切換點
 
@@ -25,7 +37,7 @@ pub struct Backends {
     pub queue:    Arc<dyn RunQueue>,    // agent_runs 的取用與 lease
     pub sources:  Arc<SourceRegistry>,   // 各 connector：webhook、輪詢或長連線
     pub notifier: Arc<dyn Notifier>,    // 桌面通知或手機推播
-    pub auth:     Arc<dyn Auth>,        // 本機免登入、passkey 或 forward-auth
+    pub auth:     Arc<dyn Auth>,        // Pots 存取：本機免登入、passkey 或 forward-auth；非 provider OAuth
 }
 pub enum Mode {
     Local  { db_path: PathBuf },
@@ -69,7 +81,7 @@ impl Backends {
 
 - 從第一天就帶 `user_id` 。 單機版固定為本機使用者，自架版不必回頭補欄位。
 
-- 匯出與匯入。 提供 `export` 與 `import` 指令，以 JSONL 搬移所有資料，包含原始對話、觀察紀錄與 USER.md，搬上自架版後 agent 的記憶不中斷。
+- 匯出與匯入。 提供 `export` 與 `import` 指令，以 JSONL 搬移應用資料，包含原始對話、觀察紀錄與 USER.md，搬上自架版後 agent 的記憶不中斷。一般搬移不含 provider token、API key、CLI 登入狀態等秘密，也不複製 runtime Host ID；目標 runtime 須另行完成授權與秘密設定。
 
 - 客戶端不分模式。 同一個 GPUI 桌面客戶端在單機版連 localhost，在自架版連伺服器網址，畫面與協定相同。
 
