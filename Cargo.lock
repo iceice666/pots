@@ -5712,6 +5712,7 @@ dependencies = [
  "gpui-kit",
  "gpui-kit-markdown-editor",
  "image",
+ "libc",
  "pots-llm",
  "pots-proto",
  "pots-server",

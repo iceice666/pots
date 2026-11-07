@@ -65,6 +65,8 @@ pub async fn run(config: Config, model: Option<String>) -> Result<(), Error> {
 
 /// 給桌面 app 的 `--serve`：建立 runtime 與日誌，以桌面版設定跑服務。
 pub fn run_blocking(data_dir: &Path) -> Result<(), Error> {
+    // 趁執行檔還沒被換掉，先記下這個行程的 build（寫進 `server.json`）。
+    let _ = crate::BuildInfo::current();
     init_tracing();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

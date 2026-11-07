@@ -251,6 +251,14 @@ async fn session(
                     Ok(event) => event,
                     Err(e) => {
                         tracing::warn!(error = %e, "看不懂的伺服器事件");
+                        if events
+                            .unbounded_send(ConnEvent::Problem(
+                                "收到看不懂的事件：app 和服務的版本可能不同，請重新開啟 app。".into(),
+                            ))
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
                         continue;
                     }
                 };

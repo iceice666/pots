@@ -34,7 +34,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub use config::{AuthConfig, Config, ListenConfig, StoreConfig};
-pub use datadir::{ConnectionInfo, LocalToken, read_connection_info};
+pub use datadir::{BuildInfo, ConnectionInfo, LocalToken, read_connection_info};
 pub use model_auth::{FakeModelAuth, ModelAuthControl};
 pub use providers::{ApiProviderFactory, NoApiProviders};
 pub use runs::{AgentProfile, CHAT_PROFILE};
@@ -56,7 +56,7 @@ pub enum Error {
     /// 同一個資料目錄已經有服務在跑。帶它的連線資訊；對方剛啟動、還沒寫
     /// `server.json` 時是 `None`，稍後用 [`read_connection_info`] 再讀一次。
     #[error("這個資料目錄已經有 Pots 服務在執行")]
-    AlreadyRunning(Option<ConnectionInfo>),
+    AlreadyRunning(Option<Box<ConnectionInfo>>),
     #[error("檔案系統：{0}")]
     Io(#[from] std::io::Error),
     #[error("資料庫：{0}")]
@@ -143,6 +143,7 @@ impl ServerHandle {
             addr: self.addr,
             token: self.token.clone(),
             instance_id: self.instance_id,
+            build: Some(BuildInfo::current()),
         }
     }
 
@@ -282,6 +283,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         addr,
         token: token.clone(),
         instance_id: instance.id,
+        build: Some(BuildInfo::current()),
     };
     data_dir.write_connection_info(&info)?;
 

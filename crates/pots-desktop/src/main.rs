@@ -86,18 +86,67 @@ impl LocalService {
         }
     }
 
-    /// 已經在跑、而且連得上的服務。
-    fn running(&self) -> Option<Target> {
-        let info = pots_server::read_connection_info(&self.data_dir)?;
+    /// 資料目錄裡的服務現在的狀況。
+    fn probe(&self) -> Probe {
+        let Some(info) = pots_server::read_connection_info(&self.data_dir) else {
+            return Probe::None;
+        };
         // `server.json` 可能是上次異常結束留下的，那個 port 現在也許是別的程式在用：
         // 先問不需要 token 的 `/healthz`，實例 ID 對得上才把 token 送過去。
         if !healthz_matches(info.addr, &info.instance_id.to_string()) {
-            return None;
+            return Probe::None;
         }
-        Some(Target {
+        // 常駐的服務可能是舊版 app 啟動的（關掉視窗後服務繼續跑），協定對不上。
+        if !info.compatible_with(&pots_server::BuildInfo::on_disk()) {
+            return Probe::Outdated(info);
+        }
+        Probe::Running(Target {
             addr: info.addr,
             token: info.token.as_str().to_string(),
         })
+    }
+
+    fn running(&self) -> Option<Target> {
+        match self.probe() {
+            Probe::Running(target) => Some(target),
+            Probe::None | Probe::Outdated(_) => None,
+        }
+    }
+
+    /// 請舊版服務正常結束（SIGTERM：取消進行中的 run、刪掉 `server.json`、放開資料目錄鎖），
+    /// 等它真的停下來。
+    fn stop_outdated(&self, info: &pots_server::ConnectionInfo) -> Result<(), String> {
+        tracing::info!(pid = info.pid, "本機服務是舊版，重新啟動");
+        #[cfg(unix)]
+        {
+            let pid = i32::try_from(info.pid).map_err(|_| "pid 不合理".to_string())?;
+            // SAFETY: 只是送訊號；pid 來自 server.json，且剛用 /healthz 確認過是這個實例。
+            if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+                return Err(format!(
+                    "無法結束舊版服務（pid {}）：{}",
+                    info.pid,
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(format!(
+                "本機服務是舊版（pid {}），請先結束它再開 app",
+                info.pid
+            ));
+        }
+        #[allow(unreachable_code)]
+        {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                if !healthz_matches(info.addr, &info.instance_id.to_string()) {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            Err(format!("舊版服務（pid {}）沒有在時間內結束", info.pid))
+        }
     }
 
     fn spawn_service(&mut self) -> Result<(), String> {
@@ -149,10 +198,20 @@ fn log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("server.log")
 }
 
+/// [`LocalService::probe`] 的結果。
+enum Probe {
+    None,
+    Running(Target),
+    /// 在跑，但和這個 app 的 build 對不上。
+    Outdated(pots_server::ConnectionInfo),
+}
+
 impl Endpoint for LocalService {
     fn locate(&mut self) -> Result<Target, String> {
-        if let Some(target) = self.running() {
-            return Ok(target);
+        match self.probe() {
+            Probe::Running(target) => return Ok(target),
+            Probe::Outdated(info) => self.stop_outdated(&info)?,
+            Probe::None => {}
         }
         // 上次啟動的子行程還在就等它，結束了就回報並重新啟動。
         let starting = match self.child.as_mut().map(Child::try_wait) {

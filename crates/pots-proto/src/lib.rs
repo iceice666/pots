@@ -9,6 +9,13 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// 即時協定的版本。`ServerEvent`／`ClientCommand` 有不相容的變動（新增指令、新增必填欄位）
+/// 時加一；客戶端遇到版本不同的本機服務會重啟它。
+///
+/// - 1：M0。
+/// - 2：模型 provider 設定、`LoginUrl`、`ProviderTest`。
+pub const PROTOCOL_VERSION: u32 = 2;
+
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

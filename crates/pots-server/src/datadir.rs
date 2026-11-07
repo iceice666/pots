@@ -45,6 +45,58 @@ impl std::fmt::Debug for LocalToken {
     }
 }
 
+/// 服務是用哪個 build 跑的。桌面版的 app 與內嵌服務是同一個執行檔：重新編譯或更新後，
+/// 還在背景常駐的舊服務和新的 app 對不上，app 用它判斷要不要重啟服務。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildInfo {
+    /// [`pots_proto::PROTOCOL_VERSION`]。
+    pub protocol: u32,
+    /// 執行檔路徑；拿不到時是 `None`。
+    pub exe: Option<PathBuf>,
+    /// 行程啟動時執行檔的修改時間（Unix 奈秒）。
+    pub exe_modified: Option<u128>,
+}
+
+impl BuildInfo {
+    /// 這個行程的 build。執行檔的修改時間在第一次呼叫時讀取並記住，之後就算檔案被
+    /// 換掉也不變，所以「服務啟動時的 build」和「app 現在的 build」比得出差異。
+    pub fn current() -> Self {
+        static CURRENT: std::sync::OnceLock<BuildInfo> = std::sync::OnceLock::new();
+        CURRENT
+            .get_or_init(|| {
+                let exe = std::env::current_exe().ok();
+                let exe_modified = exe
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos());
+                BuildInfo {
+                    protocol: pots_proto::PROTOCOL_VERSION,
+                    exe,
+                    exe_modified,
+                }
+            })
+            .clone()
+    }
+
+    /// 讀磁碟上執行檔現在的修改時間（不用快取），給客戶端判斷自己的執行檔有沒有被換掉。
+    pub fn on_disk() -> Self {
+        let exe = std::env::current_exe().ok();
+        let exe_modified = exe
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos());
+        BuildInfo {
+            protocol: pots_proto::PROTOCOL_VERSION,
+            exe,
+            exe_modified,
+        }
+    }
+}
+
 /// 客戶端連上本機服務需要的資訊，存在 `server.json`。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionInfo {
@@ -52,9 +104,26 @@ pub struct ConnectionInfo {
     pub addr: SocketAddr,
     pub token: LocalToken,
     pub instance_id: InstanceId,
+    /// 舊版服務寫的 `server.json` 沒有這欄。
+    #[serde(default)]
+    pub build: Option<BuildInfo>,
 }
 
 impl ConnectionInfo {
+    /// 這個服務能不能給 `client` 這個 build 的客戶端用：協定版本要相同；如果是同一個
+    /// 執行檔，服務啟動後執行檔不能被換過（例如重新編譯、更新）。不知道 build 的舊版
+    /// 服務一律當作不相容。
+    pub fn compatible_with(&self, client: &BuildInfo) -> bool {
+        let Some(server) = &self.build else {
+            return false;
+        };
+        if server.protocol != client.protocol {
+            return false;
+        }
+        let same_exe = server.exe.is_some() && server.exe == client.exe;
+        !(same_exe && server.exe_modified != client.exe_modified)
+    }
+
     pub fn ws_url(&self) -> String {
         format!("ws://{}/ws", self.addr)
     }
@@ -103,7 +172,7 @@ impl DataDir {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     info = read_connection_info(path);
                 }
-                Err(Error::AlreadyRunning(info))
+                Err(Error::AlreadyRunning(info.map(Box::new)))
             }
             Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
         }
@@ -186,6 +255,45 @@ mod tests {
         assert_eq!(format!("{a:?}"), "LocalToken(..)");
     }
 
+    #[test]
+    fn build_compatibility() {
+        let exe = Some(PathBuf::from("/app/pots"));
+        let build = |protocol, modified| BuildInfo {
+            protocol,
+            exe: exe.clone(),
+            exe_modified: Some(modified),
+        };
+        let info = |b: Option<BuildInfo>| ConnectionInfo {
+            pid: 1,
+            addr: "127.0.0.1:1".parse().unwrap(),
+            token: LocalToken::generate(),
+            instance_id: InstanceId::from_u64(1),
+            build: b,
+        };
+        let client = build(pots_proto::PROTOCOL_VERSION, 10);
+        assert!(info(Some(client.clone())).compatible_with(&client));
+        assert!(
+            !info(None).compatible_with(&client),
+            "舊版服務沒有 build 資訊"
+        );
+        assert!(
+            !info(Some(build(pots_proto::PROTOCOL_VERSION, 9))).compatible_with(&client),
+            "同一個執行檔被重新編譯過"
+        );
+        assert!(
+            !info(Some(build(1, 10))).compatible_with(&client),
+            "協定版本不同"
+        );
+        let other_exe = BuildInfo {
+            exe: Some(PathBuf::from("/usr/bin/pots-server")),
+            ..build(pots_proto::PROTOCOL_VERSION, 1)
+        };
+        assert!(
+            info(Some(other_exe)).compatible_with(&client),
+            "別的執行檔、協定相同：可以共用"
+        );
+    }
+
     #[tokio::test]
     async fn lock_and_info_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -197,6 +305,7 @@ mod tests {
             addr: "127.0.0.1:1234".parse().unwrap(),
             token: LocalToken::generate(),
             instance_id: InstanceId::from_u64(9),
+            build: Some(BuildInfo::current()),
         };
         held.write_connection_info(&info).unwrap();
         assert_eq!(read_connection_info(&dir), Some(info.clone()));
@@ -211,7 +320,7 @@ mod tests {
         }
 
         match DataDir::acquire(&dir).await {
-            Err(Error::AlreadyRunning(Some(got))) => assert_eq!(got, info),
+            Err(Error::AlreadyRunning(Some(got))) => assert_eq!(*got, info),
             other => panic!("預期 AlreadyRunning，得到 {other:?}"),
         }
 
