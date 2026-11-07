@@ -20,15 +20,15 @@
 
 agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等本輪結束再處理；「改方向」則發出 steer 事件，中斷目前的執行並讓 agent 重新規劃。對話頂端顯示 agent 狀態：閒置、思考中、規劃中、等待 CI、等你核准；agent 在跑的時候旁邊有「停止」。
 
-記憶透明化。 提供「agent 記得什麼」面板，可以查看、修正、釘選或刪除觀察。修正會讓快取前綴失效一次，可以接受。
+記憶透明化。 提供「agent 記得什麼」面板，可以查看、修正、釘選或刪除觀察。修正會讓快取前綴失效一次，可以接受。修正與刪除是軟性的：舊內容留在資料庫作稽核，模型只看得到修正後的版本。
 
 完整歷史永遠可捲。 UI 顯示的是原始訊息，OM 只是 agent 看到的衍生視圖，兩者分開存。
 
 ## 桌面客戶端現況
 
-桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入。`--mock` 模式用假資料展示其他畫面：實例直列、Goal 與任務面板、Artifact 編輯、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
+桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）。`--mock` 模式用假資料展示其他畫面：實例直列、Goal 與任務面板、Artifact 編輯、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
 
-下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（記憶、電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
+下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
 
 ## 前端
 
@@ -50,12 +50,12 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 | --- | --- | --- | --- |
 | 狀態面板 | 右欄 | 對話頁的上拉抽屜 | Goal 面板（任務依狀態分組、Brief、Ledger、Team 分頁，留言給 Planner）；點任務進任務 thread（狀態、分支、PR 與 CI、進度、直接對 worker 說話） |
 | Inbox | 實例直列最上方（全域）；左欄裡的 Inbox 只看目前實例 | 底部分頁「Inbox」 | 所有已連線實例、所有 project 的待處理事項，依時間排序並標示所屬實例，可依實例與類型（核准、需要你處理、找你的訊息）篩選 |
-| 記憶 | project 頻道的「記憶」分頁 | 同左 | 觀察紀錄，可編輯、釘選、刪除 |
+| 記憶 | project 頻道的「記憶」分頁 | 同左 | 觀察紀錄與「目前在做什麼」，可修正、釘選、刪除；整理失敗時顯示原因 |
 | Artifact | 列表是 project 頻道的「Artifacts」分頁；編輯器在右欄，取代狀態面板 | 全螢幕頁 | Markdown 編輯器，以 `##` 區段標示你改過的區段與 agent 正在寫入的區段；版本紀錄與 diff |
 | 總管 | 左欄入口的獨立畫面，和對話流一樣佔中欄，右欄是專案概況與記憶；任何畫面都可用快捷鍵切過去 | 底部分頁「總管」 | 同一個實例內跨 project 的永久對話，依目前選取的實例切換 |
 | 自動化 | 左欄「排程」「Listener」進入的實例層級畫面，佔中欄，可依專案篩選；project 頻道的「自動化」分頁只看這個 project。點一列在右欄看細節 | 同左 | 排程與 listener 列表、批次暫停狀態；可停用、刪除、看條件與觸發紀錄，待核准的 listener 可以直接核准 |
 | 電腦 | 左欄入口的實例層級畫面，佔中欄 | 同左 | 託管電腦的連線狀態、lease 持有者、即時縮圖、權限檢查；「接手」、「交還」與「停止」 |
-| 設定 | 左欄最下方的入口，打開蓋在主畫面上的設定視窗：左邊是類別（模型 Provider、關於），右邊是內容；點背景、右上角或按 Esc 關閉 | 「設定」分頁 | 屬於目前實例的設定。模型 provider：內建的 ChatGPT 方案（登入、登出、模型）與新增的 OpenAI／Anthropic 相容 API（base URL、API key、模型、測試連線），選一個「使用中」。還沒有使用中的 provider 時，Inbox 有一筆「設定模型 provider」指向這裡 |
+| 設定 | 左欄最下方的入口，打開蓋在主畫面上的設定視窗：左邊是類別（模型 Provider、記憶、關於），右邊是內容；點背景、右上角或按 Esc 關閉 | 「設定」分頁 | 屬於目前實例的設定。模型 provider：內建的 ChatGPT 方案（登入、登出、模型）與新增的 OpenAI／Anthropic 相容 API（base URL、API key、模型、測試連線），選一個「使用中」。記憶：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。還沒有使用中的 provider 時，Inbox 有一筆「設定模型 provider」指向這裡 |
 
 ### 即時協定
 
@@ -80,6 +80,7 @@ pub enum ServerEvent {
     LoginUrl      { url: String },                      // 只回給按下登入的連線；不記日誌
     Providers     { seq: u64, providers: ProvidersView },  // provider 設定與使用中的那個；不含 key
     ProviderTest  { request: u64, result: Result<Vec<ModelOption>, String> }, // 只回給測試的連線；不記日誌
+    Memory        { seq: u64, project: ProjectId, memory: MemoryView }, // project 的記憶整份替換
     Error         { message: String },                  // 指令被拒絕或失敗；不記日誌
 }
 #[derive(Serialize, Deserialize)]
@@ -98,10 +99,16 @@ pub enum ClientCommand {
     DeleteProvider    { id: ProviderId },
     SetActiveProvider { id: ProviderId },
     TestProvider      { request: u64, draft: ProviderDraft }, // 列出模型驗證設定，不儲存
+    SetMemoryModel    { provider: Option<ProviderId>, model: String }, // 整理記憶的模型；None 跟對話相同
+    PinObservation    { project: ProjectId, id: ObservationId, pinned: bool },
+    EditObservation   { project: ProjectId, id: ObservationId, text: String }, // 舊內容保留作稽核
+    DeleteObservation { project: ProjectId, id: ObservationId },
 }
 ```
 
 - 事件日誌：帶 `seq` 的事件寫進事件日誌，`Resume` 時依序補送；`Delta`、`StreamingText`、`LoginUrl`、`ProviderTest`、`Error` 只對當下的連線有意義，不記日誌。API key 只會從客戶端送到服務（`SaveProvider`、`TestProvider`），任何事件都不帶 key，只帶末四碼。登入網址可能帶 `id_token_hint`，所以日誌裡的 `ModelAuth { Pending }` 不存網址，客戶端開瀏覽器只依 `LoginUrl`。
+
+- 記憶：快照裡每個 project 帶著 `MemoryView`；Observer、Reflector 或你的修改讓記憶變了就送一筆 `Memory` 整份替換。觀察的修改被拒絕時，除了 `Error` 也重送一次目前的 `Memory`，客戶端先改的內容會被蓋回去。
 
 - 訊息狀態：人類訊息進入 agent 歷史時（被某一輪接手，或被「停止」清掉），伺服器記一筆 `ItemUpdated`，客戶端據此收掉「排隊中」。
 

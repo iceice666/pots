@@ -12,6 +12,8 @@ M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種�
 
 2. M1 Observational Memory：OM 模組（以觀察紀錄加未觀察的 `om_raw` 尾巴取代完整歷史）、背景 Observer 與 Reflector、記憶面板。驗收：對話累積超過 100k tokens 後，agent 仍能正確回答早期做過的決定。
 
+   狀態：已實作於 `crates/pots-server/src/memory.rs`（加上 `0003_memory.sql`）、協定的 `Memory` 事件與觀察指令、桌面版的「記憶」分頁與設定的「記憶」類別。驗收以假模型的整合測試跑過（`tests/memory.rs`，預設閾值、超過 10 萬 token）；對真的模型用 `cargo run -p pots-server --example om_acceptance` 手動驗證。
+
 3. M2 任務樹：`goals` 、`tasks` 、`task_events` 、`agent_runs` 佇列；`create_goal` 、 `create_task` 、`get_status` 工具；Planner 與 Goal brief 交接；Artifact（Spec、 Brief、Ledger、Report）與編輯面板；狀態面板與 Goal 卡片。
 
 4. M3 Watcher 與等待：connector 介面與事件管線，GitHub 為第一個 connector （webhook 與輪詢備援）、`subscriptions` 、`wait_for` 、喚醒與 sweeper；自我排程與 listener（桌面版以輪詢實作）。
@@ -55,6 +57,8 @@ M5 之前的 merge 一律由你在 GitHub 上手動完成，所以即使核准�
 LLM 層要用 rig 這類 agent 框架，還是自己寫？rig-core 0.46 重寫成 Model／Wire／Transport、agent runtime 拆到 rig-agent，原本依賴的 builder、`ConversationMemory`、`PromptHook` 都不再適用；SIWC 對 Responses 的限制多，rig 重建 `function_call` 時又會丟掉 `namespace`。→ 決定：不用 rig。workspace crate `pots-llm` 提供與模型無關的 `ModelProvider` trait、Responses provider、SIWC 授權與共用的多輪工具迴圈（`agent::run`，以 `Hook` 把關）；其他 API provider 實作 `ModelProvider` 即可接上，之後可重新評估 rig。見[為什麼不用 rig](agent-runtime.md#為什麼不用-rig)。
 
 模型 provider 怎麼設定？原本第一次使用就要求登入 ChatGPT。→ 決定：每個實例在設定視窗（左欄最下方打開，左邊是類別）管理 provider，內建 ChatGPT 方案，另外可以新增 OpenAI 相容（Chat Completions）與 Anthropic 相容（Messages）的 API，選一個「使用中」給對話 agent。API key 存在資料目錄的 `0600` 檔案，客戶端只看得到末四碼；不做 provider 之間的自動 fallback。見[模型 provider 設定](agent-runtime.md#模型-provider-設定)。
+
+整理記憶用哪個模型？→ 決定：設定視窗的「記憶」類別另選 provider 與模型（`instance_settings.memory_provider`、`memory_model`），沒設定時跟對話 agent 相同；刪掉那個 provider 時改回跟對話相同。閾值的 token 數用字元估算（CJK 一字約一個 token、其他約四個字元一個），不加 tokenizer 依賴。記憶面板可以查看、釘選、修正、刪除；修正與刪除是軟性的，舊內容保留作稽核。見[Observational Memory](memory.md)。
 
 手機客戶端與推播。候選是 gpui-mobile 共用 GPUI 介面、輕量 Web 核准頁（PWA 加 Web Push），或原生 Android。→ 決定：原生 Android（Kotlin 加 Jetpack Compose，[`android/`](../android/)），推播用 UnifiedPush，以 ntfy 當 distributor，伺服器端用 VAPID 與 RFC 8291 加密送出，不依賴 FCM；iOS 不在 v1 範圍。見[手機推播](approvals-and-notifications.md#手機推播)。
 

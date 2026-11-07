@@ -163,7 +163,7 @@ let history = vec![Item::User { text: render_brief_and_tree(&goal, &trigger) }];
 agent::run(&planner, history, events, cancel).await?;
 ```
 
-M0 還沒有 OM：對話 agent 的歷史直接取該 project 在 `om_raw` 的全部項目。
+M1 起對話 agent 的歷史由 OM 組成：記憶區塊加上 `om_raw` 裡還沒觀察的尾巴，見[Observational Memory](memory.md)。
 
 ### 執行模型
 
@@ -199,7 +199,7 @@ M0 已依上述約定實作，並對假的 OAuth 與 Responses 伺服器測試�
 
 ### 模型 provider 設定
 
-每個實例在設定視窗管理自己的模型 provider，對話 agent 用「使用中」的那一個。provider 的非秘密設定存在 `model_connections`，使用中的 provider 與 ChatGPT 的模型存在 `instance_settings`；客戶端只看得到 API key 的末四碼。
+每個實例在設定視窗管理自己的模型 provider，對話 agent 用「使用中」的那一個。provider 的非秘密設定存在 `model_connections`，使用中的 provider 與 ChatGPT 的模型存在 `instance_settings`；客戶端只看得到 API key 的末四碼。整理記憶（Observer／Reflector）可以在「記憶」類別另選 provider 與模型，沒設定時跟對話 agent 相同（[Observational Memory](memory.md#整理記憶的模型)）。
 
 | 種類 | 實作 | 端點 | 授權 |
 | --- | --- | --- | --- |

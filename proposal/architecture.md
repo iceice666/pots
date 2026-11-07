@@ -130,8 +130,9 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | --- | --- | --- |
 | `external_events` | 正規化後的外部事件 | `id` , `dedupe_key unique` , `kind` , `payload` , `matched_tasks[]` |
 | `approvals` | 核准請求 | `id` , `task_id` , `action jsonb` , `action_hash` , `state` , `expires_at` , `decided_by` |
-| `om_raw` | agent loop 的原始歷史（人類訊息、模型輸出、工具呼叫與結果） | `project_id` , `seq` , `run_id` , `item` （序列化的 `pots_llm::Item` JSON）, `tokens` , `observed bool` （後兩欄 M1 加入） |
-| `om_observations` | Observer 產出的觀察 | `project_id` , `generation` , `seq` , `date` , `priority` , `text` , `pinned` |
+| `om_raw` | agent loop 的原始歷史（人類訊息、模型輸出、工具呼叫與結果） | `project_id` , `seq` , `run_id` , `item` （序列化的 `pots_llm::Item` JSON）, `tokens` （估計）, `observed bool` （後兩欄 M1 加入） |
+| `om_observations` | Observer、Reflector 產出與你修正的觀察；內容不就地修改，修正是新增一列取代舊的 | `id` , `project_id` , `generation` , `seq` , `date` , `priority` , `text` , `pinned` , `source` （observer ｜ reflector ｜ human）, `state` （active ｜ superseded ｜ deleted）, `replaces` , `through_seq` |
+| `om_state` | 每個 project 的記憶狀態 | `project_id` , `generation` （目前送給模型的一代）, `current_task` , `revision` , `reflected_tokens` , `last_error` |
 | `push_subscriptions` | Android 裝置的 UnifiedPush 訂閱（ntfy endpoint 與 Web Push 加密金鑰） | `user_id` , `device_id` , `endpoint` , `p256dh` , `auth` |
 | `artifacts` | 人與 agent 共同編輯的文件（spec、brief、ledger、 report） | `id, project_id, goal_id?, kind, title, rev, body_md` |
 | `artifact_revisions` | 每次修改的版本與作者，用於 diff 與還原 | `artifact_id, rev, author, body_md, at` |
