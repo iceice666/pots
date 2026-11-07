@@ -63,7 +63,7 @@ pub(crate) struct IdClaims {
 /// token endpoint 失敗的分類。
 #[derive(Debug)]
 pub(crate) enum TokenError {
-    /// refresh token／授權碼已失效，要重新登入。
+    /// refresh token／授權碼已失效（包括 2xx 但讀不到 token），要重新登入。
     Terminal(String),
     /// client 設定錯誤（`invalid_client`）。
     Client(String),
@@ -159,10 +159,15 @@ impl OidcClient {
             })?;
         let status = response.status();
         if status.is_success() {
-            return response
-                .json()
-                .await
-                .map_err(|e| TokenError::Transient(format!("token 回應格式不符：{e}")));
+            // 2xx 代表伺服器已經處理了這個 grant：授權碼已用掉、refresh token 很可能已經輪替作廢。
+            // 讀不到新的 token 就等於失去授權，重試只會拿已作廢的 token 去撞，所以視為需要重新登入。
+            return response.json().await.map_err(|e| {
+                TokenError::Terminal(format!(
+                    "token 回應格式不符（HTTP {}）：{}",
+                    status.as_u16(),
+                    e.without_url()
+                ))
+            });
         }
         let body: Value = response.json().await.unwrap_or(Value::Null);
         let code = body.get("error").and_then(|error| match error {

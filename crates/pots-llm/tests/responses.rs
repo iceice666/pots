@@ -314,6 +314,59 @@ async fn admission_errors_are_classified() {
 }
 
 #[tokio::test]
+async fn rejected_include_is_dropped_and_remembered() {
+    let ok = || Reply::Sse(sse(&[message("ok"), completed(1, 1)]));
+    let fake = FakeResponses::start([
+        Reply::Status(
+            400,
+            json!({"error": {
+                "code": "subscription_sharing_unsupported_capability",
+                "param": "include",
+                "message": "include is not supported"
+            }}),
+        ),
+        ok(),
+        ok(),
+    ])
+    .await;
+    let provider = provider(&fake, StaticTokenSource::new(["t1"]));
+    for _ in 0..2 {
+        let events = collect(&provider, request("x")).await.unwrap();
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Completed { .. }))
+        ));
+    }
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].body["include"],
+        json!(["reasoning.encrypted_content"])
+    );
+    // 拿掉 include 重送一次，之後的請求也不再送。
+    for request in &requests[1..] {
+        assert_siwc_body(&request.body);
+        assert!(request.body.get("include").is_none());
+        assert_eq!(request.body["input"], requests[0].body["input"]);
+    }
+}
+
+#[tokio::test]
+async fn other_unsupported_capability_is_not_retried() {
+    let fake = FakeResponses::start([Reply::Status(
+        400,
+        json!({"error": {"code": "subscription_sharing_unsupported_capability", "param": "tools"}}),
+    )])
+    .await;
+    let provider = provider(&fake, StaticTokenSource::new(["t1"]));
+    assert!(matches!(
+        collect(&provider, request("x")).await.unwrap_err(),
+        LlmError::Unsupported(m) if m.contains("tools")
+    ));
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn cancel_stops_stream() {
     let fake = FakeResponses::start([]).await;
     let provider = provider(&fake, StaticTokenSource::new(["t1"]));

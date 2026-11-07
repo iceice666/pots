@@ -92,6 +92,40 @@ pub(crate) fn authorize_url(
     url
 }
 
+/// 授權 URL 中不該出現在日誌／終端機的參數：身分提示與一次性的交易值。
+const REDACTED_PARAMS: &[&str] = &[
+    "id_token_hint",
+    "login_hint",
+    "state",
+    "nonce",
+    "code_challenge",
+];
+
+/// 把授權 URL 的敏感參數（`id_token_hint`、`login_hint`、`state`、`nonce`、
+/// `code_challenge`）換成 `<redacted>`，給日誌或終端機顯示用。無法解析時整個遮掉。
+/// 要開瀏覽器時仍然用原本的 URL。
+pub fn redact_authorize_url(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url) else {
+        return "<redacted>".into();
+    };
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(key, value)| {
+            let value = if REDACTED_PARAMS.contains(&key.as_ref()) {
+                "<redacted>".to_owned()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect();
+    if !pairs.is_empty() {
+        parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    }
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
 /// 綁 `127.0.0.1`（絕不綁所有介面）。偏好的 port 被占用時改用隨機 port。
 pub(crate) async fn bind_loopback(preferred: Option<u16>) -> Result<TcpListener, LlmError> {
     if let Some(port) = preferred {
@@ -239,5 +273,16 @@ mod tests {
         assert!(!p.contains_key("agent_name_hint"));
         assert_eq!(p["id_token_hint"], "idt");
         assert_eq!(p["login_hint"], "a@b");
+
+        let redacted = redact_authorize_url(url.as_str());
+        for secret in ["idt", "a@b", "a%40b", &code_challenge("ve")] {
+            assert!(!redacted.contains(secret), "{secret} 沒有遮掉：{redacted}");
+        }
+        let p = params(&Url::parse(&redacted).unwrap());
+        assert_eq!(p["client_id"], "oaiapp_1");
+        for key in REDACTED_PARAMS {
+            assert_eq!(p[*key], "<redacted>");
+        }
+        assert_eq!(redact_authorize_url("not a url idt"), "<redacted>");
     }
 }

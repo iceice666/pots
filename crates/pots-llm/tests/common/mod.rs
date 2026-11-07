@@ -52,6 +52,8 @@ pub enum RefreshMode {
     Error(&'static str),
     /// 回 503。
     Unavailable,
+    /// 作廢舊的 refresh token（已輪替），但回一個無法解析的 200。
+    Garbled,
 }
 
 struct CodeGrant {
@@ -73,6 +75,8 @@ pub struct OidcInner {
     pub revoked: Vec<HashMap<String, String>>,
     pub refresh_mode: RefreshMode,
     pub refresh_delay: Duration,
+    /// authorization_code 換 token 前的延遲（模擬換 token 進行中）。
+    pub code_delay: Duration,
     pub granted_scope: String,
     pub expires_in: i64,
 }
@@ -106,6 +110,7 @@ impl FakeOidc {
                 revoked: Vec::new(),
                 refresh_mode: RefreshMode::Ok,
                 refresh_delay: Duration::ZERO,
+                code_delay: Duration::ZERO,
                 granted_scope: FULL_SCOPE.into(),
                 expires_in: 3600,
             }),
@@ -295,13 +300,17 @@ async fn token(
     State(state): State<Arc<OidcState>>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    let (mode, delay) = {
+    let (mode, delay, code_delay) = {
         let mut inner = state.inner.lock().unwrap();
         inner.token_requests.push(form.clone());
         if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
             inner.refresh_calls += 1;
         }
-        (inner.refresh_mode.clone(), inner.refresh_delay)
+        (
+            inner.refresh_mode.clone(),
+            inner.refresh_delay,
+            inner.code_delay,
+        )
     };
     if form.get("resource").map(String::as_str) != Some(RESOURCE)
         || form.contains_key("client_secret")
@@ -310,6 +319,7 @@ async fn token(
     }
     match form.get("grant_type").map(String::as_str) {
         Some("authorization_code") => {
+            tokio::time::sleep(code_delay).await;
             let mut inner = state.inner.lock().unwrap();
             let Some(grant) = inner.codes.remove(&form["code"]) else {
                 return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant");
@@ -336,6 +346,19 @@ async fn token(
                 RefreshMode::Ok => {}
                 RefreshMode::Error(code) => return oauth_error(StatusCode::BAD_REQUEST, code),
                 RefreshMode::Unavailable => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                RefreshMode::Garbled => {
+                    state
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .refresh_tokens
+                        .remove(&form["refresh_token"]);
+                    return (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        "{\"access_token\": ",
+                    )
+                        .into_response();
+                }
             }
             let mut inner = state.inner.lock().unwrap();
             let Some((client_id, sub)) = inner.refresh_tokens.remove(&form["refresh_token"]) else {

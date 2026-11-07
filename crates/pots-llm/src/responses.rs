@@ -15,6 +15,7 @@ mod sse;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -45,6 +46,8 @@ pub struct ResponsesProvider {
     auth: Arc<dyn TokenSource>,
     http: reqwest::Client,
     options: ResponsesOptions,
+    /// 伺服器拒絕過 `include`（見 [`ApiError::rejects_include`]）；之後的請求都不再送。
+    include_rejected: AtomicBool,
 }
 
 impl ResponsesProvider {
@@ -56,6 +59,7 @@ impl ResponsesProvider {
             auth,
             http,
             options: ResponsesOptions::default(),
+            include_rejected: AtomicBool::new(false),
         }
     }
 
@@ -87,6 +91,16 @@ impl ResponsesProvider {
         &self,
         build: impl Fn(&AccessToken) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, LlmError> {
+        self.send_checked(build)
+            .await?
+            .map_err(ApiError::into_llm_error)
+    }
+
+    /// 同 [`Self::send_authorized`]，但非 2xx 時回傳解析過的 [`ApiError`]，讓呼叫端決定要不要重送。
+    async fn send_checked(
+        &self,
+        build: impl Fn(&AccessToken) -> reqwest::RequestBuilder,
+    ) -> Result<Result<reqwest::Response, ApiError>, LlmError> {
         let token = self.auth.access_token().await?;
         let mut response = send(build(&token)).await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -95,10 +109,56 @@ impl ResponsesProvider {
             response = send(build(&token)).await?;
         }
         if response.status().is_success() {
-            Ok(response)
+            Ok(Ok(response))
         } else {
-            Err(http_error(response).await)
+            Ok(Err(api_error(response).await))
         }
+    }
+
+    /// 送出 `POST /responses`。伺服器拒絕 `include` 時拿掉它重送一次，並記住結果：
+    /// `include` 只是要加密的 reasoning 內容，不影響正確性。
+    async fn send_responses(
+        &self,
+        url: &Url,
+        request: &ModelRequest,
+    ) -> Result<reqwest::Response, LlmError> {
+        let mut options = self.options.clone();
+        options.include_encrypted_reasoning &= !self.include_rejected.load(Ordering::Relaxed);
+        let first = self.post_responses(url, request, &options).await?;
+        let error = match first {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        if !(options.include_encrypted_reasoning && error.rejects_include()) {
+            return Err(error.into_llm_error());
+        }
+        self.include_rejected.store(true, Ordering::Relaxed);
+        tracing::info!(
+            code = error.code.as_deref().unwrap_or_default(),
+            request_id = error.request_id.as_deref().unwrap_or_default(),
+            "Responses 不接受 include（reasoning.encrypted_content），拿掉後重送；之後的請求不再送"
+        );
+        options.include_encrypted_reasoning = false;
+        self.post_responses(url, request, &options)
+            .await?
+            .map_err(ApiError::into_llm_error)
+    }
+
+    async fn post_responses(
+        &self,
+        url: &Url,
+        request: &ModelRequest,
+        options: &ResponsesOptions,
+    ) -> Result<Result<reqwest::Response, ApiError>, LlmError> {
+        let body = build_request_body(request, options);
+        self.send_checked(|token| {
+            self.http
+                .post(url.clone())
+                .bearer_auth(&token.0)
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .json(&body)
+        })
+        .await
     }
 }
 
@@ -114,14 +174,7 @@ impl ModelProvider for ResponsesProvider {
         cancel: CancellationToken,
     ) -> Result<EventStream, LlmError> {
         let url = endpoint(&self.base_url, "responses");
-        let body = build_request_body(&request, &self.options);
-        let send = self.send_authorized(|token| {
-            self.http
-                .post(url.clone())
-                .bearer_auth(&token.0)
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .json(&body)
-        });
+        let send = self.send_responses(&url, &request);
         let response = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(LlmError::Cancelled),
@@ -229,7 +282,7 @@ async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, Llm
         .map_err(|error| LlmError::Unavailable(format!("連線失敗：{}", error.without_url())))
 }
 
-async fn http_error(response: reqwest::Response) -> LlmError {
+async fn api_error(response: reqwest::Response) -> ApiError {
     let status = response.status().as_u16();
     let request_id = response
         .headers()
@@ -237,7 +290,7 @@ async fn http_error(response: reqwest::Response) -> LlmError {
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     let body = response.text().await.unwrap_or_default();
-    ApiError::from_http(status, &body, request_id).into_llm_error()
+    ApiError::from_http(status, &body, request_id)
 }
 
 fn parse_models(body: &Value) -> Result<Vec<ModelInfo>, LlmError> {

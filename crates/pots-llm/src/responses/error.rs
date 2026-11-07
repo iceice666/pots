@@ -55,6 +55,24 @@ impl ApiError {
         error
     }
 
+    /// 伺服器是否拒絕了請求的 `include` 欄位（例如 SIWC 的
+    /// `subscription_sharing_unsupported_capability`、`param: "include"`）。
+    pub fn rejects_include(&self) -> bool {
+        let code = matches!(
+            self.code.as_deref(),
+            Some(
+                "subscription_sharing_unsupported_capability"
+                    | "unsupported_parameter"
+                    | "unsupported_value"
+            )
+        );
+        // `param` 可能指到陣列元素，例如 `include[0]`。
+        let param = self.param.as_deref().is_some_and(|param| {
+            param == "include" || param.starts_with("include[") || param.starts_with("include.")
+        });
+        code && param
+    }
+
     fn detail(&self) -> String {
         let mut parts = Vec::new();
         if let Some(status) = self.status {
@@ -176,6 +194,25 @@ mod tests {
         assert_eq!(http(401, json!({"detail": "nope"})), LlmError::NeedsLogin);
         let plain = ApiError::from_http(502, "<html>bad gateway</html>", None).into_llm_error();
         assert!(matches!(plain, LlmError::Unavailable(m) if m.contains("bad gateway")));
+    }
+
+    #[test]
+    fn detects_rejected_include() {
+        let rejects =
+            |body: Value| ApiError::from_http(400, &body.to_string(), None).rejects_include();
+        assert!(rejects(
+            json!({"error": {"code": "subscription_sharing_unsupported_capability", "param": "include"}})
+        ));
+        assert!(rejects(
+            json!({"error": {"code": "unsupported_value", "param": "include[0]"}})
+        ));
+        assert!(!rejects(
+            json!({"error": {"code": "subscription_sharing_unsupported_capability", "param": "tools"}})
+        ));
+        assert!(!rejects(
+            json!({"error": {"code": "invalid_prompt", "param": "include"}})
+        ));
+        assert!(!rejects(json!({"detail": "include"})));
     }
 
     #[test]

@@ -25,6 +25,7 @@ use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+pub use self::login::redact_authorize_url;
 use self::login::{LoginHints, LoginTransaction};
 use self::oidc::{Discovery, OidcClient, TokenError, TokenResponse, issuer_string};
 pub use self::store::{CREDENTIALS_FILE, FileCredentialStore, load_or_create_host_id};
@@ -81,8 +82,8 @@ impl SiwcConfig {
 /// 登入狀態。不含 access／refresh token，可以送給 UI。
 ///
 /// [`AuthStatus::Pending`] 的 URL 在回流登入時含 `id_token_hint`（使用者身分資訊），
-/// 只用來開瀏覽器，不要寫進日誌。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// 只用來開瀏覽器，不要寫進日誌。`Debug` 只印遮蔽過的 URL（見 [`redact_authorize_url`]）。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthStatus {
     SignedOut,
     /// 等使用者在瀏覽器完成登入。
@@ -98,6 +99,24 @@ pub enum AuthStatus {
     Error {
         message: String,
     },
+}
+
+impl std::fmt::Debug for AuthStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignedOut => f.write_str("SignedOut"),
+            Self::Pending { url } => f
+                .debug_struct("Pending")
+                .field("url", &redact_authorize_url(url))
+                .finish(),
+            Self::SignedIn { email, plan_usage } => f
+                .debug_struct("SignedIn")
+                .field("email", email)
+                .field("plan_usage", plan_usage)
+                .finish(),
+            Self::Error { message } => f.debug_struct("Error").field("message", message).finish(),
+        }
+    }
 }
 
 /// 目前有效的 access token。`Debug` 不印出內容。
@@ -132,6 +151,7 @@ pub trait CredentialStore: Send + Sync {
 pub struct StoredCredentials {
     pub issuer: String,
     /// issued client ID（`oaiapp_...`）；登出後仍保留，下次登入沿用。
+    /// 空字串代表沒有可沿用的註冊，下次登入用 [`DYNAMIC_CLIENT_ID`] 重新註冊。
     pub client_id: String,
     /// 驗證過的 ID token `sub`，帳號身分以它為準（不是 email）。
     pub subject: Option<String>,
@@ -199,6 +219,17 @@ impl StoredCredentials {
         self.access_token = None;
         self.refresh_token = None;
         self.expires_at = None;
+    }
+
+    /// 丟掉 issued client ID 與帳號對應（保留 issuer），下次登入重新註冊。
+    fn forget_registration(&mut self) {
+        self.clear_tokens();
+        self.client_id.clear();
+        self.subject = None;
+        self.email = None;
+        self.scopes.clear();
+        self.id_token = None;
+        self.earliest_refresh_at = None;
     }
 }
 
@@ -309,7 +340,10 @@ impl SiwcAuth {
     /// 首次註冊拿到 issued client ID 但換 token 失敗時先記住它，下次登入沿用、不重新註冊。
     async fn remember_client_id(&self, issuer: &str, client_id: &str) {
         let mut session = self.session.lock().await;
-        if session.is_some() {
+        if session
+            .as_ref()
+            .is_some_and(|credentials| !credentials.client_id.is_empty())
+        {
             return;
         }
         let credentials = StoredCredentials {
@@ -431,7 +465,7 @@ impl SiwcAuth {
                 continue;
             }
             let result = self
-                .complete_login(&discovery, &transaction, &request.params)
+                .complete_login(&discovery, &transaction, &request.params, &cancel)
                 .await;
             let reply = match &result {
                 Ok(()) => (
@@ -446,16 +480,25 @@ impl SiwcAuth {
             let _ = request.reply.send(reply);
             break match result {
                 Ok(()) => LoginEnd::SignedIn,
+                // 換 token 時被取消或登出：complete_login 已經丟掉（並撤銷）新的 token。
+                Err(_) if cancel.is_cancelled() => LoginEnd::Cancelled,
                 Err(message) => LoginEnd::Failed(message),
             };
         };
         // 停掉 listener（已回覆的頁面會先送完）。
         cancel.cancel();
 
+        // 整段持有 login 鎖：跟 `start_login` 設定 Pending 的順序一致。
         let mut active = self.login.lock().await;
-        if active.as_ref().is_some_and(|login| login.id == id) {
-            *active = None;
+        let still_current = active.as_ref().is_some_and(|login| login.id == id);
+        if !still_current {
+            // 取消後已經開了新的登入：狀態屬於新的流程，不能蓋掉它的 Pending。
+            if let LoginEnd::Failed(message) = end {
+                tracing::info!(%message, "舊的 ChatGPT 登入流程結束");
+            }
+            return;
         }
+        *active = None;
         match end {
             LoginEnd::SignedIn => {}
             LoginEnd::Cancelled => {
@@ -475,6 +518,7 @@ impl SiwcAuth {
         discovery: &Discovery,
         transaction: &LoginTransaction,
         params: &std::collections::HashMap<String, String>,
+        cancel: &CancellationToken,
     ) -> Result<(), String> {
         if let Some(error) = params.get("error") {
             return Err(if error == "access_denied" {
@@ -527,24 +571,73 @@ impl SiwcAuth {
                 });
             }
         };
+        let issued_refresh = tokens.refresh_token.clone();
+        let result = self
+            .accept_tokens(discovery, transaction, &client_id, tokens, cancel)
+            .await;
+        if result.is_err()
+            && let Some(refresh_token) = issued_refresh
+        {
+            // 新發的 token 沒有被採用：撤銷它，不留下沒人管的授權（盡力而為）。
+            self.revoke_discarded(&client_id, &refresh_token).await;
+        }
+        result
+    }
+
+    /// 驗證換來的 token 並保存。回錯誤時這組 token 沒有被採用，由呼叫端撤銷。
+    async fn accept_tokens(
+        &self,
+        discovery: &Discovery,
+        transaction: &LoginTransaction,
+        client_id: &str,
+        tokens: TokenResponse,
+        cancel: &CancellationToken,
+    ) -> Result<(), String> {
         let id_token = tokens.id_token.clone().ok_or("token 回應沒有 ID token")?;
         let claims = self
             .oidc
-            .verify_id_token(discovery, &id_token, &client_id, Some(&transaction.nonce))
+            .verify_id_token(discovery, &id_token, client_id, Some(&transaction.nonce))
             .await
             .map_err(|error| error.to_string())?;
+
+        let mut session = self.session.lock().await;
+        // 換 token 的期間可能已經取消或登出（`logout` 會先取消登入、再拿 session 鎖），
+        // 這時不能再存下新的 token。
+        if cancel.is_cancelled() {
+            return Err("登入已取消".into());
+        }
         if transaction
             .previous_subject
             .as_ref()
             .is_some_and(|previous| *previous != claims.sub)
         {
-            return Err("登入的帳號與這個註冊原本的帳號不同；請改用原帳號登入".into());
+            if session
+                .as_ref()
+                .is_some_and(StoredCredentials::is_signed_in)
+            {
+                // 回流登入的保護：還有 token 時不能被別的帳號取代。
+                return Err(
+                    "登入的帳號與目前登入的帳號不同；請改用原帳號登入，或先登出再換帳號".into(),
+                );
+            }
+            // 已登出、換了帳號：issued client ID 綁定原本選的使用者／workspace，不能給別的帳號沿用。
+            // 這次先拒絕，並丟掉舊的註冊，下次「開始登入」會用 dynamic_agent_client 重新註冊。
+            if let Some(credentials) = session
+                .as_mut()
+                .filter(|credentials| credentials.client_id == client_id)
+            {
+                credentials.forget_registration();
+                self.persist(credentials).await;
+            }
+            return Err("選擇的帳號與這個 Pots 原本註冊的帳號不同。已清除舊的註冊，\
+                        請重新開始登入，以這個帳號重新註冊"
+                .into());
         }
 
         let now = now_secs();
         let mut credentials = StoredCredentials {
             issuer: discovery.issuer.clone(),
-            client_id,
+            client_id: client_id.to_owned(),
             subject: Some(claims.sub),
             email: claims.email,
             scopes: Vec::new(),
@@ -558,7 +651,6 @@ impl SiwcAuth {
         if !credentials.plan_usage() {
             tracing::warn!("登入成功，但沒有授予 {PLAN_USAGE_SCOPE}；無法使用 ChatGPT plan 推論");
         }
-        let mut session = self.session.lock().await;
         self.store
             .save(&credentials)
             .await
@@ -586,6 +678,16 @@ impl SiwcAuth {
         let result = self.store.save(credentials).await;
         self.set_status(AuthStatus::SignedOut);
         result.map(|()| outcome)
+    }
+
+    /// 撤銷沒有被採用的新 refresh token；失敗只記錄。
+    async fn revoke_discarded(&self, client_id: &str, refresh_token: &str) {
+        match self.revoke(client_id, refresh_token).await {
+            LogoutOutcome::LocalOnly { reason } => {
+                tracing::warn!(%reason, "無法撤銷沒有採用的 refresh token");
+            }
+            _ => tracing::info!("已撤銷沒有採用的 refresh token"),
+        }
     }
 
     async fn revoke(&self, client_id: &str, refresh_token: &str) -> LogoutOutcome {

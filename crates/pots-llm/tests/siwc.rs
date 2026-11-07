@@ -208,8 +208,111 @@ async fn returning_login_with_other_account_is_rejected() {
     assert_eq!(reqwest::get(callback).await.unwrap().status(), 400);
     let status = wait_status(&auth, |s| matches!(s, AuthStatus::Error { .. })).await;
     assert!(matches!(status, AuthStatus::Error { message } if message.contains("帳號")));
-    // 原本的憑證沒被取代。
-    assert_eq!(h.stored().await.access_token.as_deref(), Some("at-seed"));
+    // 原本的憑證沒被取代，註冊也還在。
+    let stored = h.stored().await;
+    assert_eq!(stored.access_token.as_deref(), Some("at-seed"));
+    assert_eq!(stored.client_id, ISSUED_CLIENT_ID);
+    assert_eq!(stored.subject.as_deref(), Some("user-1"));
+    // 別的帳號新發的 refresh token 已撤銷；原本的還有效。
+    let revoked = h.fake.with(|inner| inner.revoked.clone());
+    assert_eq!(revoked.len(), 1);
+    assert_ne!(revoked[0]["token"], "rt-seed");
+    assert!(!h.fake.is_refresh_token_valid(&revoked[0]["token"]));
+    assert!(h.fake.is_refresh_token_valid("rt-seed"));
+}
+
+#[tokio::test]
+async fn other_account_after_logout_resets_registration() {
+    let h = Harness::new().await;
+    h.seed(3600).await;
+    let auth = h.open().await;
+    assert_eq!(auth.logout().await.unwrap(), LogoutOutcome::Revoked);
+
+    // 登出後在帳號選擇頁選了別的帳號：這次拒絕，但丟掉綁定舊帳號的 issued client。
+    let url = auth.start_login().await.unwrap();
+    assert_eq!(query(&url)["client_id"], ISSUED_CLIENT_ID);
+    let callback = h.fake.approve(&url, "someone-else", "x@example.com");
+    assert_eq!(reqwest::get(callback).await.unwrap().status(), 400);
+    let status = wait_status(&auth, |s| matches!(s, AuthStatus::Error { .. })).await;
+    assert!(matches!(status, AuthStatus::Error { message } if message.contains("重新註冊")));
+    let stored = h.stored().await;
+    assert_eq!(stored.client_id, "");
+    assert_eq!(stored.subject, None);
+    assert_eq!(stored.email, None);
+    assert_eq!(stored.refresh_token, None);
+    // 新發的 refresh token 沒有被採用，已撤銷。
+    let revoked = h.fake.with(|inner| inner.revoked.clone());
+    assert_eq!(revoked.len(), 2);
+    assert!(!h.fake.is_refresh_token_valid(&revoked[1]["token"]));
+
+    // 下一次登入重新註冊，新帳號可以完成。
+    let url = auth.start_login().await.unwrap();
+    let params = query(&url);
+    assert_eq!(params["client_id"], DYNAMIC_CLIENT_ID);
+    assert_eq!(params["agent_name_hint"], "Pots");
+    assert!(!params.contains_key("id_token_hint"));
+    assert!(!params.contains_key("login_hint"));
+    let callback = h.fake.approve(&url, "someone-else", "x@example.com");
+    assert_eq!(reqwest::get(callback).await.unwrap().status(), 200);
+    wait_status(&auth, |s| matches!(s, AuthStatus::SignedIn { .. })).await;
+    let stored = h.stored().await;
+    assert_eq!(stored.client_id, ISSUED_CLIENT_ID);
+    assert_eq!(stored.subject.as_deref(), Some("someone-else"));
+    assert_eq!(stored.email.as_deref(), Some("x@example.com"));
+}
+
+#[tokio::test]
+async fn logout_during_code_exchange_discards_new_tokens() {
+    let h = Harness::new().await;
+    let auth = h.open().await;
+    let url = auth.start_login().await.unwrap();
+    let callback = h.fake.approve(&url, "user-1", "u@example.com");
+    h.fake
+        .with(|inner| inner.code_delay = Duration::from_millis(300));
+    let browser = tokio::spawn(reqwest::get(callback));
+    // 等到換 token 的請求已經送出。
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.fake.with(|inner| inner.token_requests.is_empty()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    auth.logout().await.unwrap();
+    assert_eq!(browser.await.unwrap().unwrap().status(), 400);
+
+    // 登出贏：新的 token 沒有被存下，而且已撤銷。
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(*auth.status().borrow(), AuthStatus::SignedOut);
+    assert_eq!(auth.access_token().await.unwrap_err(), LlmError::NeedsLogin);
+    let stored = h.store().load().await.unwrap();
+    assert!(stored.is_none_or(|stored| stored.refresh_token.is_none()));
+    let revoked = h.fake.with(|inner| inner.revoked.clone());
+    assert_eq!(revoked.len(), 1);
+    assert!(!h.fake.is_refresh_token_valid(&revoked[0]["token"]));
+}
+
+#[tokio::test]
+async fn pending_status_debug_hides_url_secrets() {
+    let h = Harness::new().await;
+    h.seed(3600).await;
+    let auth = h.open().await;
+    // 登入一次，讓下一次的 URL 帶 id_token_hint。
+    let url = auth.start_login().await.unwrap();
+    let callback = h.fake.approve(&url, "user-1", "u@example.com");
+    assert_eq!(reqwest::get(callback).await.unwrap().status(), 200);
+    wait_status(&auth, |s| matches!(s, AuthStatus::SignedIn { .. })).await;
+
+    let url = auth.start_login().await.unwrap();
+    let params = query(&url);
+    assert!(params.contains_key("id_token_hint"));
+    let debug = format!("{:?}", *auth.status().borrow());
+    assert!(debug.starts_with("Pending"), "{debug}");
+    for key in ["id_token_hint", "state", "nonce", "code_challenge"] {
+        assert!(!debug.contains(&params[key]), "{key} 出現在 Debug 裡");
+    }
+    assert!(!debug.contains("u@example.com") && !debug.contains("u%40example.com"));
+    assert!(debug.contains("client_id="));
 }
 
 #[tokio::test]
@@ -292,6 +395,33 @@ async fn login_timeout_and_cancel() {
     // 取消後可以重新開始，而且是新的交易。
     let second = auth.start_login().await.unwrap();
     assert_ne!(query(&first)["state"], query(&second)["state"]);
+}
+
+#[tokio::test]
+async fn cancel_then_immediate_restart_keeps_new_pending() {
+    let h = Harness::new().await;
+    let auth = h.open().await;
+    for _ in 0..20 {
+        auth.start_login().await.unwrap();
+        auth.cancel_login().await;
+        // 不等舊的流程收尾就開新的：舊的結束時不能蓋掉新的 Pending。
+        let url = auth.start_login().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            *auth.status().borrow(),
+            AuthStatus::Pending { url: url.clone() }
+        );
+        auth.cancel_login().await;
+        wait_status(&auth, |s| *s == AuthStatus::SignedOut).await;
+    }
+
+    // 新的流程仍可以完成。
+    auth.start_login().await.unwrap();
+    auth.cancel_login().await;
+    let url = auth.start_login().await.unwrap();
+    let callback = h.fake.approve(&url, "user-1", "u@example.com");
+    assert_eq!(reqwest::get(callback).await.unwrap().status(), 200);
+    wait_status(&auth, |s| matches!(s, AuthStatus::SignedIn { .. })).await;
 }
 
 #[tokio::test]
@@ -381,6 +511,25 @@ async fn terminal_refresh_error_needs_login_but_transient_keeps_credentials() {
     assert_eq!(stored.access_token, None);
     assert_eq!(stored.client_id, ISSUED_CLIENT_ID);
     // 之後直接回 NeedsLogin，不再打 token endpoint。
+    let calls = h.fake.with(|inner| inner.refresh_calls);
+    assert_eq!(auth.access_token().await.unwrap_err(), LlmError::NeedsLogin);
+    assert_eq!(h.fake.with(|inner| inner.refresh_calls), calls);
+}
+
+#[tokio::test]
+async fn garbled_refresh_success_needs_login() {
+    let h = Harness::new().await;
+    h.seed(-10).await;
+    let auth = h.open().await;
+    h.fake
+        .with(|inner| inner.refresh_mode = RefreshMode::Garbled);
+    // 2xx 但讀不到 token：舊的 refresh token 多半已經輪替，不能當成暫時失敗一直重試。
+    assert_eq!(auth.access_token().await.unwrap_err(), LlmError::NeedsLogin);
+    assert!(matches!(*auth.status().borrow(), AuthStatus::Error { .. }));
+    let stored = h.stored().await;
+    assert_eq!(stored.refresh_token, None);
+    assert_eq!(stored.access_token, None);
+    assert_eq!(stored.client_id, ISSUED_CLIENT_ID);
     let calls = h.fake.with(|inner| inner.refresh_calls);
     assert_eq!(auth.access_token().await.unwrap_err(), LlmError::NeedsLogin);
     assert_eq!(h.fake.with(|inner| inner.refresh_calls), calls);

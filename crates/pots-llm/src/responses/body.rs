@@ -22,6 +22,7 @@ pub struct ResponsesOptions {
     /// 新版 openai-python 的型別說明提到 `POST /v1/responses` 預設就會帶 `encrypted_content`，
     /// 且要用 `response.output_item.done` 的完整 item 回送；若 SIWC 拒絕 `include`，關掉這個
     /// 選項應該不影響正確性。關閉時只是不送 `include`；回送與否只看 item 有沒有加密內容。
+    /// [`super::ResponsesProvider`] 被拒絕 `include` 時會自動拿掉它重送一次，之後不再送。
     ///
     /// 回送時拿掉 reasoning item 的 `id`：`store: false` 時伺服器沒有保存該項目，帶 `id` 可能被
     /// 當成引用而失敗（Codex 也不序列化這個欄位）。

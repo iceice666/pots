@@ -13,8 +13,8 @@
 //! - `--logout`：撤銷 refresh token、清掉本機 token（保留 issued client ID 與 Host ID）。
 //!
 //! 流程：載入／建立 Host ID 與憑證 → 沒登入就開瀏覽器登入（macOS 用 `open`）→ 列出模型 →
-//! 串流一句招呼 → 用 `get_time` 工具做一次工具往返。不會印出任何 token；回流登入的
-//! 授權 URL 含 ID token 提示，只印遮蔽過的版本。
+//! 串流一句招呼 → 用 `get_time` 工具做一次工具往返。不會印出任何 token；授權 URL 只在
+//! 瀏覽器打不開、必須手動開啟時才完整印出（且不含 ID token 提示），其他地方只印遮蔽過的版本。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ use pots_llm::agent::{self, AgentEvent, AllowAll, RunConfig, Tool, ToolError};
 use pots_llm::responses::{DEFAULT_BASE_URL, ResponsesProvider};
 use pots_llm::siwc::{
     AuthStatus, FileCredentialStore, SiwcAuth, SiwcConfig, load_or_create_host_id,
+    redact_authorize_url,
 };
 use pots_llm::{Item, ModelProvider, ModelRequest, StreamEvent, ToolSpec};
 use tokio_util::sync::CancellationToken;
@@ -174,14 +175,11 @@ async fn sign_in(auth: &Arc<SiwcAuth>) -> Result<(), BoxError> {
     let has_hint = Url::parse(&url)?
         .query_pairs()
         .any(|(key, _)| key == "id_token_hint");
-    let opened = open_browser(&url);
-    if !has_hint {
-        println!("請在瀏覽器完成登入：\n{url}");
-    } else if opened {
-        println!(
-            "已在瀏覽器開啟登入頁（URL 含身分提示，不印出）：{}",
-            redact(&url)?
-        );
+    if open_browser(&url) {
+        println!("已在瀏覽器開啟登入頁：{}", redact_authorize_url(&url));
+    } else if !has_hint {
+        // 只有這裡必須印出完整 URL：使用者要自己開。
+        println!("無法開啟瀏覽器，請手動開啟下列網址完成登入：\n{url}");
     } else {
         return Err(
             "無法開啟瀏覽器，而登入 URL 含 ID token 提示不便印出；請先 --logout 再試".into(),
@@ -210,23 +208,6 @@ fn open_browser(url: &str) -> bool {
         .arg(url)
         .status()
         .is_ok_and(|status| status.success())
-}
-
-fn redact(url: &str) -> Result<String, BoxError> {
-    let mut parsed = Url::parse(url)?;
-    let pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .map(|(key, value)| {
-            let value = if key == "id_token_hint" {
-                "<redacted>".to_owned()
-            } else {
-                value.into_owned()
-            };
-            (key.into_owned(), value)
-        })
-        .collect();
-    parsed.query_pairs_mut().clear().extend_pairs(pairs);
-    Ok(parsed.to_string())
 }
 
 /// 回傳現在的 UTC 時間（HH:MM:SS）。
