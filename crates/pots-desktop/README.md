@@ -1,6 +1,6 @@
 # pots-desktop
 
-Pots 桌面客戶端（GPUI + GPUI Kit）。目前只有 UI，資料是假的，還沒接上任何服務。畫面依 [`ui/`](../../ui/) 的設計稿實作，行為依 [`proposal/ux-and-frontend.md`](../../proposal/ux-and-frontend.md)。
+Pots 桌面客戶端（GPUI + GPUI Kit）。目前只有 UI，資料是假的，還沒接上任何服務。畫面與行為依 [`proposal/ux-and-frontend.md`](../../proposal/ux-and-frontend.md)。
 
 ## 執行
 
@@ -34,9 +34,9 @@ Artifact 的編輯與自動化的開關、刪除、恢復只改本地狀態：�
 ## 結構
 
 - `src/model.rs`：view model 與即時協定（`ServerEvent`、`ClientCommand`），型別依 `proposal/architecture.md` 命名。`Store` 是客戶端的整體狀態，使用者動作會把要送出的指令記在 `Store::outbox`。
-- `src/mock.rs`：假資料，內容取自設計稿。
+- `src/mock.rs`：假資料。
 - `src/app.rs`：根視圖 `PotsApp`，持有 `Store` 與 UI 狀態（目前畫面、右欄、篩選、輸入框）。
-- `src/views/`：各區塊的 render；`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`widgets.rs` 是依設計稿手刻的小元件，`theme.rs` 是色票。
+- `src/views/`：各區塊的 render；`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`widgets.rs` 是手刻的小元件，`theme.rs` 是色票。
 
 ## 驗證
 

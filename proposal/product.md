@@ -42,7 +42,7 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 | 文件 | 內容 |
 | --- | --- |
 | [部署形態與多實例並存](deployment.md) | 桌面版與多設備版、後端設定、客戶端多連線、project 移交 |
-| [使用體驗與前端](ux-and-frontend.md) | 對話、狀態面板、參考 UI、GPUI 客戶端與即時協定 |
+| [使用體驗與前端](ux-and-frontend.md) | 對話、狀態面板、介面配置、GPUI 客戶端與即時協定 |
 | [系統架構與資料模型](architecture.md) | 架構圖、核心型別、資料表與技術選型 |
 | [Agent 執行層](agent-runtime.md) | 角色分工、rig 工具、執行模型與 Worker adapter |
 | [Agent Loop 與協作模型](agent-collaboration.md) | 統一 loop、profile、快速修改、subagent 與 team |
@@ -53,6 +53,6 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 | [核准流程與通知](approvals-and-notifications.md) | Approval 生命週期、核准政策與推播 |
 | [安全、預算與可觀測性](security-and-operations.md) | 身分驗證、沙箱、預算限制、trace 與成本報表 |
 | [里程碑與設計決策](roadmap-and-decisions.md) | M0–M8、已決定事項與待確認事項 |
-| [參考資料](references.md) | 專案內 UI 設計稿與 rig、Mastra、Amp、官方 provider 授權文件 |
+| [參考資料](references.md) | GPUI 與 rig、Mastra、Amp、官方 provider 授權文件 |
 
-建議先閱讀「使用體驗與前端」與「系統架構與資料模型」，再按主題查閱細節；實作順序與待確認事項見「里程碑與設計決策」。參考 UI 位於 [`ui/`](../ui/)，可直接開啟[畫面總覽](../ui/index.html)，或查看[預覽說明](../ui/README.md)。
+建議先閱讀「使用體驗與前端」與「系統架構與資料模型」，再按主題查閱細節；實作順序與待確認事項見「里程碑與設計決策」。桌面客戶端的畫面見 [`crates/pots-desktop/`](../crates/pots-desktop/)。

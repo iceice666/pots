@@ -108,7 +108,7 @@ worker 讀自己的 worktree；其他 profile 讀的是每個 repo 預設分支�
 
 4. 同一個 repo 同時有多個快速修改時各自開 PR，不合併，方便逐一核准與回退。
 
-5. 輸入框旁可以直接選「快速修改」或「開 Goal」，覆蓋對話 agent 的判斷。
+5. 在輸入框用 `/fix` 或 `/goal` 開頭，可以直接指定快速修改或開 Goal，覆蓋對話 agent 的判斷。
 
 ### 主 agent、subagent 與 team
 
@@ -188,5 +188,5 @@ pub enum TeamPost {
 
 - 沉澱。 Goal 結束時，Planner 把有長期價值的 Finding 整理成 Project Notes 提案。
 
-- 和對話的關係。 team 貼文不進 OM，對話裡只看得到 Planner 轉出的里程碑；你想看細節時在 Goal 的狀態面板裡看。
+- 和對話的關係。 team 貼文不進 OM，對話裡只看得到 Planner 轉出的里程碑；你想看細節時在 Goal 面板的 Team 分頁裡看。
 

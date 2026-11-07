@@ -55,5 +55,5 @@ pub fn write(a: &Artifact, base_rev: u32, edits: Vec<Edit>) -> WriteResult {
 
 - Planner 的 context 是 Brief 與 Ledger 兩份 artifact 加上任務樹快照，不讀對話。
 
-- 桌面客戶端用 `gpui-kit-markdown-editor` 所見即所得編輯，以 Markdown 讀寫，與 artifact 的儲存格式一致（見[前端](ux-and-frontend.md#前端)）。checkbox 可以直接勾選；你編輯時若 agent 正在寫同一份，面板會顯示「agent 正在更新此文件」。
+- 桌面客戶端用 `gpui-kit-markdown-editor` 所見即所得編輯，以 Markdown 讀寫，與 artifact 的儲存格式一致（見[前端](ux-and-frontend.md#前端)）。checkbox 可以直接勾選。編輯器以 `##` 標題區段為單位：你改過的區段會標出時間；agent 正在寫入時，面板頂端顯示「agent 正在更新某段落」，那個區段暫時唯讀，其他區段照常可以編輯。
 

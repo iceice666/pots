@@ -2,11 +2,6 @@
 
 [← 產品提案索引](product.md)
 
-## 參考 UI
-
-- 專案內的 [`ui/`](../ui/)：靜態 UI 設計稿，作為畫面配置與視覺呈現的參考，不代表功能已實作。
-- [畫面總覽](../ui/index.html)與[預覽說明](../ui/README.md)。各畫面對應見[使用體驗與前端：參考 UI](ux-and-frontend.md#參考-ui)。
-
 ## 前端
 
 - [GPUI（Zed）](https://github.com/zed-industries/zed/tree/main/crates/gpui)

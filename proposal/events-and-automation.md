@@ -116,7 +116,7 @@ pub fn wakes(cond: &WaitCond, ev: &ExternalEvent) -> bool {
 
 - 游標：每個 source 在 `sources.cursor` 記錄輪詢進度，重啟後接續；IMAP 用 UIDVALIDITY 加 UID。
 
-- connector 健康狀態：token 過期、連線斷線、連續輪詢失敗時，狀態面板標示該 source 異常並推播通知，不會默默停止收事件。
+- connector 健康狀態：token 過期、連線斷線、連續輪詢失敗時，自動化頁標示該 source 異常並推播通知，不會默默停止收事件。
 
 - 不可信內容：`body` 一律包在 `Untrusted<T>` 裡，送進 agent 時標明來源與信任等級。
 
@@ -163,7 +163,7 @@ pub struct Schedule {
 
 - 上限。 週期排程最短間隔 10 分鐘，每個 project 最多 10 個，總管的全域排程另計、最多 10 個；每次觸發計入預算。週期排程預設 30 天後過期，可由你延長。
 
-- 透明。 agent 建立排程時對話裡出現一張卡片；狀態面板有「排程」分頁，可以暫停、刪除、改時間。
+- 透明。 agent 建立排程時對話裡出現一張卡片；左欄「排程」進入的自動化頁與 project 頻道的「自動化」分頁都列出排程，可以停用、刪除、改時間。
 
 - 桌面版的錯過觸發。 電腦睡眠期間錯過的觸發，醒來後每個排程只補跑一次，不逐次補。
 
