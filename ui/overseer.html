@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>總管對話</title>
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/ui.css">
+</head>
+<body>
+<div class="ui-001">
+
+<nav aria-label="工作區" class="ui-002">
+<div class="ui-003">
+<span class="ui-004">我的工作區</span>
+<span class="ui-005">單機</span>
+</div>
+<a href="overseer.html" aria-current="page" class="ui-009">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg>
+<span>總管</span>
+</a>
+<a href="inbox.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg>
+<span>Inbox</span>
+<span class="ui-007">3</span>
+</a>
+<div class="ui-008">專案</div>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>auth-service</span>
+<span class="ui-007">1</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>web-app</span>
+<span class="ui-010">需要你</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>infra</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>docs-site</span>
+</a>
+<div class="ui-008">自動化</div>
+<a href="automations.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+<span>排程</span>
+<span class="ui-011">已暫停</span>
+</a>
+<a href="automations.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 13a8 8 0 0 1 16 0"></path><path d="M8 13a4 4 0 0 1 8 0"></path><circle cx="12" cy="13" r="1"></circle></svg>
+<span>Listener</span>
+<span class="ui-011">已暫停</span>
+</a>
+<div class="ui-012">
+<div aria-hidden="true" class="ui-013">你</div>
+<span class="ui-014">你</span>
+<span class="ui-011">localhost</span>
+</div>
+</nav>
+
+<main class="ui-015">
+<header class="ui-211">
+<span aria-hidden="true" class="ui-212">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg>
+</span>
+<div class="ui-133">
+<h1 class="ui-018">總管</h1>
+<span class="ui-044">看得到所有專案，派工只會在某個專案開 Goal</span>
+</div>
+<span class="ui-213"><span aria-hidden="true" class="ui-214"></span>閒置</span>
+</header>
+
+<div class="ui-026">
+<div class="ui-027"><span class="ui-028"></span><span>今天</span><span class="ui-028"></span></div>
+
+<div class="ui-029">
+<div aria-hidden="true" class="ui-215"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg></div>
+<div class="ui-037">
+<div class="ui-032"><span class="ui-033">總管</span><span class="ui-034">08:30 · 每日排程</span></div>
+<div class="ui-216">
+<div class="ui-217">早安摘要</div>
+<div class="ui-218">
+<div class="ui-219"><span class="ui-220"># auth-service</span><span class="ui-081">OAuth 登入遷移 · 2 進行中 · 1 待你核准</span></div>
+<div class="ui-219"><span class="ui-220"># web-app</span><span class="ui-221">結帳頁改版 · CI 卡住，需要你決定</span></div>
+<div class="ui-219"><span class="ui-220"># infra</span><span class="ui-081">沒有進行中的 Goal</span></div>
+<div class="ui-222"><span class="ui-220"># docs-site</span><span class="ui-081">1 個排程今晚執行</span></div>
+</div>
+<div class="ui-223">上游 LLM provider 昨晚的事故已解決，沒有任務受影響。</div>
+</div>
+</div>
+</div>
+
+<div class="ui-029">
+<div aria-hidden="true" class="ui-030">你</div>
+<div class="ui-031">
+<div class="ui-032"><span class="ui-033">你</span><span class="ui-034">09:12</span></div>
+<p class="ui-035">上週那個 500 錯誤的調查在哪個專案？</p>
+</div>
+</div>
+
+<div class="ui-029">
+<div aria-hidden="true" class="ui-215"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg></div>
+<div class="ui-037">
+<div class="ui-032"><span class="ui-033">總管</span><span class="ui-034">09:12</span></div>
+<button type="button" aria-expanded="false" class="ui-039">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+搜尋了 4 個專案的歷史
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m9 6 6 6-6 6"></path></svg>
+</button>
+<p class="ui-035">在 # infra，Goal「API 偶發 500 調查」，11/2 已完成。結論是資料庫連線池上限太小，後來調高了。完整報告在這裡：</p>
+<a href="artifact.html" class="ui-224">
+<span class="ui-154">REPORT</span>
+<span class="ui-042"><span class="ui-043">API 偶發 500 調查</span><span class="ui-044"># infra · 11/2</span></span>
+<span class="ui-045">開啟</span>
+</a>
+</div>
+</div>
+
+<div class="ui-029">
+<div aria-hidden="true" class="ui-030">你</div>
+<div class="ui-031">
+<div class="ui-032"><span class="ui-033">你</span><span class="ui-034">09:15</span></div>
+<p class="ui-035">web-app 那個 flaky test 交給它修。</p>
+</div>
+</div>
+
+<div class="ui-029">
+<div aria-hidden="true" class="ui-215"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg></div>
+<div class="ui-037">
+<div class="ui-032"><span class="ui-033">總管</span><span class="ui-034">09:15</span></div>
+<p class="ui-035">好，已在 # web-app 開了 Goal，原本卡住的任務也一併取消。之後的進度會在 web-app 頻道裡。</p>
+<a href="channel.html" class="ui-225">
+<span class="ui-226">
+<span class="ui-227"># web-app</span>
+<span class="ui-048">GOAL</span>
+<span class="ui-033">修好 checkout 的不穩定測試</span>
+</span>
+<span class="ui-044">由總管建立 · Planner 規劃中</span>
+</a>
+</div>
+</div>
+
+<div class="ui-029">
+<div aria-hidden="true" class="ui-030">你</div>
+<div class="ui-031">
+<div class="ui-032"><span class="ui-033">你</span><span class="ui-034">09:20</span></div>
+<p class="ui-035">週末所有排程和 listener 都先暫停，週一再開。</p>
+</div>
+</div>
+
+<div class="ui-029">
+<div aria-hidden="true" class="ui-215"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg></div>
+<div class="ui-037">
+<div class="ui-032"><span class="ui-033">總管</span><span class="ui-034">09:20</span></div>
+<div class="ui-228">
+<div class="ui-229">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5 9-10"></path></svg>
+已暫停 3 個排程、2 個 listener
+</div>
+<div class="ui-183">週一 09:00 自動恢復。暫停期間錯過的觸發不會補跑。</div>
+<div class="ui-064">
+<a href="automations.html" class="ui-230">查看清單</a>
+<button type="button" class="ui-231">立即恢復</button>
+</div>
+</div>
+</div>
+</div>
+</div>
+
+<form class="ui-070">
+<label for="composer" class="ui-071">問總管任何專案的事</label>
+<textarea id="composer" rows="2" placeholder="問總管任何專案的事" class="ui-072"></textarea>
+<div class="ui-073">
+<span class="ui-044">用 # 指定專案 · /pause 暫停自動化 · /summary 摘要</span>
+<button type="submit" aria-label="送出" class="ui-077">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 12 20 4l-6 16-3-7z"></path></svg>
+</button>
+</div>
+</form>
+</main>
+
+<aside aria-label="專案概況與記憶" class="ui-232">
+<section class="ui-233">
+<h2 class="ui-234">專案概況</h2>
+<a href="channel.html" class="ui-235">
+<span class="ui-236"><span class="ui-043"># auth-service</span><span class="ui-237"><span aria-hidden="true" class="ui-238"></span>等待 CI</span></span>
+<span class="ui-044">1 個 Goal · 1 件待核准</span>
+</a>
+<a href="channel.html" class="ui-239">
+<span class="ui-236"><span class="ui-043"># web-app</span><span class="ui-240"><span aria-hidden="true" class="ui-111"></span>規劃中</span></span>
+<span class="ui-044">2 個 Goal · 1 件需要你處理</span>
+</a>
+<a href="channel.html" class="ui-235">
+<span class="ui-236"><span class="ui-043"># infra</span><span class="ui-241"><span aria-hidden="true" class="ui-214"></span>閒置</span></span>
+<span class="ui-044">沒有進行中的 Goal</span>
+</a>
+<a href="channel.html" class="ui-235">
+<span class="ui-236"><span class="ui-043"># docs-site</span><span class="ui-241"><span aria-hidden="true" class="ui-214"></span>閒置</span></span>
+<span class="ui-044">排程暫停到週一</span>
+</a>
+</section>
+<section class="ui-233">
+<div class="ui-236">
+<h2 class="ui-234">總管記得的事</h2>
+<button type="button" class="ui-242">全部 24 條</button>
+</div>
+<ul class="ui-243">
+<li class="ui-125"><span class="ui-244">高</span><span>週末不希望被排程打擾，週一早上再恢復。</span></li>
+<li class="ui-125"><span class="ui-244">高</span><span>web-app 的 e2e 測試常不穩定，修之前先確認是不是 flaky。</span></li>
+<li class="ui-125"><span class="ui-245">中</span><span>早安摘要只要一段，不用逐條列出 CI 結果。</span></li>
+</ul>
+</section>
+</aside>
+
+</div>
+</body>
+</html>

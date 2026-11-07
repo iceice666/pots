@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自動化管理</title>
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/ui.css">
+</head>
+<body>
+<div class="ui-001">
+
+<nav aria-label="工作區" class="ui-002">
+<div class="ui-003">
+<span class="ui-004">我的工作區</span>
+<span class="ui-005">單機</span>
+</div>
+<a href="overseer.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg>
+<span>總管</span>
+</a>
+<a href="inbox.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg>
+<span>Inbox</span>
+<span class="ui-007">3</span>
+</a>
+<div class="ui-008">專案</div>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>auth-service</span>
+<span class="ui-007">1</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>web-app</span>
+<span class="ui-010">需要你</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>infra</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>docs-site</span>
+</a>
+<div class="ui-008">自動化</div>
+<a href="automations.html" aria-current="page" class="ui-009">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+<span>排程與 Listener</span>
+</a>
+<div class="ui-012">
+<div aria-hidden="true" class="ui-013">你</div>
+<span class="ui-014">你</span>
+<span class="ui-011">localhost</span>
+</div>
+</nav>
+
+<main class="ui-246">
+<header class="ui-247">
+<div class="ui-100">
+<h1 class="ui-174">自動化</h1>
+<p class="ui-175">agent 建立的排程，和讓事件自動開工的 listener。每次觸發都計入預算。</p>
+</div>
+<div class="ui-157">
+<label for="project-filter" class="ui-071">篩選專案</label>
+<select id="project-filter" class="ui-248">
+<option>所有專案</option>
+<option>auth-service</option>
+<option>web-app</option>
+<option>infra</option>
+<option>docs-site</option>
+</select>
+<button type="button" class="ui-249">新增 listener</button>
+</div>
+</header>
+
+<div role="status" class="ui-250">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="7" y="5" width="3" height="14" rx="1"></rect><rect x="14" y="5" width="3" height="14" rx="1"></rect></svg>
+<span class="ui-137">全部暫停到週一 09:00</span>
+<span>由總管在 09:20 依你的要求暫停，錯過的觸發不會補跑。</span>
+<button type="button" class="ui-251">立即恢復</button>
+</div>
+
+<section class="ui-252">
+<div class="ui-032">
+<h2 class="ui-253">排程</h2>
+<span class="ui-044">3 個 · 每個專案最多 10 個，最短間隔 10 分鐘</span>
+</div>
+<div class="ui-254">
+<table class="ui-255">
+<thead>
+<tr class="ui-256">
+<th scope="col" class="ui-257">要做什麼</th>
+<th scope="col" class="ui-257">專案</th>
+<th scope="col" class="ui-257">建立者</th>
+<th scope="col" class="ui-257">頻率</th>
+<th scope="col" class="ui-257">下一次</th>
+<th scope="col" class="ui-257">啟用</th>
+</tr>
+</thead>
+<tbody>
+<tr class="ui-258">
+<td class="ui-259"><div class="ui-137">整理前一天失敗的 CI</div><div class="ui-034">30 天後過期</div></td>
+<td class="ui-259"># infra</td>
+<td class="ui-260">對話 agent</td>
+<td class="ui-259">每天 08:00</td>
+<td class="ui-261">週一 08:00 後恢復</td>
+<td class="ui-259"><button type="button" role="switch" aria-checked="true" aria-label="啟用：整理前一天失敗的 CI" class="ui-262"><span aria-hidden="true" class="ui-263"></span></button></td>
+</tr>
+<tr class="ui-258">
+<td class="ui-259"><div class="ui-137">提醒移除 legacy_login feature flag</div><div class="ui-034">單次</div></td>
+<td class="ui-259"># auth-service</td>
+<td class="ui-260">Planner</td>
+<td class="ui-259">單次</td>
+<td class="ui-259">11/10 10:00</td>
+<td class="ui-259"><button type="button" role="switch" aria-checked="true" aria-label="啟用：提醒移除 legacy_login feature flag" class="ui-262"><span aria-hidden="true" class="ui-263"></span></button></td>
+</tr>
+<tr class="ui-258">
+<td class="ui-259"><div class="ui-137">檢查文件站建置與壞掉的連結</div><div class="ui-034">30 天後過期</div></td>
+<td class="ui-259"># docs-site</td>
+<td class="ui-260">對話 agent</td>
+<td class="ui-259">每晚 22:00</td>
+<td class="ui-261">週一 22:00 後恢復</td>
+<td class="ui-259"><button type="button" role="switch" aria-checked="true" aria-label="啟用：檢查文件站建置與壞掉的連結" class="ui-262"><span aria-hidden="true" class="ui-263"></span></button></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section class="ui-264">
+<div class="ui-032">
+<h2 class="ui-253">Listener</h2>
+<span class="ui-044">2 個啟用 · 1 個待核准</span>
+</div>
+<div class="ui-254">
+<table class="ui-255">
+<thead>
+<tr class="ui-256">
+<th scope="col" class="ui-257">條件 → 動作</th>
+<th scope="col" class="ui-257">專案</th>
+<th scope="col" class="ui-257">來源 · 信任</th>
+<th scope="col" class="ui-257">本週觸發</th>
+<th scope="col" class="ui-257">每次上限</th>
+<th scope="col" class="ui-257">狀態</th>
+</tr>
+</thead>
+<tbody>
+<tr class="ui-265">
+<td class="ui-259"><div class="ui-137">issue 加上 agent label → 開 Goal</div></td>
+<td class="ui-259"># auth-service</td>
+<td class="ui-259">GitHub · Members</td>
+<td class="ui-259">2 次</td>
+<td class="ui-259">$2</td>
+<td class="ui-259"><span class="ui-266">暫停到週一</span></td>
+</tr>
+<tr class="ui-258">
+<td class="ui-259"><div class="ui-137">上游 LLM 狀態頁出現重大事故 → 通知對話</div></td>
+<td class="ui-259">所有專案</td>
+<td class="ui-259">狀態頁 · Public</td>
+<td class="ui-259">1 次</td>
+<td class="ui-259">—</td>
+<td class="ui-259"><span class="ui-266">暫停到週一</span></td>
+</tr>
+<tr class="ui-258">
+<td class="ui-259"><div class="ui-137">main 分支 CI 失敗 → 開 Goal 修復</div></td>
+<td class="ui-259"># infra</td>
+<td class="ui-259">GitHub · Owned</td>
+<td class="ui-259">—</td>
+<td class="ui-259">$2</td>
+<td class="ui-259"><a href="inbox.html" class="ui-267">待你核准</a></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</main>
+
+<aside aria-label="Listener 詳情" class="ui-268">
+<div class="ui-269">
+<div class="ui-100">
+<span class="ui-129">LISTENER · # auth-service</span>
+<h2 class="ui-270">issue 加上 agent label → 開 Goal</h2>
+</div>
+<button type="button" aria-label="關閉面板" class="ui-271">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+</button>
+</div>
+
+<section class="ui-272">
+<h3 class="ui-273">條件</h3>
+<div class="ui-274">
+<span class="ui-081">來源</span><span>GitHub · 個人帳號</span>
+<span class="ui-081">資源</span><span class="ui-134">github.com/me/auth-service</span>
+<span class="ui-081">事件</span><span>Issue 被加上 label</span>
+<span class="ui-081">比對</span><span>label = agent</span>
+</div>
+</section>
+
+<section class="ui-272">
+<h3 class="ui-273">動作</h3>
+<div>開 Goal，Brief 用以下模板：</div>
+<div class="ui-275">依照 issue 的描述實作，先在 Brief 補上驗收條件；需求不清楚時在 Team 貼文發問，不要猜。</div>
+<div class="ui-274">
+<span class="ui-081">每次上限</span><span>$2</span>
+<span class="ui-081">頻率上限</span><span>每小時最多 2 次</span>
+</div>
+</section>
+
+<section class="ui-233">
+<h3 class="ui-273">觸發紀錄</h3>
+<a href="channel.html" class="ui-276">
+<span class="ui-125"><span class="ui-137">#118 → 支援 refresh token</span><span class="ui-277">完成</span></span>
+<span class="ui-034">11/5 · 花費 $1.40</span>
+</a>
+<a href="channel.html" class="ui-276">
+<span class="ui-125"><span class="ui-137">#112 → 錯誤訊息改成中文</span><span class="ui-278">進行中</span></span>
+<span class="ui-034">11/3 · 目前 $0.60</span>
+</a>
+</section>
+
+<div class="ui-279">
+<button type="button" class="ui-280">編輯條件</button>
+<button type="button" class="ui-280">停用</button>
+<button type="button" class="ui-281">刪除</button>
+</div>
+</aside>
+
+</div>
+</body>
+</html>

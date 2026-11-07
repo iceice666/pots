@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inbox</title>
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/ui.css">
+</head>
+<body>
+<div class="ui-001">
+
+<nav aria-label="工作區" class="ui-002">
+<div class="ui-003">
+<span class="ui-004">我的工作區</span>
+<span class="ui-005">單機</span>
+</div>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg>
+<span>總管</span>
+</a>
+<a href="inbox.html" aria-current="page" class="ui-009">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg>
+<span>Inbox</span>
+<span class="ui-007">3</span>
+</a>
+<div class="ui-008">專案</div>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>auth-service</span>
+<span class="ui-007">1</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>web-app</span>
+<span class="ui-010">需要你</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>infra</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>docs-site</span>
+</a>
+<div class="ui-012">
+<div aria-hidden="true" class="ui-013">你</div>
+<span class="ui-014">你</span>
+<span class="ui-011">localhost</span>
+</div>
+</nav>
+
+<main class="ui-172">
+<header class="ui-173">
+<div class="ui-100">
+<h1 class="ui-174">Inbox</h1>
+<p class="ui-175">需要你決定的事。一般進度不會出現在這裡。</p>
+</div>
+<div role="tablist" aria-label="篩選" class="ui-064">
+<button type="button" role="tab" aria-selected="true" class="ui-176">全部 4</button>
+<button type="button" role="tab" aria-selected="false" class="ui-177">核准 2</button>
+<button type="button" role="tab" aria-selected="false" class="ui-177">需要你處理 1</button>
+<button type="button" role="tab" aria-selected="false" class="ui-177">找你的訊息 1</button>
+</div>
+</header>
+
+<div class="ui-178">
+
+<article class="ui-179">
+<div class="ui-180">
+<span class="ui-181">核准</span>
+<span class="ui-137"># auth-service</span>
+<span class="ui-081">· OAuth 登入遷移</span>
+<span class="ui-182">2 分鐘前</span>
+</div>
+<div class="ui-049">Merge PR #42 到 main</div>
+<div class="ui-183">後端 OAuth callback · CI 12 / 12 通過 · +182 −40</div>
+<div class="ui-064">
+<button type="button" class="ui-065">核准</button>
+<button type="button" class="ui-066">拒絕</button>
+<a href="channel.html" class="ui-184">在頻道中查看</a>
+</div>
+</article>
+
+<article class="ui-179">
+<div class="ui-180">
+<span class="ui-181">核准</span>
+<span class="ui-137"># infra</span>
+<span class="ui-081">· 新的 listener</span>
+<span class="ui-182">1 小時前</span>
+</div>
+<div class="ui-049">main 分支 CI 失敗時，自動開 Goal 修復</div>
+<div class="ui-185">
+<span>來源：GitHub</span>
+<span>信任等級：Owned</span>
+<span>每次上限 $2</span>
+<span>每小時最多 2 次</span>
+</div>
+<div class="ui-064">
+<button type="button" class="ui-065">核准</button>
+<button type="button" class="ui-066">拒絕</button>
+<button type="button" class="ui-067">修改條件</button>
+</div>
+</article>
+
+<article class="ui-186">
+<div class="ui-180">
+<span class="ui-187">需要你處理</span>
+<span class="ui-137"># web-app</span>
+<span class="ui-081">· 結帳頁改版</span>
+<span class="ui-182">3 小時前</span>
+</div>
+<div class="ui-049">CI 連續失敗 3 次，已停止自動修復</div>
+<div class="ui-183">agent 判斷可能是不穩定的測試：e2e/checkout.spec.ts，3 次失敗的位置都不同。</div>
+<div class="ui-064">
+<button type="button" class="ui-065">再試一次</button>
+<button type="button" class="ui-066">看 thread</button>
+<button type="button" class="ui-188">取消任務</button>
+</div>
+</article>
+
+<article class="ui-179">
+<div class="ui-180">
+<span class="ui-189">找你</span>
+<span class="ui-137">總管</span>
+<span class="ui-182">今天 08:30</span>
+</div>
+<div class="ui-049">早安摘要</div>
+<div class="ui-183">2 個 Goal 進行中，1 件需要你處理。上游 LLM provider 昨晚的事故已解決，沒有任務受影響。</div>
+<div class="ui-064">
+<a href="channel.html" class="ui-190">開啟總管</a>
+</div>
+</article>
+
+</div>
+</main>
+
+</div>
+</body>
+</html>

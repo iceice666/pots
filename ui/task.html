@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker 任務 thread</title>
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/ui.css">
+</head>
+<body>
+<div class="ui-001">
+
+<nav aria-label="工作區" class="ui-002">
+<div class="ui-003">
+<span class="ui-004">我的工作區</span>
+<span class="ui-005">單機</span>
+</div>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m15.5 8.5-2 5-5 2 2-5z"></path></svg>
+<span>總管</span>
+</a>
+<a href="inbox.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-6l-2 3h-4l-2-3H2"></path><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg>
+<span>Inbox</span>
+<span class="ui-007">3</span>
+</a>
+<div class="ui-008">專案</div>
+<a href="channel.html" aria-current="page" class="ui-009">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>auth-service</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>web-app</span>
+<span class="ui-010">需要你</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>infra</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 9h14M5 15h14M10 3 8 21M16 3l-2 18"></path></svg>
+<span>docs-site</span>
+</a>
+<div class="ui-008">自動化</div>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+<span>排程</span>
+<span class="ui-011">3</span>
+</a>
+<a href="channel.html" class="ui-006">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 13a8 8 0 0 1 16 0"></path><path d="M8 13a4 4 0 0 1 8 0"></path><circle cx="12" cy="13" r="1"></circle></svg>
+<span>Listener</span>
+<span class="ui-011">2</span>
+</a>
+<div class="ui-012">
+<div aria-hidden="true" class="ui-013">你</div>
+<span class="ui-014">你</span>
+<span class="ui-011">localhost</span>
+</div>
+</nav>
+
+<main class="ui-109">
+<header class="ui-016">
+<div class="ui-017">
+<h1 class="ui-018"># auth-service</h1>
+<span class="ui-110"><span aria-hidden="true" class="ui-111"></span>閒置</span>
+<span class="ui-021">本週預算 $4.20 / $20</span>
+</div>
+<div role="tablist" aria-label="頻道分頁" class="ui-112">
+<button type="button" role="tab" aria-selected="true" class="ui-024">對話</button>
+<button type="button" role="tab" aria-selected="false" class="ui-025">Goals 2</button>
+<button type="button" role="tab" aria-selected="false" class="ui-025">Artifacts 5</button>
+<button type="button" role="tab" aria-selected="false" class="ui-025">自動化 3</button>
+</div>
+</header>
+<div class="ui-113">
+<div class="ui-029">
+<div aria-hidden="true" class="ui-036">A</div>
+<div class="ui-037">
+<div class="ui-032"><span class="ui-033">auth-service agent</span><span class="ui-034">10:22</span></div>
+<p class="ui-035">好，已經照你改過的 spec 開了 Goal，Planner 拆成 4 個任務。</p>
+<a href="channel.html" class="ui-114">
+<span class="ui-047">
+<span class="ui-048">GOAL</span>
+<span class="ui-049">OAuth 登入遷移</span>
+</span>
+<span class="ui-054">
+<span class="ui-055">2 進行中</span>
+<span class="ui-056">1 等待 CI</span>
+<span class="ui-057">1 完成</span>
+</span>
+</a>
+</div>
+</div>
+</div>
+<form class="ui-115">
+<label for="composer" class="ui-071">傳訊息給 auth-service agent</label>
+<input id="composer" type="text" placeholder="傳訊息給 auth-service agent" class="ui-116">
+<button type="submit" aria-label="送出" class="ui-117">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 12 20 4l-6 16-3-7z"></path></svg>
+</button>
+</form>
+</main>
+
+<aside aria-label="任務：後端 OAuth callback" class="ui-118">
+<div class="ui-119">
+<div class="ui-120">
+<a href="channel.html" class="ui-121">OAuth 登入遷移</a>
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5c6370" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m9 6 6 6-6 6"></path></svg>
+<span class="ui-082">後端 OAuth callback</span>
+<button type="button" aria-label="關閉面板" class="ui-083">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+</button>
+</div>
+<div class="ui-122">
+<span class="ui-123"><span aria-hidden="true" class="ui-111"></span>進行中</span>
+<span>worker · Claude Code</span>
+<span aria-hidden="true">·</span>
+<span class="ui-124">agent/t31-oauth-callback</span>
+<span aria-hidden="true">·</span>
+<span>12 分鐘 · $0.84</span>
+</div>
+<div class="ui-125">
+<button type="button" class="ui-126">看 diff</button>
+<button type="button" class="ui-126">看 trace</button>
+<button type="button" class="ui-127">取消任務</button>
+</div>
+</div>
+
+<div class="ui-128">
+<div class="ui-129">進度</div>
+<ol class="ui-130">
+<li class="ui-131">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="ui-132"><path d="M5 12l5 5 9-10"></path></svg>
+<span class="ui-133"><span>讀了 session 模組與 3 個相關檔案</span><span class="ui-034">10:24</span></span>
+</li>
+<li class="ui-131">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="ui-132"><path d="M5 12l5 5 9-10"></path></svg>
+<span class="ui-133"><span>新增 <code class="ui-134">src/auth/oauth.rs</code></span><span class="ui-034">10:29</span></span>
+</li>
+<li class="ui-131">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="ui-132"><path d="M5 12l5 5 9-10"></path></svg>
+<span class="ui-133"><span><code class="ui-134">cargo test auth::oauth</code> 3 個通過</span><span class="ui-034">10:33</span></span>
+</li>
+<li class="ui-131">
+<span aria-hidden="true" class="ui-135"><span class="ui-136"></span></span>
+<span class="ui-133"><span class="ui-137">補 callback 的錯誤處理與測試</span><span class="ui-034">進行中</span></span>
+</li>
+</ol>
+
+<div class="ui-138">這個任務的對話</div>
+<div class="ui-139">
+<div aria-hidden="true" class="ui-140">你</div>
+<div class="ui-133">
+<div class="ui-032"><span class="ui-141">你</span><span class="ui-034">10:36</span></div>
+<p class="ui-142">state 參數記得驗證，存在 session 裡。</p>
+</div>
+</div>
+<div class="ui-139">
+<div aria-hidden="true" class="ui-143">W</div>
+<div class="ui-133">
+<div class="ui-032"><span class="ui-141">worker · 後端 OAuth callback</span><span class="ui-034">10:38</span></div>
+<p class="ui-142">收到。已加上 state 驗證，並補了一個 CSRF 的測試案例。</p>
+</div>
+</div>
+</div>
+
+<form class="ui-144">
+<div class="ui-145">
+<label for="worker-note" class="ui-071">直接對這個 worker 說話</label>
+<input id="worker-note" type="text" placeholder="直接對這個 worker 說話" class="ui-146">
+<button type="submit" aria-label="送出" class="ui-108">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 12 20 4l-6 16-3-7z"></path></svg>
+</button>
+</div>
+<span class="ui-034">訊息只送給這個 worker，Planner 會在 Ledger 看到摘要。</span>
+</form>
+</aside>
+
+</div>
+</body>
+</html>
