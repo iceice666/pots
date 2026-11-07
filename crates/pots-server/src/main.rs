@@ -6,15 +6,12 @@
 //!
 //! 預設資料目錄是平台的資料目錄（macOS：`~/Library/Application Support/pots`）。
 //! 連線資訊（位址與 token）寫在資料目錄的 `server.json`，不會出現在日誌裡。
+//! 模型用 ChatGPT 方案（SIWC 授權），`POTS_CHAT_MODEL` 可指定模型 slug。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
-use pots_llm::{EventStream, LlmError, ModelProvider, ModelRequest};
-use pots_server::{Config, Deps, Error, FakeModelAuth};
-use tokio_util::sync::CancellationToken;
-use tracing_subscriber::EnvFilter;
+use pots_server::{Config, Error};
 
 const USAGE: &str = "用法：pots-server [--data-dir <路徑>] [--port <port>]";
 
@@ -51,31 +48,9 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args { data_dir, port })
 }
 
-/// 還沒接上 ChatGPT（SIWC）時的 provider：每次推論都回「需要登入」。
-struct NotSignedIn;
-
-#[async_trait::async_trait]
-impl ModelProvider for NotSignedIn {
-    fn name(&self) -> &str {
-        "unconfigured"
-    }
-
-    async fn stream(
-        &self,
-        _request: ModelRequest,
-        _cancel: CancellationToken,
-    ) -> Result<EventStream, LlmError> {
-        Err(LlmError::NeedsLogin)
-    }
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    pots_server::service::init_tracing();
 
     let args = match parse_args() {
         Ok(a) => a,
@@ -88,16 +63,11 @@ async fn main() -> ExitCode {
         }
     };
 
-    // TODO(parent)：接上真正的 SIWC：用 `pots_llm` 從 data_dir 載入 host ID、建立 SiwcAuth
-    // 與 ResponsesProvider，再把 SiwcAuth 包成 `ModelAuthControl`。在那之前推論一律回
-    // 「需要登入」，登入按鈕只會顯示假的網址。
-    let deps = Deps {
-        provider: Arc::new(NotSignedIn),
-        model: "gpt-5".into(),
-        model_auth: Arc::new(FakeModelAuth::signed_out()),
-    };
+    let model = std::env::var("POTS_CHAT_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty());
     let config = Config::desktop(&args.data_dir).with_port(args.port);
-    match pots_server::run_until_signal(config, deps).await {
+    match pots_server::service::run(config, model).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(Error::AlreadyRunning(info)) => {
             match info {

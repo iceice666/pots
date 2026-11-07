@@ -25,13 +25,13 @@ use pots_proto::{
     AgentRole, AgentState, Author, ItemId, ModelAuthView, Msg, MsgStatus, ProjectId, ServerEvent,
     StreamItemKind, StreamItemView, StreamScope, Timestamp, ToolSummary,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::Error;
-use crate::hub::Hub;
+use crate::hub::{Hub, LogTxn};
 use crate::store::{ItemStatus, ProjectRow, RunState, Store};
 
 /// Agent profile。M0 只有 chat，之後改成設定檔（`profiles/*.toml`）。
@@ -89,6 +89,8 @@ struct Inner {
     store: Store,
     provider: Arc<dyn ModelProvider>,
     model: String,
+    /// 模型授權控制的狀態，用來在 run 成功後校正 hub 裡的授權狀態。
+    auth_status: watch::Receiver<ModelAuthView>,
     lanes: Mutex<HashMap<ProjectId, Lane>>,
     tracker: TaskTracker,
     shutdown: CancellationToken,
@@ -105,6 +107,7 @@ impl Runs {
         store: Store,
         provider: Arc<dyn ModelProvider>,
         model: String,
+        auth_status: watch::Receiver<ModelAuthView>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -112,6 +115,7 @@ impl Runs {
                 store,
                 provider,
                 model,
+                auth_status,
                 lanes: Mutex::new(HashMap::new()),
                 tracker: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
@@ -221,20 +225,40 @@ async fn consume_without_run(
     project: ProjectId,
     triggers: &[Trigger],
 ) -> Result<(), Error> {
-    let mut tx = inner.store.begin().await?;
+    let mut txn = inner.hub.begin().await?;
     for t in triggers {
-        Store::append_om_raw(
-            &mut tx,
-            project,
-            None,
-            &Item::User {
-                text: t.text.clone(),
-            },
-        )
-        .await?;
-        Store::mark_consumed(&mut tx, t.item, None).await?;
+        consume(&mut txn, project, t.item, &t.text, None).await?;
     }
-    tx.commit().await?;
+    txn.commit().await
+}
+
+/// 人類訊息進入原始歷史：寫 `om_raw`、標成已處理，並記一筆 `ItemUpdated`，
+/// 讓客戶端清掉「排隊中」的標示。
+pub(crate) async fn consume(
+    txn: &mut LogTxn<'_>,
+    project: ProjectId,
+    item: ItemId,
+    text: &str,
+    run_id: Option<Uuid>,
+) -> Result<(), Error> {
+    Store::append_om_raw(
+        txn.conn(),
+        project,
+        run_id,
+        &Item::User {
+            text: text.to_string(),
+        },
+    )
+    .await?;
+    Store::mark_consumed(txn.conn(), item, run_id).await?;
+    if let Some(view) = Store::item(txn.conn(), item).await? {
+        txn.push(|seq| ServerEvent::ItemUpdated {
+            seq,
+            scope: StreamScope::Project(project),
+            item: view,
+        })
+        .await?;
+    }
     Ok(())
 }
 
@@ -348,16 +372,7 @@ async fn run_chat(
         });
         Store::insert_run(txn.conn(), run_id, project, profile.name, &trigger).await?;
         for t in &batch {
-            Store::append_om_raw(
-                txn.conn(),
-                project,
-                Some(run_id),
-                &Item::User {
-                    text: t.text.clone(),
-                },
-            )
-            .await?;
-            Store::mark_consumed(txn.conn(), t.item, Some(run_id)).await?;
+            consume(&mut txn, project, t.item, &t.text, Some(run_id)).await?;
         }
         let view = reply.view(MsgStatus::Streaming);
         Store::insert_item(
@@ -431,10 +446,34 @@ async fn run_chat(
         }
     };
 
+    let finished = finish(
+        inner,
+        &reply,
+        run_id,
+        &result,
+        (status, item_status, run_state, error.as_deref()),
+    )
+    .await;
+    if let Err(e) = finished {
+        tracing::error!(%project, error = %e, "無法記錄 run 的結束，改用最少的收尾");
+        abandon(inner, &mut reply).await;
+    }
+    Ok(())
+}
+
+/// 記錄 run 結束：訊息最後內容、`agent_runs`、授權狀態校正、`AgentState { Idle }`。
+async fn finish(
+    inner: &Inner,
+    reply: &Reply,
+    run_id: Uuid,
+    result: &Result<RunOutcome, RunError>,
+    (status, item_status, run_state, error): (MsgStatus, ItemStatus, RunState, Option<&str>),
+) -> Result<(), Error> {
+    let project = reply.project;
     let mut txn = inner.hub.begin().await?;
     let view = reply.view(status);
     Store::update_item(txn.conn(), &view, item_status).await?;
-    Store::finish_run(txn.conn(), run_id, run_state, error.as_deref()).await?;
+    Store::finish_run(txn.conn(), run_id, run_state, error).await?;
     let scope = reply.scope();
     txn.push(|seq| ServerEvent::ItemDone {
         seq,
@@ -445,10 +484,11 @@ async fn run_chat(
     if matches!(result, Err(RunError::Llm(LlmError::NeedsLogin)))
         && !matches!(
             txn.state().model_auth,
-            ModelAuthView::SignedOut | ModelAuthView::Error { .. }
+            ModelAuthView::SignedOut | ModelAuthView::Pending { .. } | ModelAuthView::Error { .. }
         )
     {
         // provider 說要登入但授權狀態還是「已登入」：讓客戶端看到需要重新登入。
+        // 登入流程進行中（Pending）時不蓋掉，網址還要留給客戶端。
         txn.push(|seq| ServerEvent::ModelAuth {
             seq,
             state: ModelAuthView::Error {
@@ -457,14 +497,54 @@ async fn run_chat(
         })
         .await?;
     }
+    if result.is_ok() {
+        // 推論成功代表授權可用：之前因 NeedsLogin 標成錯誤的話，改回授權控制的實際狀態。
+        let current = inner.auth_status.borrow().clone();
+        if txn.state().model_auth != current {
+            txn.push(|seq| ServerEvent::ModelAuth {
+                seq,
+                state: current,
+            })
+            .await?;
+        }
+    }
     txn.push(|seq| ServerEvent::AgentState {
         seq,
         project,
         state: AgentState::Idle,
     })
     .await?;
-    txn.commit().await?;
-    Ok(())
+    txn.commit().await
+}
+
+/// `finish` 失敗時的收尾：再試一次只記訊息失敗與閒置；還是不行就只改記憶體狀態。
+async fn abandon(inner: &Inner, reply: &mut Reply) {
+    let project = reply.project;
+    reply.append_note("（伺服器內部錯誤，回覆未完成）");
+    let view = reply.view(MsgStatus::Failed);
+    let logged: Result<(), Error> = async {
+        let mut txn = inner.hub.begin().await?;
+        Store::update_item(txn.conn(), &view, ItemStatus::Failed).await?;
+        let scope = reply.scope();
+        txn.push(|seq| ServerEvent::ItemDone {
+            seq,
+            scope,
+            item: view,
+        })
+        .await?;
+        txn.push(|seq| ServerEvent::AgentState {
+            seq,
+            project,
+            state: AgentState::Idle,
+        })
+        .await?;
+        txn.commit().await
+    }
+    .await;
+    if let Err(e) = logged {
+        tracing::error!(%project, error = %e, "無法記錄 run 失敗，只清除記憶體裡的串流狀態");
+        inner.hub.abandon(project, reply.id).await;
+    }
 }
 
 enum RunError {
@@ -621,7 +701,8 @@ fn close_dangling_calls(history: Vec<Item>) -> Vec<Item> {
 fn explain(e: &LlmError) -> String {
     match e {
         LlmError::NeedsLogin => {
-            "（需要先登入 ChatGPT 才能回覆。請在設定中完成登入後再傳一次訊息。）".into()
+            "（需要先登入 ChatGPT 才能回覆。請在 Inbox 按「開始登入」，完成後再傳一次訊息。）"
+                .into()
         }
         LlmError::NotEntitled(m) => format!("（這個 ChatGPT 帳號不能用來推論：{m}）"),
         LlmError::UsageLimit => "（ChatGPT plan 的額度已用完，請稍後再試。）".into(),

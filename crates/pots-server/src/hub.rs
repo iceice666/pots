@@ -210,6 +210,14 @@ impl Hub {
         })
     }
 
+    /// 寫不進日誌時的最後手段：只在記憶體裡結束串流、把 agent 狀態設回閒置，
+    /// 讓之後的快照正確（已連線的客戶端要等重連才會看到）。
+    pub async fn abandon(&self, project: ProjectId, item: ItemId) {
+        let mut state = self.state.lock().await;
+        state.agent_states.insert(project, AgentState::Idle);
+        self.streaming.lock().unwrap().remove(&item);
+    }
+
     /// 模型授權狀態有變時寫一筆 `ModelAuth`；`force` 時即使相同也寫（啟動時用）。
     pub async fn set_model_auth(&self, view: ModelAuthView, force: bool) -> Result<(), Error> {
         let mut txn = self.begin().await?;
@@ -261,7 +269,13 @@ impl LogTxn<'_> {
         Ok(())
     }
 
-    pub async fn commit(mut self) -> Result<(), Error> {
+    pub async fn commit(self) -> Result<(), Error> {
+        self.commit_then(|| ()).await
+    }
+
+    /// commit 並廣播後、釋放日誌鎖前執行 `then`。用來讓後續動作（例如把訊息排進 run）
+    /// 的順序和事件序號一致。
+    pub async fn commit_then<T>(mut self, then: impl FnOnce() -> T) -> Result<T, Error> {
         self.tx.commit().await?;
         let mut streaming = self.hub.streaming.lock().unwrap();
         for (seq, json, ev) in self.pending {
@@ -299,6 +313,9 @@ impl LogTxn<'_> {
                 done,
             });
         }
-        Ok(())
+        drop(streaming);
+        let out = then();
+        drop(self.state);
+        Ok(out)
     }
 }

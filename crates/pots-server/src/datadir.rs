@@ -138,7 +138,7 @@ fn private_file_options() -> OpenOptions {
     opts
 }
 
-fn create_private_dir(path: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {

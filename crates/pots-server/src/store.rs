@@ -12,11 +12,11 @@ use pots_proto::{
     Author, InstanceId, ItemId, ProjectId, ServerEvent, StreamItemKind, StreamItemView, Timestamp,
 };
 use serde::Serialize;
+use sqlx::Row;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePool, SqlitePoolOptions,
     SqliteSynchronous,
 };
-use sqlx::{Connection, Row};
 use uuid::Uuid;
 
 use crate::Error;
@@ -110,8 +110,11 @@ impl Store {
         self.pool.close().await;
     }
 
+    /// 寫入用的 transaction。一律 `BEGIN IMMEDIATE`：一開始就拿寫入鎖（拿不到時依
+    /// busy_timeout 等待）。預設的 deferred transaction 先讀後寫時，若另一條連線正在寫，
+    /// WAL 下讀鎖升級會直接回 SQLITE_BUSY，busy_timeout 也救不了。
     pub async fn begin(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, Error> {
-        Ok(self.pool.begin().await?)
+        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
     }
 
     // -----------------------------------------------------------------------
@@ -119,8 +122,7 @@ impl Store {
 
     /// 讀取實例身分；第一次啟動時建立。
     pub async fn ensure_instance(&self, default_name: &str) -> Result<InstanceRow, Error> {
-        let mut conn = self.pool.acquire().await?;
-        let mut tx = conn.begin().await?;
+        let mut tx = self.begin().await?;
         let row = sqlx::query("SELECT id, name, created_at FROM instance LIMIT 1")
             .fetch_optional(&mut *tx)
             .await?;
@@ -260,6 +262,17 @@ impl Store {
                 .fetch_optional(conn)
                 .await?;
         pid.map(parse_id).transpose()
+    }
+
+    pub async fn item(
+        conn: &mut SqliteConnection,
+        id: ItemId,
+    ) -> Result<Option<StreamItemView>, Error> {
+        let row = sqlx::query("SELECT id, body, created_at FROM stream_items WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(conn)
+            .await?;
+        row.as_ref().map(item_from_row).transpose()
     }
 
     pub async fn insert_item(

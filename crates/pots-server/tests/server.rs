@@ -180,20 +180,22 @@ async fn chat_round_trip() {
     let human = c.say(project, "嗨", SendMode::Queue).await;
     let evs = c.until_idle(project).await;
 
-    // Item(human) → Item(agent, Streaming) → Thinking → Delta… → ItemDone → Idle
+    // Item(human) → ItemUpdated(human，已進歷史) → Item(agent, Streaming) → Thinking
+    // → Delta… → ItemDone → Idle
     let ServerEvent::Item { item, .. } = &evs[0] else {
         panic!("{:?}", evs[0])
     };
     assert_eq!(item.id, human);
     assert!(matches!(&item.kind, StreamItemKind::Human(m) if m.text == "嗨"));
-    let ServerEvent::Item { item: agent, .. } = &evs[1] else {
-        panic!("{:?}", evs[1])
+    assert!(matches!(&evs[1], ServerEvent::ItemUpdated { item, .. } if item.id == human));
+    let ServerEvent::Item { item: agent, .. } = &evs[2] else {
+        panic!("{:?}", evs[2])
     };
     let msg = agent_msg(agent);
     assert_eq!(msg.status, MsgStatus::Streaming);
     assert_eq!(msg.text, "");
     assert!(matches!(&msg.author, pots_proto::Author::Agent { label, .. } if label == "Pots"));
-    assert!(is_state(&evs[2], project, AgentState::Thinking));
+    assert!(is_state(&evs[3], project, AgentState::Thinking));
     let deltas: Vec<&str> = evs
         .iter()
         .filter_map(|e| match e {
@@ -249,7 +251,10 @@ async fn tool_call_round_trip_and_multi_turn_history() {
     let updates: Vec<_> = evs
         .iter()
         .filter_map(|e| match e {
-            ServerEvent::ItemUpdated { item, .. } => agent_msg(item).tools.clone(),
+            ServerEvent::ItemUpdated { item, .. } => match &item.kind {
+                StreamItemKind::Agent(m) => m.tools.clone(),
+                _ => None,
+            },
             _ => None,
         })
         .collect();
@@ -508,10 +513,13 @@ async fn stop_clears_queue_but_keeps_history() {
     let project = c.create_project("停止").await;
     c.say(project, "A", SendMode::Queue).await;
     c.until(|e| matches!(e, ServerEvent::Delta { .. })).await;
-    c.say(project, "B", SendMode::Queue).await;
+    let b = c.say(project, "B", SendMode::Queue).await;
     c.until(|e| matches!(e, ServerEvent::Item { .. })).await;
     c.send(&ClientCommand::Stop { project }).await;
     c.until_idle(project).await;
+    // 被清掉的 B 進了歷史，客戶端收到 ItemUpdated 以清掉「排隊中」。
+    c.until(|e| matches!(e, ServerEvent::ItemUpdated { item, .. } if item.id == b))
+        .await;
     c.assert_quiet(Duration::from_millis(300)).await;
     assert_eq!(srv.provider.requests().len(), 1, "被停止的佇列不觸發 run");
 
@@ -531,6 +539,7 @@ async fn model_errors_and_login() {
         [
             ScriptedTurn::reject(LlmError::NeedsLogin),
             ScriptedTurn::reject(LlmError::NeedsLogin),
+            ScriptedTurn::reply("好了"),
         ],
         auth.clone(),
     )
@@ -547,13 +556,22 @@ async fn model_errors_and_login() {
 
     let before_login = c.last_seq;
     c.send(&ClientCommand::StartModelLogin).await;
-    match c.next().await {
-        ServerEvent::ModelAuth {
-            state: ModelAuthView::Pending { url },
-            ..
-        } => assert!(url.starts_with("https://")),
-        other => panic!("預期 ModelAuth Pending，收到 {other:?}"),
+    let (mut pending, mut login_url) = (false, false);
+    while !(pending && login_url) {
+        match c.next().await {
+            ServerEvent::ModelAuth {
+                state: ModelAuthView::Pending { url },
+                ..
+            } => pending = url.starts_with("https://"),
+            ServerEvent::LoginUrl { url } => login_url = url.starts_with("https://"),
+            other => panic!("預期 ModelAuth Pending 與 LoginUrl，收到 {other:?}"),
+        }
     }
+    // 登入進行中再按一次：狀態沒變，網址仍回給這條連線（只給它）。
+    let mut other = Client::connect(&srv, c.last_seq).await;
+    c.send(&ClientCommand::StartModelLogin).await;
+    assert!(matches!(c.next().await, ServerEvent::LoginUrl { .. }));
+    other.assert_quiet(Duration::from_millis(200)).await;
     // 快照（記憶體）有完整網址；事件日誌與補送不留網址（可能帶 id_token_hint）。
     let (_, inst) = Client::connect(&srv, 0).await.snapshot().await;
     assert!(matches!(inst.model_auth, ModelAuthView::Pending { url } if !url.is_empty()));
@@ -580,6 +598,18 @@ async fn model_errors_and_login() {
         e,
         ServerEvent::ModelAuth {
             state: ModelAuthView::Error { .. },
+            ..
+        }
+    )));
+
+    // 之後推論成功：授權狀態改回授權控制的實際狀態。
+    c.say(project, "第三次", SendMode::Queue).await;
+    let evs = c.until_idle(project).await;
+    assert_eq!(agent_msg(done_item(&evs)).text, "好了");
+    assert!(evs.iter().any(|e| matches!(
+        e,
+        ServerEvent::ModelAuth {
+            state: ModelAuthView::SignedIn { .. },
             ..
         }
     )));
@@ -736,5 +766,53 @@ async fn items_pagination() {
     ))
     .await;
     assert_eq!(status, 400);
+    srv.stop().await;
+}
+
+/// run 寫 `om_raw` 的同時有人送訊息：寫入 transaction 不能因為 SQLITE_BUSY 失敗。
+#[tokio::test]
+async fn sends_while_run_writes_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut turns: Vec<ScriptedTurn> = (0..7)
+        .map(|i| ScriptedTurn::new().tool_call(format!("c{i}"), "get_status", "{}"))
+        .collect();
+    turns.push(ScriptedTurn::reply("第一輪完成"));
+    turns.push(ScriptedTurn::reply("排隊的都看到了"));
+    let srv = TestServer::start(tmp.path(), turns).await;
+    let mut c = srv.client().await;
+    c.snapshot().await;
+    let project = c.create_project("並行").await;
+    c.say(project, "開始", SendMode::Queue).await;
+    c.until(|e| is_state(e, project, AgentState::Thinking))
+        .await;
+
+    // 多條連線同時送，和 run 的 om_raw 寫入交錯。
+    let mut senders = Vec::new();
+    for k in 0..4 {
+        let mut s = Client::connect(&srv, 0).await;
+        s.snapshot().await;
+        senders.push(tokio::spawn(async move {
+            for i in 0..5 {
+                s.say(project, &format!("{k}-{i}"), SendMode::Queue).await;
+            }
+            // 有 Error 就是寫入失敗。
+            while let Some(ev) = s.try_next(Duration::from_millis(300)).await {
+                assert!(!matches!(ev, ServerEvent::Error { .. }), "{ev:?}");
+            }
+        }));
+    }
+    for s in senders {
+        s.await.unwrap();
+    }
+    c.until_idle(project).await;
+    c.until_idle(project).await;
+    let reqs = srv.provider.requests();
+    let last = reqs.last().unwrap();
+    assert_eq!(
+        user_texts(&last.input).len(),
+        21,
+        "{:?}",
+        user_texts(&last.input)
+    );
     srv.stop().await;
 }

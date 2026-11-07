@@ -14,6 +14,7 @@ mod gateway;
 mod hub;
 pub mod model_auth;
 mod runs;
+pub mod service;
 mod store;
 mod ws;
 
@@ -198,7 +199,13 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
     // 授權狀態可能在服務沒跑的時候變了；每次啟動都記一筆，讓重連的客戶端拿到最新狀態。
     hub.set_model_auth(initial_auth, true).await?;
 
-    let runs = Runs::new(hub.clone(), store.clone(), deps.provider, deps.model);
+    let runs = Runs::new(
+        hub.clone(),
+        store.clone(),
+        deps.provider,
+        deps.model,
+        deps.model_auth.status(),
+    );
     let shutdown = CancellationToken::new();
     let app = Arc::new(App {
         hub: hub.clone(),
@@ -301,18 +308,12 @@ async fn recover(hub: &Hub) -> Result<(), Error> {
         .await?;
     }
     for (project, item) in Store::items_with_status(txn.conn(), ItemStatus::Pending).await? {
-        if let StreamItemKind::Human(msg) = &item.kind {
-            Store::append_om_raw(
-                txn.conn(),
-                project,
-                None,
-                &pots_llm::Item::User {
-                    text: msg.text.clone(),
-                },
-            )
-            .await?;
+        match &item.kind {
+            StreamItemKind::Human(msg) => {
+                runs::consume(&mut txn, project, item.id, &msg.text, None).await?;
+            }
+            _ => Store::mark_consumed(txn.conn(), item.id, None).await?,
         }
-        Store::mark_consumed(txn.conn(), item.id, None).await?;
     }
     txn.commit().await?;
     if stale > 0 {
@@ -465,6 +466,8 @@ mod tests {
         let events = store.events_after(0).await.unwrap();
         assert!(events.iter().any(|(_, j)| j.contains("ItemDone")));
         assert!(events.iter().any(|(_, j)| j.contains("\"Idle\"")));
+        // 補進歷史的 B 記了 ItemUpdated。
+        assert!(events.iter().any(|(_, j)| j.contains("ItemUpdated")));
         assert!(provider.requests().is_empty());
     }
 }

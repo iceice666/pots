@@ -899,8 +899,9 @@ pub struct ProjectSnapshot {
     pub items: Vec<StreamItemView>,
 }
 
-/// 模型 provider（ChatGPT Plan，經 SIWC 授權）的狀態。不含任何 token。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// 模型 provider（ChatGPT Plan，經 SIWC 授權）的狀態。不含任何 token；`Debug` 不印出
+/// 登入網址（可能帶 `id_token_hint`）。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state")]
 pub enum ModelAuthView {
     SignedOut,
@@ -916,6 +917,20 @@ pub enum ModelAuthView {
     Error {
         message: String,
     },
+}
+
+impl std::fmt::Debug for ModelAuthView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignedOut => f.write_str("SignedOut"),
+            Self::Pending { .. } => f.write_str("Pending { url: .. }"),
+            Self::SignedIn { account } => f
+                .debug_struct("SignedIn")
+                .field("account", account)
+                .finish(),
+            Self::Error { message } => f.debug_struct("Error").field("message", message).finish(),
+        }
+    }
 }
 
 /// 伺服器推送的事件。`seq` 每個實例各自遞增，寫進事件日誌，重連時依序補送；
@@ -977,6 +992,11 @@ pub enum ServerEvent {
         seq: u64,
         state: ModelAuthView,
     },
+    /// 回給按下「開始登入」的那條連線：要開啟的登入網址。不寫入事件日誌（網址可能
+    /// 帶 `id_token_hint`），也不廣播給其他連線。
+    LoginUrl {
+        url: String,
+    },
     /// 指令被拒絕或執行失敗。
     Error {
         message: String,
@@ -995,7 +1015,10 @@ impl ServerEvent {
             | Self::TaskChanged { seq, .. }
             | Self::Inbox { seq, .. }
             | Self::ModelAuth { seq, .. } => Some(*seq),
-            Self::Delta { .. } | Self::StreamingText { .. } | Self::Error { .. } => None,
+            Self::Delta { .. }
+            | Self::StreamingText { .. }
+            | Self::LoginUrl { .. }
+            | Self::Error { .. } => None,
         }
     }
 }

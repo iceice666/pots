@@ -18,12 +18,30 @@ pub(crate) async fn handle(app: &App, text: &str, reply: &mpsc::Sender<ServerEve
         Ok(cmd) => run(app, cmd).await,
         Err(_) => Err("無法解析指令".to_string()),
     };
-    if let Err(message) = result {
-        let _ = reply.send(ServerEvent::Error { message }).await;
-    }
+    let direct = match result {
+        Ok(Some(ev)) => ev,
+        Ok(None) => return,
+        Err(message) => ServerEvent::Error { message },
+    };
+    let _ = reply.send(direct).await;
 }
 
-async fn run(app: &App, cmd: ClientCommand) -> Result<(), String> {
+/// 執行指令。`Ok(Some(ev))` 是只回給這條連線、不寫日誌的事件。
+async fn run(app: &App, cmd: ClientCommand) -> Result<Option<ServerEvent>, String> {
+    if let ClientCommand::StartModelLogin = cmd {
+        // 登入已經在進行中時，授權控制會回同一個網址而不改狀態，不會有 `ModelAuth`
+        // 事件；所以網址直接回給按下按鈕的連線。
+        return app
+            .model_auth
+            .start_login()
+            .await
+            .map(|url| Some(ServerEvent::LoginUrl { url }))
+            .map_err(|e| format!("無法開始登入：{e}"));
+    }
+    run_logged(app, cmd).await.map(|()| None)
+}
+
+async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
     match cmd {
         ClientCommand::Resume { .. } => Err("這條連線已經 Resume 過".into()),
         ClientCommand::CreateProject { name } => create_project(app, name).await,
@@ -38,12 +56,7 @@ async fn run(app: &App, cmd: ClientCommand) -> Result<(), String> {
             Ok(())
         }
         ClientCommand::Decide { .. } | ClientCommand::Cancel { .. } => Err("尚未支援".into()),
-        ClientCommand::StartModelLogin => app
-            .model_auth
-            .start_login()
-            .await
-            .map(drop)
-            .map_err(|e| format!("無法開始登入：{e}")),
+        ClientCommand::StartModelLogin => unreachable!("在 run 處理"),
         ClientCommand::CancelModelLogin => {
             app.model_auth.cancel_login().await;
             Ok(())
@@ -127,11 +140,11 @@ async fn send(
         }),
     };
 
-    let inserted: Result<Result<bool, String>, crate::Error> = async {
+    let inserted: Result<Result<(), String>, crate::Error> = async {
         let mut txn = app.hub.begin().await?;
         match Store::item_project(txn.conn(), id).await? {
             // 同一則訊息重送（例如重連後）：已經處理過，不再觸發。
-            Some(p) if p == project => return Ok(Ok(false)),
+            Some(p) if p == project => return Ok(Ok(())),
             Some(_) => return Ok(Err("訊息 ID 重複".into())),
             None => {}
         }
@@ -142,12 +155,11 @@ async fn send(
             item,
         })
         .await?;
-        txn.commit().await?;
-        Ok(Ok(true))
+        // 在日誌鎖內排進 run，佇列順序就和事件序號一致。
+        txn.commit_then(|| app.runs.enqueue(project, Trigger { item: id, text }, steer))
+            .await?;
+        Ok(Ok(()))
     }
     .await;
-    if inserted.map_err(internal)?? {
-        app.runs.enqueue(project, Trigger { item: id, text }, steer);
-    }
-    Ok(())
+    inserted.map_err(internal)?
 }
