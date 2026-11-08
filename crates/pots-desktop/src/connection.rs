@@ -360,6 +360,7 @@ mod tests {
                 approvals: vec![],
                 notifications: Default::default(),
                 user_md: Default::default(),
+                overseer: Default::default(),
             }),
         });
         assert!(state.unacked.is_empty());

@@ -335,6 +335,17 @@ impl PotsApp {
                 })
         });
 
+        let why_link = matches!(msg.author, Author::Agent { .. }).then(|| {
+            div()
+                .id(SharedString::from(format!("why-{}", id.0)))
+                .text_size(px(12.))
+                .text_color(theme::text_muted())
+                .cursor_pointer()
+                .hover(|s| s.text_color(theme::accent()))
+                .child("為什麼這樣回答")
+                .on_click(cx.listener(move |this, _, _, cx| this.request_why(id, cx)))
+        });
+
         div()
             .flex()
             .gap(px(12.))
@@ -351,6 +362,7 @@ impl PotsApp {
                     .child(header)
                     .children(body)
                     .children(tools)
+                    .children(why_link)
                     .children(msg.cards.iter().map(|c| self.render_card(id, c, cx))),
             )
             .into_any_element()

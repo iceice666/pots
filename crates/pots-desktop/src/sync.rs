@@ -38,6 +38,8 @@ pub struct Applied {
     pub listener_count: usize,
     /// worker 設定有變（`Worker` 事件或快照）。
     pub worker_changed: bool,
+    /// `Why` 的結果（「為什麼」面板）。
+    pub why: Option<WhyView>,
     /// 這個 project 監看的 repo 換了（`ProjectRepos`）。
     pub repos_changed: Option<ProjectId>,
     /// 要不要彈桌面通知的事（新的核准、需要你處理的任務、Goal 完成）。快照不產生通知。
@@ -118,6 +120,12 @@ fn approval_facts(a: &ApprovalView) -> Vec<String> {
         }
         ApprovalActionView::EditProjectNotes { base_rev, .. } => {
             vec![format!("修改 Project Notes（目前 v{base_rev}）")]
+        }
+        ApprovalActionView::IncreaseBudget { tokens, .. } => {
+            vec![format!("追加 {tokens} tokens")]
+        }
+        ApprovalActionView::ResumeProject { .. } => {
+            vec!["預算熔斷：核准後恢復這個 project 的 run".to_string()]
         }
     };
     facts.push(format!("{}申請 · 動作 {}", a.requested_by, a.action_hash));
@@ -422,6 +430,13 @@ impl Sync {
                 view.worker = snap.worker;
                 view.notifications = snap.notifications;
                 view.user_md = snap.user_md;
+                view.overseer = snap.overseer;
+                view.overseer.items = view
+                    .overseer
+                    .items
+                    .drain(..)
+                    .map(|item| self.localize(item))
+                    .collect();
                 self.apply_automation(view, snap.automation);
                 out.notifications_changed = true;
                 out.user_md_changed = true;
@@ -485,6 +500,21 @@ impl Sync {
                         }
                     }
                     upsert(&mut project.items, item, true);
+                } else if scope == StreamScope::Overseer {
+                    if matches!(item.kind, StreamItemKind::Agent(_))
+                        && let Some(view) = store.instance_mut(instance)
+                    {
+                        for i in &mut view.overseer.items {
+                            if let StreamItemKind::Human(m) = &mut i.kind
+                                && m.status == MsgStatus::Queued
+                            {
+                                m.status = MsgStatus::Done;
+                            }
+                        }
+                    }
+                    if let Some(view) = store.instance_mut(instance) {
+                        upsert(&mut view.overseer.items, item, true);
+                    }
                 }
             }
             ServerEvent::Delta {
@@ -512,9 +542,19 @@ impl Sync {
                     && let Some(project) = store.project_mut(instance, p)
                 {
                     upsert(&mut project.items, item, false);
+                } else if scope == StreamScope::Overseer
+                    && let Some(view) = store.instance_mut(instance)
+                {
+                    upsert(&mut view.overseer.items, item, false);
                 }
             }
             ServerEvent::AgentState { project, state, .. } => {
+                let known = store
+                    .instance(instance)
+                    .is_some_and(|v| v.projects.iter().any(|p| p.id == project));
+                if !known && let Some(view) = store.instance_mut(instance) {
+                    view.overseer.state = state;
+                }
                 if let Some(p) = store.project_mut(instance, project) {
                     p.agent_state = state;
                     // 沒在跑了：排隊中的訊息已經被處理或被「停止」清掉。
@@ -670,6 +710,7 @@ impl Sync {
             ServerEvent::GithubTest { request, result } => {
                 out.github_test = Some((request, result));
             }
+            ServerEvent::Why { why } => out.why = why,
             ServerEvent::Error { message } => out.toast = Some(message),
             // 任務的變化隨 `GoalChanged` 整個 Goal 送來。
             ServerEvent::TaskChanged { .. } => {}
@@ -790,12 +831,12 @@ fn find_msg(
     scope: StreamScope,
     item: ItemId,
 ) -> Option<&mut Msg> {
-    let StreamScope::Project(p) = scope else {
-        return None;
+    let items = match scope {
+        StreamScope::Project(p) => &mut store.project_mut(instance, p)?.items,
+        StreamScope::Overseer => &mut store.instance_mut(instance)?.overseer.items,
+        StreamScope::Task(_) => return None,
     };
-    store
-        .project_mut(instance, p)?
-        .items
+    items
         .iter_mut()
         .find(|i| i.id == item)
         .and_then(|i| match &mut i.kind {
@@ -862,6 +903,7 @@ mod tests {
                 approvals: vec![],
                 notifications: Default::default(),
                 user_md: Default::default(),
+                overseer: Default::default(),
             }),
         }
     }

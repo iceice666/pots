@@ -56,7 +56,20 @@ impl PotsApp {
                             .child("看得到所有專案，派工只會在某個專案開 Goal"),
                     ),
             )
-            .child(div().ml_auto().child(agent_state_pill(ov.state)));
+            .child(
+                div()
+                    .ml_auto()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(agent_state_pill(ov.state))
+                    .when(ov.state.is_busy(), |d| {
+                        d.child(
+                            link_button("overseer-stop", "停止")
+                                .on_click(cx.listener(|this, _, _, cx| this.stop_agent(cx))),
+                        )
+                    }),
+            );
 
         let stream: AnyElement = if ov.items.is_empty() {
             empty_state(

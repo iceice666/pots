@@ -380,6 +380,8 @@ pub struct PotsApp {
     pub send_mode: SendMode,
     /// 已展開的「用了 N 個工具」摘要。
     pub expanded_tools: HashSet<ItemId>,
+    /// 「為什麼」面板的內容（`ClientCommand::Why` 的結果）。
+    pub why: Option<WhyView>,
     /// 底部短暫顯示的提示，例如「看 diff 尚未實作」。
     pub toast: Option<String>,
 
@@ -502,6 +504,7 @@ impl PotsApp {
             artifact_editor: None,
             send_mode: SendMode::Queue,
             expanded_tools: HashSet::new(),
+            why: None,
             toast: None,
             composer,
             goal_note,
@@ -648,6 +651,9 @@ impl PotsApp {
                     panel: &mut self.panel,
                 }
                 .applied(&applied);
+                if applied.why.is_some() {
+                    self.why = applied.why;
+                }
                 if let Some((old, new)) = applied.rekeyed {
                     live.instance = new;
                     if self.instance == old {
@@ -1326,6 +1332,10 @@ impl PotsApp {
     ) {
         self.instance = instance;
         self.screen = Screen::Project(project);
+        // 看到這個 project 了：服務據此判斷「你不在期間」要不要插一張摘要卡片。
+        self.store
+            .outbox
+            .push((instance, ClientCommand::MarkRead { project }));
         self.channel_tab = ChannelTab::Chat;
         self.observation_editor = None;
         // 有進行中的 Goal 時預設在右欄打開。
@@ -1752,6 +1762,25 @@ impl PotsApp {
         self.open_overseer(window, cx);
     }
 
+    /// 問一則 agent 訊息為什麼這樣回答。
+    pub fn request_why(&mut self, item: ItemId, cx: &mut Context<Self>) {
+        self.why = None;
+        if self.live.is_some() {
+            self.store
+                .outbox
+                .push((self.instance, ClientCommand::Why { item }));
+            self.toast = Some("正在查這一則的來源與工具順序…".into());
+        } else {
+            self.toast = Some("「為什麼」需要連上服務才有 trace。".into());
+        }
+        cx.notify();
+    }
+
+    pub fn close_why(&mut self, cx: &mut Context<Self>) {
+        self.why = None;
+        cx.notify();
+    }
+
     pub fn toggle_tools(&mut self, id: ItemId, cx: &mut Context<Self>) {
         if !self.expanded_tools.remove(&id) {
             self.expanded_tools.insert(id);
@@ -1858,6 +1887,17 @@ impl PotsApp {
 
     /// 頂端的「停止」：中斷對話 agent 本輪。
     pub fn stop_agent(&mut self, cx: &mut Context<Self>) {
+        if self.screen == Screen::Overseer {
+            if self.live.is_some() {
+                self.store
+                    .outbox
+                    .push((self.instance, ClientCommand::StopOverseer));
+            } else if let Some(inst) = self.store.instance_mut(self.instance) {
+                inst.overseer.state = AgentState::Idle;
+            }
+            cx.notify();
+            return;
+        }
         let Screen::Project(project) = self.screen else {
             return;
         };
@@ -2028,6 +2068,7 @@ impl Render for PotsApp {
             .children(panel)
             .children(self.render_settings_dialog(cx))
             .children(self.render_reject_dialog(cx))
+            .children(self.render_why_dialog(cx))
             .children(self.render_toast(cx))
     }
 }

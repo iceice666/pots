@@ -415,14 +415,16 @@ impl Store {
                 at,
                 kind: StreamItemKind::Human(Msg {
                     author: Author::Human,
-                    text,
-                    status: MsgStatus::Done,
+                    text: text.clone(),
+                    status: MsgStatus::Queued,
                     tools: None,
                     cards: vec![],
                     steer: false,
                 }),
             });
         }
+        self.outbox
+            .push((instance, ClientCommand::SendOverseer { id, text }));
     }
 
     pub fn send_to_task(&mut self, instance: InstanceId, task: TaskId, text: String) {
