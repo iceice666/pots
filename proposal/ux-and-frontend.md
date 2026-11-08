@@ -26,7 +26,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 ## 桌面客戶端現況
 
-桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）；M4 接上 Goal 面板的任務狀態（執行中、需要決定、完成、失敗）、指派、分支與 PR 連結、worker 的最後一句進度、「重試」、Team 分頁、快速修改的標籤，以及設定的「Worker」類別（後端、執行環境、image、Claude Code 的登入指令）。`--mock` 模式用假資料展示其他畫面：實例直列、任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
+桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）；M4 接上 Goal 面板的任務狀態（執行中、需要決定、完成、失敗）、指派、分支與 PR 連結、worker 的最後一句進度、「重試」、Team 分頁、快速修改的標籤，以及設定的「Worker」類別（後端、執行環境、image、Claude Code 的登入指令）；M5 接上 Inbox 與對話裡的核准卡片（核准、拒絕附理由、看 PR 與提案的 diff）、「需要你處理」的任務、系統通知、設定的「通知」（靜音時段）與「USER.md」類別，以及頻道「自動化」分頁的 merge 方式。`--mock` 模式用假資料展示其他畫面：實例直列、任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
 
 下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
 
@@ -117,6 +117,8 @@ pub enum ClientCommand {
 - 記憶：快照裡每個 project 帶著 `MemoryView`；Observer、Reflector 或你的修改讓記憶變了就送一筆 `Memory` 整份替換。觀察的修改被拒絕時，除了 `Error` 也重送一次目前的 `Memory`，客戶端先改的內容會被蓋回去。
 
 - 任務樹與 artifact：快照裡每個 project 帶著所有 Goal（含任務樹與 Brief 全文）與 artifact；任何變化都送一筆 `GoalChanged` 或 `ArtifactChanged` 整筆替換，客戶端不用自己拼狀態。Planner 的里程碑是對話流裡的 `Card::Milestone`。`SaveArtifact` 被拒絕（同一段兩邊都改過）時只回 `Error`，草稿留在客戶端；`Cancel { task }` 取消一個還沒結束的任務。
+
+- 核准：快照帶著還沒決定與最近有變化的核准（`ApprovalView`：具體動作、hash、狀態、理由與結果），之後每次變化送一筆 `ApprovalChanged` 整筆替換；`Decide { approval, approve, note }` 核准或拒絕，已決定或逾時時回 `Error` 並重送目前的狀態。通知設定、USER.md 與 project 的 merge 方式也在快照裡，改了分別送 `Notifications`、`UserMd`、`ProjectMergeMethod`。
 
 - 訊息狀態：人類訊息進入 agent 歷史時（被某一輪接手，或被「停止」清掉），伺服器記一筆 `ItemUpdated`，客戶端據此收掉「排隊中」。
 

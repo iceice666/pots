@@ -4,7 +4,7 @@
 
 ## MVP 里程碑
 
-M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種形態並存。桌面版是長期支援的形態，M8 之後仍要通過同一套整合測試（見[部署形態](deployment.md)）。依序建置，每個里程碑結束時都是可以自己天天用的版本。M4 結束時應該能跑通「一句話 → PR → CI → 自動修 → 請求核准 merge」（實際範圍見 M4 的狀態：自動修與核准卡片延後）。
+M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種形態並存。桌面版是長期支援的形態，M8 之後仍要通過同一套整合測試（見[部署形態](deployment.md)）。依序建置，每個里程碑結束時都是可以自己天天用的版本。M4 結束時應該能跑通「一句話 → PR → CI → 自動修 → 請求核准 merge」（實際範圍見 M4 的狀態：自動修與核准卡片延後到 M5 完成）。
 
 1. M0 骨架：axum + sqlx + WebSocket，`instance`、`projects` 與 `stream_items`，GPUI 桌面客戶端的對話頁；桌面 app 以子行程啟動並管理內嵌服務（loopback、啟動 token、`Host`／`Origin` 檢查、資料目錄鎖）。對話 agent 用統一的 run_agent 與 chat profile 串流回覆，先用完整原始歷史，不做記憶。接 ChatGPT Plan provider：官方 SIWC 授權、Responses 串流與 `pots-llm` 的 provider 介面及共用 loop；驗收工具呼叫／結果往返、多輪歷史、重啟與並行 refresh、撤銷及額度不足，API fallback 必須事先授權。
 
@@ -27,6 +27,8 @@ M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種�
    狀態：已實作於 `crates/pots-server/src/worker/`（佇列與 runner、repo 鏡像與任務工作目錄、容器／本機執行環境、Claude Code adapter、MCP server、subagent、工具）與 `team.rs`（加上 `0006_worker.sql`、`profiles/worker.toml`、`explorer.toml`、`reviewer.toml`）、協定 v6、`docker/worker/Dockerfile`，以及桌面版的 Goal 面板（任務狀態、PR、進度、重試）、Team 分頁與設定的「Worker」類別。和你確認過的範圍：Claude Code 參考 OpenClaw 走雙向 stream-json（不走 ACP），中斷送 `interrupt`、原生工具的權限經 `can_use_tool` 回到平台；容器與本機兩種執行環境，對外網路白名單延後；repo 來源抽成介面、M4 只做 GitHub：平台維護 bare 鏡像、每個任務一個獨立的 git repo，push 與開 PR 都由平台做，容器裡沒有 token；worker 開完 PR 等 CI，通過就完成、失敗交回 Planner，**CI 失敗自動修與「可以 merge」的核准卡片延後**；內建 worker、quick_fix 與 escalate、唯讀 subagent、team 貼文都做；桌面版只做最小必要，完整的任務 thread 延後；repo 附 Dockerfile（釘選 Claude Code 版本），登入由你照設定裡的指令自己完成。實作細節與已知限制見[Agent 執行層](agent-runtime.md#m4-的實作)。以假的 GitHub API、本機 bare repo 當 remote、假的模型與假的 Claude Code CLI（`pots-fake-claude`）驗證（`tests/worker.rs`：一句話 → Goal → Planner 派工 → 內建 worker 改檔、在 team 發問、開 PR、等 CI → 喚醒完成 → Planner 結束 Goal；Claude Code 的快速修改經 MCP 開 PR 與等待、push 被擋、喚醒後 `--resume` 同一個 session；取消時中斷 CLI、快速修改跟著取消；需要重新登入與重試；服務重啟後續接；Planner 的決定叫醒 worker、改到 CI 設定的 PR 不推；快速修改升級；explorer 讀鏡像）與 adapter、MCP server、repo、執行環境的單元測試，加上桌面版的截圖流程；**對真的 Claude Code（登入、容器內續接、事件格式）、真的 GitHub 與 Docker 容器模式待使用者手動驗證**。
 
 6. M5 核准與通知：`approvals` 、平台執行 merge、Inbox、桌面通知、靜音時段。
+
+   狀態：已實作於 `crates/pots-server` 的 `approvals.rs`、`user_md.rs`、`notifications.rs`（加上 `0007_approvals.sql`）與 watcher 的 CI 自動修與逾時、協定 v7，以及桌面版的 Inbox 與核准卡片（核准、拒絕附理由、看 PR）、設定的「通知」與「USER.md」類別、頻道「自動化」分頁的 merge 方式與 `notify-rust` 的系統通知。和你確認過的範圍：要核准的是 merge PR（hash 綁定 head sha 與方式）、merge 後自動開的刪分支（不推播）、agent 提案的 listener、USER.md 與 Project Notes 的提案；worker（含 Claude Code）與 Planner 在 CI 通過後用 `request_approval` 申請，核准後平台 merge、任務完成、叫醒 Planner，拒絕時帶理由叫醒 worker，72 小時逾時轉 `NeedsHuman`；merge 方式是 project 設定（預設 squash），agent 可以指定；M4 延後的 CI 失敗自動修一起做（第 3 次失敗轉 `NeedsHuman`）；通知由客戶端發出、設定存在服務，觸發是新的核准、需要你處理的任務與 Goal 完成，靜音期間累積、結束時合併；USER.md 與 Project Notes 完整接上（你直接編輯、agent 提案、放進對話 agent／Planner／worker 的指示）。實作細節與已知限制見[核准流程與通知](approvals-and-notifications.md#m5-的實作)。以假的 GitHub API、手動時鐘與假模型的整合測試驗證（`tests/approvals.rs`），加上桌面版的單元測試與截圖流程；對真的 GitHub merge 與 macOS 系統通知待使用者手動驗證。
 
 7. M6 預算與觀測：階層預算、熔斷、trace、「為什麼」面板、「你不在期間」摘要卡片、總管 agent；其他 connector：GitLab、郵件、狀態頁、HTTP 探測、通用 webhook、 RSS。
 
