@@ -143,6 +143,8 @@ struct Inner {
     store: Store,
     planner: Planner,
     runs: Runs,
+    /// 總管對話用的 Runs（`bind_overseer` 設定）；全域排程觸發時用。
+    overseer_runs: std::sync::Mutex<Option<Runs>>,
     github: Github,
     config: WatcherConfig,
     poll_now: Notify,
@@ -172,6 +174,7 @@ impl Watcher {
                 store,
                 planner,
                 runs,
+                overseer_runs: std::sync::Mutex::new(None),
                 github,
                 config,
                 poll_now: Notify::new(),
@@ -180,6 +183,11 @@ impl Watcher {
                 shutdown: CancellationToken::new(),
             }),
         }
+    }
+
+    /// 總管的全域對話要另外一份（用 `global` profile）。
+    pub fn bind_overseer(&self, runs: Runs) {
+        *self.inner.overseer_runs.lock().unwrap() = Some(runs);
     }
 
     pub fn clock(&self) -> &Clock {
@@ -715,9 +723,15 @@ impl Watcher {
         })
         .await?;
         for (project, item, text) in after.chat {
-            self.inner
-                .runs
-                .enqueue(project, Trigger { item, text }, false);
+            let runs = if project == crate::store::OVERSIGHT_PROJECT_ID {
+                self.inner.overseer_runs.lock().unwrap().clone()
+            } else {
+                Some(self.inner.runs.clone())
+            };
+            match runs {
+                Some(runs) => runs.enqueue(project, Trigger { item, text }, false),
+                None => tracing::warn!(%project, "沒有可以處理這個觸發的對話 agent"),
+            }
         }
         Ok(())
     }
@@ -1074,8 +1088,21 @@ impl Watcher {
                     }
                 }
                 ScheduleOwner::Global => {
-                    record.status = "failed";
-                    record.error = Some("總管 agent 尚未實作（M6）".into());
+                    let text = format!(
+                        "（排程觸發，不是使用者說的話）你之前設定的排程時間到了，請照著做：\n\n{}",
+                        s.prompt
+                    );
+                    let item = runs::post_system_trigger(
+                        &mut txn,
+                        crate::store::OVERSIGHT_PROJECT_ID,
+                        &format!("排程觸發：{}", tasks::one_line(&s.prompt, 200)),
+                        &text,
+                    )
+                    .await?;
+                    after
+                        .chat
+                        .push((crate::store::OVERSIGHT_PROJECT_ID, item, text));
+                    record.status = "done";
                 }
             }
             automation::record_trigger(txn.conn(), &record, now).await?;
@@ -1084,6 +1111,8 @@ impl Watcher {
         if changed {
             automation::push(&mut txn, now).await?;
         }
+        // 熔斷冷卻結束的 project 再問一次要不要恢復。
+        crate::budget::rearm_breakers(&mut txn, now).await?;
         self.finish(txn, after).await
     }
 }

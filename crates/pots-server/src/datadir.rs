@@ -327,6 +327,17 @@ mod tests {
         held.remove_connection_info();
         drop(held);
         assert_eq!(read_connection_info(&dir), None);
-        DataDir::acquire(&dir).await.unwrap();
+        // 同一個測試執行檔的其他測試會 fork 出 git／假的 CLI；子行程在 exec 前短暫繼承
+        // 這裡的鎖檔案描述子（macOS 的 flock 連 fork 一起繼承），偶爾會慢一點才放掉。
+        let mut acquired = false;
+        for _ in 0..50 {
+            if let Ok(dir) = DataDir::acquire(&dir).await {
+                drop(dir);
+                acquired = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(acquired, "鎖沒有放掉");
     }
 }

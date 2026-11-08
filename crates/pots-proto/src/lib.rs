@@ -23,7 +23,7 @@ use uuid::Uuid;
 ///   `TeamPost::to`、`GoalView::quick`、快照帶 worker 設定）。
 /// - 7：核准與通知（`ApprovalChanged` 取代 `Inbox`、`Decide` 生效、`Notifications`、`UserMd`、
 ///   `ProjectMergeMethod` 與對應的指令，快照帶核准、通知設定、USER.md 與 project 的 merge 方式）。
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -1249,6 +1249,15 @@ pub enum ApprovalActionView {
         base_rev: u32,
         diff: String,
     },
+    /// Goal 的預算用完了，核准就追加 `tokens`。
+    IncreaseBudget {
+        goal: GoalId,
+        tokens: u64,
+    },
+    /// project 的每小時用量超過上限而熔斷，核准就恢復所有 run。
+    ResumeProject {
+        project: ProjectId,
+    },
 }
 
 /// 一筆核准（`proposal/approvals-and-notifications.md`）。
@@ -1391,6 +1400,49 @@ pub struct OverseerView {
     pub memory_total: u32,
 }
 
+impl Default for OverseerView {
+    fn default() -> Self {
+        Self {
+            state: AgentState::Idle,
+            items: Vec::new(),
+            overview: Vec::new(),
+            memory: Vec::new(),
+            memory_total: 0,
+        }
+    }
+}
+
+/// 「為什麼」面板的一步（一次模型呼叫或一次工具呼叫）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceStepView {
+    /// `model` 或 `tool`。
+    pub kind: String,
+    pub name: String,
+    pub at: Timestamp,
+    pub ok: bool,
+    /// 遮蔽、截短後的參數與結果。
+    pub detail: String,
+}
+
+/// 一則 agent 訊息為什麼這樣回答。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhyView {
+    pub item: ItemId,
+    pub agent: String,
+    pub model: Option<String>,
+    /// 觸發來源（使用者訊息、排程、外部事件等）的摘要。
+    pub trigger: String,
+    /// run 開始時的記憶版本；沒有記憶的 profile 是 `None`。
+    pub memory_revision: Option<i64>,
+    pub started_at: Timestamp,
+    pub finished_at: Option<Timestamp>,
+    /// `budget`、`breaker` 或 `None`。
+    pub stop_reason: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub steps: Vec<TraceStepView>,
+}
+
 // ---------------------------------------------------------------------------
 // 即時協定（proposal/ux-and-frontend.md#即時協定）
 
@@ -1427,6 +1479,9 @@ pub struct InstanceSnapshot {
     pub notifications: NotificationSettings,
     #[serde(default)]
     pub user_md: UserMdView,
+    /// 總管的全域對話、專案概況與記憶。
+    #[serde(default)]
+    pub overseer: OverseerView,
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,6 +1767,10 @@ pub enum ServerEvent {
         scope: StreamScope,
         item: StreamItemView,
     },
+    /// 「為什麼」面板的內容；只回給問的連線，不記日誌。
+    Why {
+        why: Option<WhyView>,
+    },
     AgentState {
         seq: u64,
         project: ProjectId,
@@ -1846,6 +1905,7 @@ impl ServerEvent {
             | Self::ArtifactHistory { .. }
             | Self::LoginUrl { .. }
             | Self::ProviderTest { .. }
+            | Self::Why { .. }
             | Self::Error { .. } => None,
         }
     }
@@ -1871,6 +1931,21 @@ pub enum ClientCommand {
     /// 停止這個 project 正在跑的 agent run。
     Stop {
         project: ProjectId,
+    },
+    /// 對總管說話；`id` 的去重與 `Send` 一樣。
+    SendOverseer {
+        id: ItemId,
+        text: String,
+    },
+    /// 停止總管的 run。
+    StopOverseer,
+    /// 看到這個 project 的對話了；伺服器據此判斷要不要插入「你不在期間」摘要。
+    MarkRead {
+        project: ProjectId,
+    },
+    /// 問一則 agent 訊息為什麼這樣回答（觸發來源、記憶版本、工具順序）。
+    Why {
+        item: ItemId,
     },
     /// 核准或拒絕（可以附一句理由，拒絕的理由會帶給 agent）。伺服器回 `ApprovalChanged`；
     /// 已經決定過、逾時時回 `Error`。

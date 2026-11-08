@@ -238,6 +238,7 @@ impl Hub {
                 crate::user_md::current(&mut conn).await?,
             )
         };
+        let overseer = self.overseer(state).await?;
         Ok(InstanceSnapshot {
             id: self.instance.id,
             name: self.instance.name.clone(),
@@ -251,6 +252,43 @@ impl Hub {
             approvals,
             notifications,
             user_md,
+            overseer,
+        })
+    }
+
+    /// 總管的快照：全域對話、各 project 概況與自己的記憶。
+    async fn overseer(&self, state: &HubState) -> Result<pots_proto::OverseerView, Error> {
+        let project = crate::store::OVERSIGHT_PROJECT_ID;
+        let mut conn = self.store.acquire().await?;
+        let memory = crate::memory::view(&mut conn, project).await?;
+        let mut overview = Vec::new();
+        for p in self.store.list_projects().await? {
+            let goals = crate::tasks::project_goals(&mut conn, p.id).await?;
+            let note = goals
+                .iter()
+                .find(|g| matches!(g.state, pots_proto::GoalState::Active))
+                .map(|g| g.planner_note.clone())
+                .unwrap_or_else(|| "沒有進行中的 Goal".into());
+            overview.push(pots_proto::ProjectOverview {
+                project: p.name,
+                state: state.agent_state(p.id),
+                note,
+            });
+        }
+        drop(conn);
+        Ok(pots_proto::OverseerView {
+            state: state.agent_state(project),
+            items: self.store.latest_items(project, SNAPSHOT_ITEMS).await?,
+            overview,
+            memory: memory
+                .observations
+                .iter()
+                .map(|o| pots_proto::Observation {
+                    priority: o.priority,
+                    text: o.text.clone(),
+                })
+                .collect(),
+            memory_total: memory.observations.len() as u32,
         })
     }
 

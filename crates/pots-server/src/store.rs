@@ -10,7 +10,7 @@ use std::time::Duration;
 use pots_llm::Item;
 use pots_proto::{
     Author, InstanceId, ItemId, ObservationId, Priority, ProjectId, ProviderId, ProviderKind,
-    ServerEvent, StreamItemKind, StreamItemView, Timestamp,
+    ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -25,6 +25,19 @@ use crate::Error;
 
 /// 桌面版固定的本機使用者。所有屬於使用者的列從第一天就帶 `user_id`。
 pub const LOCAL_USER_ID: Uuid = Uuid::from_u64_pair(0, 1);
+
+/// 總管對話的儲存位置。它是一列 `kind = 'overseer'` 的 project，和 project 共用對話流、
+/// 記憶與 run 儲存，但不出現在 project 列表與 project 快照裡。
+pub const OVERSIGHT_PROJECT_ID: ProjectId = ProjectId::from_u64(0x0e5e_4a11);
+
+/// 對話流屬於哪一條（總管用 `Overseer`，其餘是 project）。
+pub fn stream_scope(project: ProjectId) -> StreamScope {
+    if project == OVERSIGHT_PROJECT_ID {
+        StreamScope::Overseer
+    } else {
+        StreamScope::Project(project)
+    }
+}
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 
@@ -96,6 +109,18 @@ impl RunState {
             Self::Cancelled => "cancelled",
         }
     }
+}
+
+/// `run_trace` 的一列。
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceRow {
+    pub seq: i64,
+    /// `model` 或 `tool`。
+    pub kind: String,
+    pub name: String,
+    pub detail: serde_json::Value,
+    pub ok: bool,
+    pub at: Timestamp,
 }
 
 /// `om_raw` 的一列。
@@ -289,7 +314,8 @@ impl Store {
     pub async fn list_projects(&self) -> Result<Vec<ProjectRow>, Error> {
         let rows = sqlx::query(
             "SELECT id, name, instructions, agent_name, created_at FROM projects \
-             WHERE user_id = ? AND residency = 'active' ORDER BY created_at, id",
+             WHERE user_id = ? AND residency = 'active' AND kind = 'project' \
+             ORDER BY created_at, id",
         )
         .bind(LOCAL_USER_ID.to_string())
         .fetch_all(&self.pool)
@@ -307,6 +333,36 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         row.as_ref().map(project_from_row).transpose()
+    }
+
+    /// 建立總管對話的內部 project（只在第一次啟動時寫入）。
+    pub async fn ensure_overseer(&self) -> Result<(), Error> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO projects (id, user_id, name, instructions, agent_name, \
+             residency, kind, created_at) VALUES (?, ?, '總管', '', '總管', 'active', 'overseer', ?)",
+        )
+        .bind(OVERSIGHT_PROJECT_ID.to_string())
+        .bind(LOCAL_USER_ID.to_string())
+        .bind(Timestamp::now().0)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 用 UUID 或名稱找 project（總管派工用）。
+    pub async fn find_project(&self, selector: &str) -> Result<Option<ProjectRow>, Error> {
+        if let Ok(id) = selector.trim().parse::<ProjectId>()
+            && let Some(p) = self.project(id).await?
+            && self.project_kind(id).await?.as_deref() == Some("project")
+        {
+            return Ok(Some(p));
+        }
+        let name = selector.trim();
+        Ok(self
+            .list_projects()
+            .await?
+            .into_iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name)))
     }
 
     pub async fn insert_project(conn: &mut SqliteConnection, p: &ProjectRow) -> Result<(), Error> {
@@ -597,6 +653,214 @@ impl Store {
             .execute(conn)
             .await?;
         Ok(())
+    }
+
+    /// 累加一個 run 的模型用量；`after_turn` 每輪呼叫一次。
+    pub async fn add_run_usage(
+        conn: &mut SqliteConnection,
+        id: Uuid,
+        input: u64,
+        output: u64,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "UPDATE agent_runs SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ? \
+             WHERE id = ?",
+        )
+        .bind(input as i64)
+        .bind(output as i64)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
+    /// 記下 run 用的模型（「為什麼」面板）。
+    pub async fn set_run_model(store: &Store, id: Uuid, model: &str) -> Result<(), Error> {
+        sqlx::query("UPDATE agent_runs SET model = ? WHERE id = ?")
+            .bind(model)
+            .bind(id.to_string())
+            .execute(&store.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// run 開始時的記憶版本（chat 與總管有 OM，其他 profile 沒有）。
+    pub async fn set_run_memory_revision(
+        conn: &mut SqliteConnection,
+        id: Uuid,
+        revision: i64,
+    ) -> Result<(), Error> {
+        sqlx::query("UPDATE agent_runs SET memory_revision = ? WHERE id = ?")
+            .bind(revision)
+            .bind(id.to_string())
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+
+    /// 記下 run 為什麼停下（`budget`、`breaker`）；完成路徑據此改成申請預算或暫停。
+    pub async fn set_run_stop_reason(
+        conn: &mut SqliteConnection,
+        id: Uuid,
+        reason: &str,
+    ) -> Result<(), Error> {
+        sqlx::query("UPDATE agent_runs SET stop_reason = ? WHERE id = ?")
+            .bind(reason)
+            .bind(id.to_string())
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+
+    /// 一個 project 在 `since` 之後用掉多少 token（熔斷）。看每一輪模型的 trace，
+    /// 而不是 run 的開始時間，長時間的 run 也照樣算進滾動的一小時。
+    pub async fn project_usage_since(
+        &self,
+        project: ProjectId,
+        since: Timestamp,
+    ) -> Result<u64, Error> {
+        let used: Option<i64> = sqlx::query_scalar(
+            "SELECT SUM(t.tokens) FROM run_trace t JOIN agent_runs r ON r.id = t.run_id \
+             WHERE r.project_id = ? AND t.kind = 'model' AND t.at >= ?",
+        )
+        .bind(project.to_string())
+        .bind(since.0)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(used.unwrap_or_default().max(0) as u64)
+    }
+
+    pub async fn project_breaker_until(
+        &self,
+        project: ProjectId,
+    ) -> Result<Option<Timestamp>, Error> {
+        let until: Option<Option<i64>> =
+            sqlx::query_scalar("SELECT breaker_until FROM projects WHERE id = ?")
+                .bind(project.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(until.flatten().map(Timestamp))
+    }
+
+    pub async fn project_hourly_budget(&self, project: ProjectId) -> Result<Option<u64>, Error> {
+        let limit: Option<Option<i64>> =
+            sqlx::query_scalar("SELECT hourly_budget_tokens FROM projects WHERE id = ?")
+                .bind(project.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(limit.flatten().map(|v| v.max(0) as u64))
+    }
+
+    pub async fn project_kind(&self, project: ProjectId) -> Result<Option<String>, Error> {
+        Ok(sqlx::query_scalar("SELECT kind FROM projects WHERE id = ?")
+            .bind(project.to_string())
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
+    /// Goal 的預算、已用與「追加被拒絕過」。
+    pub async fn goal_budget(
+        &self,
+        goal: pots_proto::GoalId,
+    ) -> Result<Option<(Option<u64>, u64, bool)>, Error> {
+        let row = sqlx::query(
+            "SELECT budget_tokens, spent_tokens, budget_denied FROM goals WHERE id = ?",
+        )
+        .bind(goal.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let budget: Option<i64> = row.try_get("budget_tokens")?;
+        let spent: i64 = row.try_get("spent_tokens")?;
+        let denied: i64 = row.try_get("budget_denied")?;
+        Ok(Some((
+            budget.map(|v| v.max(0) as u64),
+            spent.max(0) as u64,
+            denied != 0,
+        )))
+    }
+
+    /// 追加被拒絕（或逾時）：不再重複申請。
+    pub async fn deny_goal_budget(
+        conn: &mut SqliteConnection,
+        goal: pots_proto::GoalId,
+    ) -> Result<(), Error> {
+        sqlx::query("UPDATE goals SET budget_denied = 1, updated_at = ? WHERE id = ?")
+            .bind(Timestamp::now().0)
+            .bind(goal.to_string())
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_project_read(&self, project: ProjectId, at: Timestamp) -> Result<(), Error> {
+        sqlx::query("UPDATE projects SET last_read_at = ? WHERE id = ?")
+            .bind(at.0)
+            .bind(project.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn project_last_read(&self, project: ProjectId) -> Result<Option<Timestamp>, Error> {
+        let read: Option<Option<i64>> =
+            sqlx::query_scalar("SELECT last_read_at FROM projects WHERE id = ?")
+                .bind(project.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(read.flatten().map(Timestamp))
+    }
+
+    /// 記一筆 trace；`seq` 接在該 run 的最後一筆之後。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_trace(
+        conn: &mut SqliteConnection,
+        run: Uuid,
+        kind: &str,
+        name: &str,
+        detail: &serde_json::Value,
+        ok: bool,
+        tokens: u64,
+        at: Timestamp,
+    ) -> Result<i64, Error> {
+        let seq: i64 = sqlx::query_scalar(
+            "INSERT INTO run_trace (run_id, seq, kind, name, detail, ok, tokens, at) VALUES \
+             (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_trace WHERE run_id = ?), ?, ?, ?, ?, ?, ?) \
+             RETURNING seq",
+        )
+        .bind(run.to_string())
+        .bind(run.to_string())
+        .bind(kind)
+        .bind(name)
+        .bind(detail.to_string())
+        .bind(i64::from(ok))
+        .bind(tokens as i64)
+        .bind(at.0)
+        .fetch_one(conn)
+        .await?;
+        Ok(seq)
+    }
+
+    pub async fn trace(&self, run: Uuid) -> Result<Vec<TraceRow>, Error> {
+        let rows = sqlx::query(
+            "SELECT seq, kind, name, detail, ok, at FROM run_trace WHERE run_id = ? ORDER BY seq",
+        )
+        .bind(run.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let detail: String = row.try_get("detail")?;
+            out.push(TraceRow {
+                seq: row.try_get("seq")?,
+                kind: row.try_get("kind")?,
+                name: row.try_get("name")?,
+                detail: serde_json::from_str(&detail).unwrap_or(serde_json::Value::Null),
+                ok: row.try_get::<i64, _>("ok")? != 0,
+                at: Timestamp(row.try_get("at")?),
+            });
+        }
+        Ok(out)
     }
 
     /// 上次異常結束時還在跑的 chat（與 subagent）run 一律標成失敗。Planner 與 worker 的 run 在

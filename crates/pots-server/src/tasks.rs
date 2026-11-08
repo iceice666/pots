@@ -234,7 +234,7 @@ pub async fn insert_goal(
     let (state, outcome) = goal_state_columns(&goal.state);
     sqlx::query(
         "INSERT INTO goals (id, project_id, user_id, title, kind, state, outcome, created_by, \
-         planner_note, created_at, updated_at) VALUES (?, ?, ?, ?, 'feature', ?, ?, ?, ?, ?, ?)",
+         planner_note, budget_tokens, created_at, updated_at) VALUES (?, ?, ?, ?, 'feature', ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(goal.id.to_string())
     .bind(goal.project.to_string())
@@ -244,6 +244,7 @@ pub async fn insert_goal(
     .bind(outcome)
     .bind(to_json(created_by)?)
     .bind(&goal.planner_note)
+    .bind(crate::budget::DEFAULT_GOAL_BUDGET_TOKENS as i64)
     .bind(goal.created_at.0)
     .bind(goal.created_at.0)
     .execute(conn)
@@ -322,6 +323,39 @@ pub async fn set_planner_note(
 
 pub async fn add_spent(conn: &mut SqliteConnection, id: GoalId, tokens: u64) -> Result<(), Error> {
     sqlx::query("UPDATE goals SET spent_tokens = spent_tokens + ? WHERE id = ?")
+        .bind(tokens as i64)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// 建立 Goal 時指定的預算（夾在上下限之間）。
+pub async fn set_goal_budget(
+    conn: &mut SqliteConnection,
+    id: GoalId,
+    tokens: u64,
+) -> Result<(), Error> {
+    let tokens = tokens.clamp(
+        crate::budget::MIN_GOAL_BUDGET_TOKENS,
+        crate::budget::MAX_GOAL_BUDGET_TOKENS,
+    );
+    sqlx::query("UPDATE goals SET budget_tokens = ?, updated_at = ? WHERE id = ?")
+        .bind(tokens as i64)
+        .bind(Timestamp::now().0)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// 任務自己的用量；Goal 的用量另外記，熔斷看的是 project。
+pub async fn add_task_spent(
+    conn: &mut SqliteConnection,
+    id: pots_proto::TaskId,
+    tokens: u64,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE tasks SET spent_tokens = spent_tokens + ? WHERE id = ?")
         .bind(tokens as i64)
         .bind(id.to_string())
         .execute(conn)
@@ -616,6 +650,17 @@ pub async fn goal_kind(conn: &mut SqliteConnection, id: GoalId) -> Result<String
 
 /// Goal 的完整檢視（任務樹與 Brief 全文）。
 pub async fn goal_view(conn: &mut SqliteConnection, g: &GoalRow) -> Result<GoalView, Error> {
+    let budget: Option<(Option<i64>, i64)> =
+        sqlx::query_as("SELECT budget_tokens, spent_tokens FROM goals WHERE id = ?")
+            .bind(g.id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    let budget_used_pct = match budget {
+        Some((Some(budget), spent)) if budget > 0 => {
+            ((spent.max(0) * 100 / budget).clamp(0, 100)) as u8
+        }
+        _ => 0,
+    };
     let mut views = Vec::new();
     for t in tasks(conn, g.id).await? {
         views.push(task_view(conn, &t).await?);
@@ -629,8 +674,7 @@ pub async fn goal_view(conn: &mut SqliteConnection, g: &GoalRow) -> Result<GoalV
         title: g.title.clone(),
         state: g.state.clone(),
         planner_note: g.planner_note.clone(),
-        // 預算在 M6。
-        budget_used_pct: 0,
+        budget_used_pct,
         tasks: views,
         team: crate::team::views(conn, g.id).await?,
         brief,

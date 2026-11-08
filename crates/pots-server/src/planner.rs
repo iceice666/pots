@@ -89,6 +89,12 @@ pub enum PlannerTrigger {
     Escalated {
         reason: String,
     },
+    /// 你核准了追加預算（M6）。
+    BudgetApproved {
+        tokens: u64,
+    },
+    /// 預算熔斷解除了（M6）。
+    BreakerCleared,
 }
 
 impl PlannerTrigger {
@@ -128,6 +134,10 @@ impl PlannerTrigger {
                 "這個 Goal 原本是快速修改，worker 發現超出範圍而升級：{}。請依 Brief 重新規劃（已做的修改在任務的分支上）。",
                 tasks::one_line(reason, 1000)
             ),
+            Self::BudgetApproved { tokens } => {
+                format!("使用者核准追加 {tokens} tokens 的預算，請繼續這個 Goal。")
+            }
+            Self::BreakerCleared => "使用者的預算熔斷已解除，請繼續這個 Goal。".to_string(),
         }
     }
 }
@@ -409,6 +419,8 @@ impl Planner {
                  WHERE r.agent = 'planner' AND r.goal_id IS NOT NULL AND r.state = 'queued' \
                  AND NOT EXISTS (SELECT 1 FROM agent_runs x WHERE x.goal_id = r.goal_id \
                      AND x.agent = 'planner' AND x.state = 'running') \
+                 AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = r.project_id \
+                     AND p.breaker_until IS NOT NULL) \
                  ORDER BY r.started_at, r.id LIMIT 1",
             )
             .fetch_optional(txn.conn())
@@ -567,6 +579,17 @@ impl Planner {
             instructions.push_str(project.instructions.trim());
         }
         instructions.push_str(&tail);
+        let budget = crate::budget::for_run(
+            &inner.store,
+            &inner.hub,
+            &inner.clock,
+            job.run,
+            job.project,
+            Some(job.goal),
+            None,
+            route.model.clone(),
+        )
+        .await?;
         let ctx = Arc::new(ToolCtx {
             hub: inner.hub.clone(),
             store: inner.store.clone(),
@@ -579,6 +602,7 @@ impl Planner {
             run_id: job.run,
             cards: Arc::new(Mutex::new(Vec::<Card>::new())),
             finished: Default::default(),
+            budget,
             milestones: Default::default(),
             goals_created: Default::default(),
             queued: None,
@@ -604,7 +628,7 @@ impl Planner {
         let history = vec![Item::User { text: message }];
         match agent::run(&config, history, events, job.cancel.clone()).await {
             Ok(r) => {
-                let usage = r.usage.input_tokens + r.usage.output_tokens;
+                let _ = r.usage;
                 let text = r
                     .new_items
                     .iter()
@@ -616,7 +640,6 @@ impl Planner {
                     .unwrap_or_default();
                 Ok(RunEnd::Done {
                     text,
-                    usage,
                     max_turns: r.outcome == agent::RunOutcome::MaxTurns,
                 })
             }
@@ -634,15 +657,16 @@ impl Planner {
         let shutdown = inner.shutdown.is_cancelled();
         let mut txn = inner.hub.begin().await?;
         let conn = txn.conn();
+        let stop: Option<String> =
+            sqlx::query_scalar("SELECT stop_reason FROM agent_runs WHERE id = ?")
+                .bind(job.run.to_string())
+                .fetch_optional(&mut *conn)
+                .await?
+                .flatten();
         // (run 的狀態, 錯誤, 新的 Planner 備註)
         let (state, error, note): (&str, Option<String>, Option<String>) = match result {
             Ok(RunEnd::Skipped) => ("cancelled", None, None),
-            Ok(RunEnd::Done {
-                text,
-                usage,
-                max_turns,
-            }) => {
-                tasks::add_spent(conn, job.goal, usage).await?;
+            Ok(RunEnd::Done { text, max_turns }) => {
                 let mut note = if text.trim().is_empty() {
                     "Planner 完成了這一輪".to_string()
                 } else {
@@ -650,6 +674,15 @@ impl Planner {
                 };
                 if max_turns {
                     note.push_str("（已達單次工具輪數上限）");
+                }
+                match stop.as_deref() {
+                    Some("budget") => {
+                        note = "Goal 的預算用完了，等你決定要不要追加預算（Inbox）".into();
+                    }
+                    Some("breaker") => {
+                        note = "這個 project 的預算熔斷中，暫停所有 run".into();
+                    }
+                    _ => {}
                 }
                 ("done", None, Some(note))
             }
@@ -709,7 +742,20 @@ impl Planner {
             tasks::set_planner_note(conn, job.goal, &note).await?;
             tasks::push_goal(&mut txn, job.goal).await?;
         }
-        txn.commit().await
+        txn.commit().await?;
+        if stop.as_deref() == Some("budget")
+            && let Err(e) = crate::budget::request_increase(
+                &inner.store,
+                &inner.hub,
+                &inner.clock,
+                job.project,
+                job.goal,
+            )
+            .await
+        {
+            tracing::warn!(run = %job.run, error = %e, "無法申請追加預算");
+        }
+        Ok(())
     }
 }
 
@@ -718,7 +764,6 @@ enum RunEnd {
     Skipped,
     Done {
         text: String,
-        usage: u64,
         max_turns: bool,
     },
     Llm(LlmError),

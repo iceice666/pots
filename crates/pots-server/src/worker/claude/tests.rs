@@ -1,6 +1,6 @@
 //! adapter 的單元測試：純函式，以及對著假的 CLI（`pots-fake-claude`）跑完整流程。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant as StdInstant;
 
@@ -364,19 +364,22 @@ fn permission_frames() {
 // ---- 對著假的 CLI ----
 
 /// `target/<profile>/pots-fake-claude`（cargo 在跑這個 package 的測試前會先建好所有 bin）。
+/// 測試執行檔可能放在 `target/<profile>/deps` 或 `target/<profile>/build/...`，往上找。
 fn fake_bin() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
-    let dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target/<profile>");
-    let bin = dir.join(format!("pots-fake-claude{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        bin.exists(),
-        "找不到 {}；請先 `cargo build -p pots-server --bin pots-fake-claude`",
-        bin.display()
-    );
-    bin
+    let mut dir = exe.parent().expect("target/<profile>").to_path_buf();
+    let name = format!("pots-fake-claude{}", std::env::consts::EXE_SUFFIX);
+    loop {
+        let bin = dir.join(&name);
+        if bin.exists() {
+            return bin;
+        }
+        if !dir.pop() {
+            panic!(
+                "找不到 pots-fake-claude；請先 `cargo build -p pots-server --bin pots-fake-claude`"
+            );
+        }
+    }
 }
 
 struct Fixture {

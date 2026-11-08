@@ -80,6 +80,10 @@ pub enum Action {
         base_rev: u32,
         body: String,
     },
+    /// Goal 的預算用完了；核准就追加 `tokens` 並叫醒 Planner（M6）。
+    IncreaseBudget { goal: GoalId, tokens: u64 },
+    /// project 的每小時用量超過上限；核准就解除熔斷並重新排程（M6）。
+    ResumeProject { project: ProjectId },
 }
 
 impl Action {
@@ -402,6 +406,13 @@ pub async fn view(conn: &mut SqliteConnection, row: &ApprovalRow) -> Result<Appr
                 diff: artifacts::diff(&old, body, &format!("Project Notes v{base_rev}"), "提案"),
             }
         }
+        Action::IncreaseBudget { goal, tokens } => ApprovalActionView::IncreaseBudget {
+            goal: *goal,
+            tokens: *tokens,
+        },
+        Action::ResumeProject { project } => {
+            ApprovalActionView::ResumeProject { project: *project }
+        }
     };
     Ok(ApprovalView {
         id: row.id,
@@ -606,6 +617,13 @@ async fn expire_one(
                 automation::set_listener_approval(txn.conn(), l.id, None).await?;
                 automation::push(txn, now).await?;
             }
+        }
+        Action::IncreaseBudget { goal, .. } => {
+            Store::deny_goal_budget(txn.conn(), *goal).await?;
+            tasks::push_goal(txn, *goal).await?;
+        }
+        Action::ResumeProject { project } => {
+            crate::budget::cooldown_breaker(txn.conn(), *project, now).await?;
         }
         _ => {}
     }
@@ -980,7 +998,14 @@ pub async fn decide(
             now,
         )
         .await?;
+        let kick_planner = matches!(
+            row.action,
+            Action::IncreaseBudget { .. } | Action::ResumeProject { .. }
+        );
         txn.commit().await?;
+        if kick_planner {
+            app.planner.kick();
+        }
         Ok(match outcome {
             Ok(_) => Ok(false),
             Err(e) => Err(e),
@@ -1035,6 +1060,13 @@ async fn on_rejected(
                 automation::delete_listener(txn.conn(), l.id).await?;
                 automation::push(txn, now).await?;
             }
+        }
+        Action::IncreaseBudget { goal, .. } => {
+            Store::deny_goal_budget(txn.conn(), *goal).await?;
+            tasks::push_goal(txn, *goal).await?;
+        }
+        Action::ResumeProject { project } => {
+            crate::budget::cooldown_breaker(txn.conn(), *project, now).await?;
         }
         _ => {}
     }
@@ -1096,6 +1128,58 @@ async fn execute_local(
                 None => Ok(Ok("Project Notes 的內容沒有變".into())),
             }
         }
+        Action::IncreaseBudget { goal, tokens } => {
+            let Some(g) = tasks::goal(txn.conn(), *goal).await? else {
+                return Ok(Err("找不到這個 Goal".into()));
+            };
+            sqlx::query(
+                "UPDATE goals SET budget_tokens = COALESCE(budget_tokens, 0) + ?, budget_denied = 0, \
+                 updated_at = ? WHERE id = ?",
+            )
+            .bind(*tokens as i64)
+            .bind(now.0)
+            .bind(goal.to_string())
+            .execute(txn.conn())
+            .await?;
+            crate::planner::enqueue(
+                txn.conn(),
+                g.project,
+                *goal,
+                &crate::planner::PlannerTrigger::BudgetApproved { tokens: *tokens },
+            )
+            .await?;
+            tasks::push_goal(txn, *goal).await?;
+            Ok(Ok(format!("追加了 {tokens} tokens")))
+        }
+        Action::ResumeProject { project } => {
+            sqlx::query("UPDATE projects SET breaker_until = NULL WHERE id = ?")
+                .bind(project.to_string())
+                .execute(txn.conn())
+                .await?;
+            for g in tasks::goals(txn.conn(), *project).await? {
+                if g.state.is_active() {
+                    crate::planner::enqueue(
+                        txn.conn(),
+                        *project,
+                        g.id,
+                        &crate::planner::PlannerTrigger::BreakerCleared,
+                    )
+                    .await?;
+                }
+            }
+            crate::tools::post_card(
+                txn,
+                *project,
+                pots_proto::Card::Notice {
+                    title: "預算熔斷已解除".into(),
+                    body: "已恢復這個 project 的 run。".into(),
+                    actions: Vec::new(),
+                },
+                None,
+            )
+            .await?;
+            Ok(Ok("已恢復這個 project 的 run".into()))
+        }
         Action::MergePr { .. } | Action::DeleteBranch { .. } => {
             Ok(Err("這個動作要另外執行".into()))
         }
@@ -1130,7 +1214,9 @@ pub async fn request_merge(
         (Some(s), Scope::Goal(_)) => crate::tools::parse_id("task_id", s)?,
         (_, Scope::Task { task, .. }) => task,
         (None, Scope::Goal(_)) => return Err(bad("要給 task_id")),
-        (_, Scope::Project) => return Err(bad("request_approval 只有 worker 與 Planner 能用")),
+        (_, Scope::Project | Scope::Global) => {
+            return Err(bad("request_approval 只有 worker 與 Planner 能用"));
+        }
     };
     let method = match method.map(str::trim).filter(|s| !s.is_empty()) {
         Some(m) => {

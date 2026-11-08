@@ -74,6 +74,27 @@ pub async fn run(
                 let model = route.model.clone();
                 async move {
                     let run_id = Uuid::now_v7();
+                    let budget = match crate::budget::for_run(
+                        &ctx.store,
+                        &ctx.hub,
+                        &ctx.clock,
+                        run_id,
+                        ctx.project,
+                        ctx.scope.goal(),
+                        match ctx.scope {
+                            Scope::Task { task, .. } => Some(task),
+                            _ => None,
+                        },
+                        model.clone(),
+                    )
+                    .await
+                    {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "無法建立 subagent 的預算");
+                            return (i, "（subagent 沒有開始：伺服器內部錯誤）".into());
+                        }
+                    };
                     let sub = Arc::new(ToolCtx {
                         hub: ctx.hub.clone(),
                         store: ctx.store.clone(),
@@ -87,6 +108,7 @@ pub async fn run(
                         cards: Default::default(),
                         queued: None,
                         finished: Arc::new(AtomicBool::new(false)),
+                        budget,
                         milestones: Default::default(),
                         goals_created: Default::default(),
                         clock: ctx.clock.clone(),
@@ -103,6 +125,7 @@ pub async fn run(
                         None => instructions
                             .push_str("\n\n這次沒有可以讀的程式碼，只能用平台狀態的工具。"),
                     }
+                    let model_name = model.clone();
                     let config = RunConfig {
                         provider,
                         model,
@@ -111,7 +134,9 @@ pub async fn run(
                         hook: Arc::new(sub.gate()),
                         max_turns: profile.max_turns,
                     };
-                    if let Err(e) = record_start(&ctx, run_id, &profile.name, &job.prompt).await {
+                    if let Err(e) =
+                        record_start(&ctx, run_id, &profile.name, &model_name, &job.prompt).await
+                    {
                         tracing::warn!(error = %e, "無法記錄 subagent run");
                     }
                     let (events, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -125,7 +150,7 @@ pub async fn run(
                         sub.cancel.clone(),
                     )
                     .await;
-                    let (state, error, text, usage) = match result {
+                    let (state, error, text) = match result {
                         Ok(r) => {
                             let text = r
                                 .new_items
@@ -138,21 +163,19 @@ pub async fn run(
                                     _ => None,
                                 })
                                 .unwrap_or_else(|| "（subagent 沒有回答）".into());
-                            let usage = r.usage.input_tokens + r.usage.output_tokens;
-                            ("done", None, text, usage)
+                            ("done", None, text)
                         }
-                        Err(LlmError::Cancelled) => ("cancelled", None, "（已取消）".into(), 0),
+                        Err(LlmError::Cancelled) => ("cancelled", None, "（已取消）".into()),
                         Err(e) => {
                             let why = explain(&e);
                             (
                                 "failed",
                                 Some(e.to_string()),
                                 format!("（subagent 失敗：{why}）"),
-                                0,
                             )
                         }
                     };
-                    if let Err(e) = record_end(&ctx, run_id, state, error, usage).await {
+                    if let Err(e) = record_end(&ctx, run_id, state, error).await {
                         tracing::warn!(error = %e, "無法記錄 subagent run 的結束");
                     }
                     (i, text)
@@ -203,11 +226,17 @@ async fn mirror(ctx: &ToolCtx, repo: Option<&str>) -> Result<Option<code::Mirror
     Ok(Some(code::Mirror { repo, dir, branch }))
 }
 
-async fn record_start(ctx: &ToolCtx, run: Uuid, agent: &str, prompt: &str) -> Result<(), Error> {
+async fn record_start(
+    ctx: &ToolCtx,
+    run: Uuid,
+    agent: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<(), Error> {
     let mut tx = ctx.store.begin().await?;
     sqlx::query(
-        "INSERT INTO agent_runs (id, project_id, agent, trigger, state, started_at, goal_id, task_id, parent_run_id) \
-         VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)",
+        "INSERT INTO agent_runs (id, project_id, agent, trigger, state, started_at, goal_id, task_id, \
+         parent_run_id, model) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)",
     )
     .bind(run.to_string())
     .bind(ctx.project.to_string())
@@ -220,6 +249,7 @@ async fn record_start(ctx: &ToolCtx, run: Uuid, agent: &str, prompt: &str) -> Re
         _ => None,
     })
     .bind(ctx.run_id.to_string())
+    .bind(model)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -231,7 +261,6 @@ async fn record_end(
     run: Uuid,
     state: &str,
     error: Option<String>,
-    usage: u64,
 ) -> Result<(), Error> {
     let mut tx = ctx.store.begin().await?;
     sqlx::query("UPDATE agent_runs SET state = ?, error = ?, finished_at = ? WHERE id = ?")
@@ -241,9 +270,6 @@ async fn record_end(
         .bind(run.to_string())
         .execute(&mut *tx)
         .await?;
-    if let Some(goal) = ctx.scope.goal() {
-        tasks::add_spent(&mut tx, goal, usage).await?;
-    }
     tx.commit().await?;
     Ok(())
 }

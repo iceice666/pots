@@ -20,6 +20,7 @@ const BUILTIN_PLANNER: &str = include_str!("../profiles/planner.toml");
 const BUILTIN_WORKER: &str = include_str!("../profiles/worker.toml");
 const BUILTIN_EXPLORER: &str = include_str!("../profiles/explorer.toml");
 const BUILTIN_REVIEWER: &str = include_str!("../profiles/reviewer.toml");
+const BUILTIN_GLOBAL: &str = include_str!("../profiles/global.toml");
 
 /// 唯讀基礎集以外、要在 profile 裡授權的工具。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -135,6 +136,8 @@ pub struct Profiles {
     pub worker: AgentProfile,
     pub explorer: AgentProfile,
     pub reviewer: AgentProfile,
+    /// 總管：跨 project 的全域對話（M6）。
+    pub global: AgentProfile,
 }
 
 struct Rules {
@@ -222,6 +225,21 @@ const REVIEWER_RULES: Rules = Rules {
     kinds: &[],
 };
 
+/// 總管只看得到唯讀工具，加上跨 project 的派工、排程與暫停。
+const GLOBAL_RULES: Rules = Rules {
+    name: "global",
+    memory: MemoryMode::Om,
+    tools: &[
+        ToolName::CreateGoal,
+        ToolName::CancelGoal,
+        ToolName::Schedule,
+        ToolName::PauseAutomations,
+        ToolName::ResumeAutomations,
+        ToolName::RunSubagent,
+    ],
+    kinds: &[],
+};
+
 impl Profiles {
     /// 內建的 profile。
     #[cfg(test)]
@@ -236,6 +254,8 @@ impl Profiles {
                 .expect("內建 explorer.toml"),
             reviewer: parse(BUILTIN_REVIEWER, &REVIEWER_RULES, "內建 reviewer.toml")
                 .expect("內建 reviewer.toml"),
+            global: parse(BUILTIN_GLOBAL, &GLOBAL_RULES, "內建 global.toml")
+                .expect("內建 global.toml"),
         }
     }
 
@@ -262,6 +282,7 @@ impl Profiles {
             worker: one(BUILTIN_WORKER, &WORKER_RULES)?,
             explorer: one(BUILTIN_EXPLORER, &EXPLORER_RULES)?,
             reviewer: one(BUILTIN_REVIEWER, &REVIEWER_RULES)?,
+            global: one(BUILTIN_GLOBAL, &GLOBAL_RULES)?,
         })
     }
 }

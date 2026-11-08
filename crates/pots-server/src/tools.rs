@@ -18,7 +18,7 @@ use pots_llm::ToolSpec;
 use pots_llm::agent::{Hook, Tool, ToolError};
 use pots_proto::{
     ArtifactId, ArtifactKind, Card, GoalId, GoalState, ItemId, ProjectId, ServerEvent,
-    StreamItemKind, StreamItemView, StreamScope, TaskId, Timestamp,
+    StreamItemKind, StreamItemView, TaskId, Timestamp,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -61,13 +61,15 @@ pub enum Scope {
     Goal(GoalId),
     /// worker：Goal 裡的一個任務。
     Task { goal: GoalId, task: TaskId },
+    /// 總管：整個實例（所有 project）。
+    Global,
 }
 
 impl Scope {
     /// 這個範圍所屬的 Goal（對話 agent 是 `None`）。
     pub fn goal(self) -> Option<GoalId> {
         match self {
-            Self::Project => None,
+            Self::Project | Self::Global => None,
             Self::Goal(g) | Self::Task { goal: g, .. } => Some(g),
         }
     }
@@ -99,6 +101,8 @@ pub struct ToolCtx {
     pub queued: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     /// 這個 run 該結束了（例如 `complete_goal` 成功）；[`Gate`] 在下一輪開始前停下。
     pub finished: Arc<AtomicBool>,
+    /// 這個 run 的預算、用量與 trace。
+    pub budget: Arc<crate::budget::Budget>,
     /// 這個 run 已經貼了幾張里程碑、開了幾個 Goal。
     pub milestones: AtomicUsize,
     pub goals_created: AtomicUsize,
@@ -120,6 +124,7 @@ impl ToolCtx {
     pub fn gate(&self) -> Gate {
         Gate {
             finished: self.finished.clone(),
+            budget: self.budget.clone(),
         }
     }
 
@@ -172,15 +177,30 @@ pub fn build(profile: &AgentProfile, ctx: Arc<ToolCtx>) -> Vec<Arc<dyn Tool>> {
 ///
 /// 授權由「只把 profile 的工具交給模型」保證。這裡處理「成功後要結束這個 run」的工具
 /// （`complete_goal`）：工具成功時設 `finished`，下一輪開始前停下。不在 `before_tool` 回
-/// `AllowThenStop`，否則參數錯誤時模型也沒機會重試。預算、熔斷與 trace 在 M6。
+/// `AllowThenStop`，否則參數錯誤時模型也沒機會重試。預算、熔斷與 trace 在 [`crate::budget`]。
 pub struct Gate {
     finished: Arc<AtomicBool>,
+    budget: Arc<crate::budget::Budget>,
 }
 
 #[async_trait::async_trait]
 impl Hook for Gate {
     async fn before_turn(&self, _turn: usize) -> bool {
-        !self.finished.load(Ordering::SeqCst)
+        if self.finished.load(Ordering::SeqCst) {
+            return false;
+        }
+        // 預算用完或熔斷：乾淨停下，完成路徑依 stop_reason 改成申請或維持暫停。
+        self.budget.check_turn().await.is_none()
+    }
+
+    async fn after_turn(&self, turn: usize, usage: pots_llm::provider::Usage) {
+        self.budget.record_turn(turn, usage).await;
+    }
+
+    async fn after_tool(&self, call: &pots_llm::provider::ToolCall, output: &str) {
+        // 工具結果的字串開頭是「錯誤：」時視為失敗（`pots_llm` 的介面只有文字）。
+        let ok = !output.starts_with("錯誤：");
+        self.budget.record_tool(call, output, ok).await;
     }
 }
 
@@ -308,7 +328,7 @@ pub async fn post_card(
     Store::insert_item(txn.conn(), project, &item, ItemStatus::Done, run_id).await?;
     txn.push(|seq| ServerEvent::Item {
         seq,
-        scope: StreamScope::Project(project),
+        scope: crate::store::stream_scope(project),
         item,
     })
     .await
@@ -331,6 +351,9 @@ impl Tool for PlatformTool {
                     }
                     Scope::Task { .. } => {
                         "查詢你的任務與所屬 Goal 的即時狀態：任務狀態、分支、PR、Goal 的任務樹與現在時間（UTC）。"
+                    }
+                    Scope::Global => {
+                        "查詢整個實例的狀態：所有 project 與各自的進行中 Goal、任務數、等你處理的事情與現在時間（UTC）。"
                     }
                 },
                 object(json!({}), &[]),
@@ -357,6 +380,8 @@ impl Tool for PlatformTool {
                     json!({
                         "title": {"type": "string", "description": "簡短的 Goal 標題"},
                         "brief_md": {"type": "string", "description": "Brief 的 Markdown 全文"},
+                        "budget_tokens": {"type": "integer", "description": "這個 Goal 的預算（token）；不填用預設值，夾在 2 萬到 400 萬之間"},
+                        "project": {"type": "string", "description": "總管用：project 名稱或 ID；其他 agent 不用給"},
                     }),
                     &["title", "brief_md"],
                 ),
@@ -479,6 +504,10 @@ impl Tool for PlatformTool {
                     Scope::Goal(_) | Scope::Task { .. } => {
                         "替你負責的 Goal 設定時間醒來：時間到了 Planner 會被叫醒，prompt 是醒來時要做的事。\
                         單次用 once（at 或 in_minutes），週期用 every（五個欄位的 cron，本機時區，最短間隔 10 分鐘，預設 30 天後過期）。"
+                    }
+                    Scope::Global => {
+                        "替總管設定時間醒來：時間到了會回到這條總管對話，prompt 是醒來時要做的事（例如跨 project 摘要）。\
+                        單次用 once（at 或 in_minutes），週期用 every（五個欄位的 cron，本機時區，最短間隔 10 分鐘）。"
                     }
                 },
                 object(
@@ -704,6 +733,11 @@ struct ReadArtifactArgs {
 struct CreateGoalArgs {
     title: String,
     brief_md: String,
+    #[serde(default)]
+    budget_tokens: Option<u64>,
+    /// 總管用：在哪個 project 開 Goal（名稱或 ID）。
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -790,7 +824,7 @@ impl PlatformTool {
             return Err(bad("你只能操作自己負責的 Goal"));
         }
         match tasks::goal(conn, id).await.map_err(internal)? {
-            Some(g) if g.project == self.ctx.project => Ok(g),
+            Some(g) if self.ctx.scope == Scope::Global || g.project == self.ctx.project => Ok(g),
             _ => Err(bad(format!("這個 project 沒有 Goal {id}"))),
         }
     }
@@ -837,6 +871,38 @@ impl PlatformTool {
                         "ledger": artifact_ref(&ledger),
                     },
                     "tasks": tasks.iter().map(task_json).collect::<Vec<_>>(),
+                })
+                .to_string())
+            }
+            Scope::Global => {
+                let projects = ctx.store.list_projects().await.map_err(internal)?;
+                let mut out = Vec::new();
+                for p in projects {
+                    let goals = tasks::goals(&mut tx, p.id).await.map_err(internal)?;
+                    let mut active = Vec::new();
+                    for g in goals.iter().filter(|g| g.state.is_active()) {
+                        let tasks = tasks::tasks(&mut tx, g.id).await.map_err(internal)?;
+                        active.push(json!({
+                            "id": g.id.to_string(),
+                            "title": g.title,
+                            "planner_note": g.planner_note,
+                            "tasks": {
+                                "total": tasks.len(),
+                                "open": tasks.iter().filter(|t| t.state.is_open()).count(),
+                                "needs_human": tasks.iter().filter(|t| matches!(t.state, TaskState::NeedsHuman { .. })).count(),
+                            },
+                        }));
+                    }
+                    out.push(json!({
+                        "project": p.name,
+                        "project_id": p.id.to_string(),
+                        "active_goals": active,
+                    }));
+                }
+                Ok(json!({
+                    "now": now,
+                    "projects": out,
+                    "note": "核准留在各 project 的 Inbox；你只透過任務樹派工。",
                 })
                 .to_string())
             }
@@ -903,9 +969,21 @@ impl PlatformTool {
 
     async fn list_goals(&self, args: ListGoalsArgs) -> Result<String, ToolError> {
         let mut tx = self.ctx.store.read().await.map_err(internal)?;
-        let goals = tasks::goals(&mut tx, self.ctx.project)
-            .await
-            .map_err(internal)?;
+        let projects = if self.ctx.scope == Scope::Global {
+            self.ctx.store.list_projects().await.map_err(internal)?
+        } else {
+            Vec::new()
+        };
+        let mut goals = Vec::new();
+        if projects.is_empty() {
+            goals = tasks::goals(&mut tx, self.ctx.project)
+                .await
+                .map_err(internal)?;
+        } else {
+            for p in &projects {
+                goals.extend(tasks::goals(&mut tx, p.id).await.map_err(internal)?);
+            }
+        }
         let mut out = Vec::new();
         for g in goals {
             if !args.include_closed && !g.state.is_active() {
@@ -923,11 +1001,16 @@ impl PlatformTool {
                 GoalState::Done { summary } => Some(summary.clone()),
                 GoalState::Cancelled { reason } => Some(reason.clone()),
             };
+            let project = projects
+                .iter()
+                .find(|p| p.id == g.project)
+                .map(|p| p.name.clone());
             out.push(json!({
                 "id": g.id.to_string(),
                 "title": g.title,
                 "state": goal_state_name(&g.state),
                 "outcome": outcome,
+                "project": project,
                 "created_at": format_utc(g.created_at),
                 "tasks": {
                     "total": tasks.len(),
@@ -942,7 +1025,7 @@ impl PlatformTool {
         let id: ArtifactId = parse_id("artifact_id", &args.artifact_id)?;
         let mut tx = self.ctx.store.begin().await.map_err(internal)?;
         let a = match artifacts::get(&mut tx, id).await.map_err(internal)? {
-            Some(a) if a.project == self.ctx.project => a,
+            Some(a) if self.ctx.scope == Scope::Global || a.project == self.ctx.project => a,
             _ => return Err(bad(format!("這個 project 沒有 artifact {id}"))),
         };
         // Planner 讀得到自己 Goal 的與掛在 project 上的 artifact，讀不到別的 Goal 的。
@@ -987,11 +1070,33 @@ impl PlatformTool {
         if ctx.goals_created.load(Ordering::SeqCst) >= MAX_GOALS_PER_RUN {
             return Err(bad(format!("一次回覆最多開 {MAX_GOALS_PER_RUN} 個 Goal")));
         }
+        let target = match ctx.scope {
+            Scope::Global => {
+                let selector = args
+                    .project
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| bad("總管開 Goal 要指定 project（名稱或 ID）"))?;
+                ctx.store
+                    .find_project(selector)
+                    .await
+                    .map_err(internal)?
+                    .ok_or_else(|| bad(format!("找不到 project「{selector}」")))?
+                    .id
+            }
+            _ => {
+                if args.project.is_some() {
+                    return Err(bad("只有總管可以替別的 project 開 Goal"));
+                }
+                ctx.project
+            }
+        };
         let result: Result<Result<(GoalId, ArtifactId), String>, Error> = async {
             let mut txn = ctx.hub.begin().await?;
             let opened = open_goal_with_brief(
                 &mut txn,
-                ctx.project,
+                target,
                 &title,
                 &args.brief_md,
                 &ctx.actor,
@@ -1000,7 +1105,10 @@ impl PlatformTool {
                 false,
             )
             .await?;
-            if opened.is_ok() {
+            if let Ok((goal, _)) = &opened {
+                if let Some(tokens) = args.budget_tokens {
+                    tasks::set_goal_budget(txn.conn(), *goal, tokens).await?;
+                }
                 txn.commit_then(|| ctx.planner.kick()).await?;
             }
             Ok(opened)
@@ -1164,6 +1272,9 @@ impl PlatformTool {
                         Some(self.own_goal(txn.conn(), g).await?.id)
                     }
                     (Scope::Project, None) => None,
+                    (Scope::Global, _) => {
+                        return Err(bad("總管不寫 artifact；派工後由該 project 的 agent 寫"));
+                    }
                 };
                 if kind == ArtifactKind::Ledger {
                     let Some(goal) = goal else {
@@ -1784,6 +1895,7 @@ impl PlatformTool {
                 goal,
             },
             Scope::Task { .. } => return Err(bad("worker 不能設排程；要等時間用 wait_for")),
+            Scope::Global => ScheduleOwner::Global,
         };
         let mut txn = ctx.hub.begin().await.map_err(internal)?;
         if let Scope::Goal(goal) = ctx.scope {
@@ -1819,7 +1931,7 @@ impl PlatformTool {
                     // 對話 agent 的卡片附在這則回覆下面（commit 成功後才加）。
                     ctx.cards.lock().unwrap().push(card);
                 }
-                Scope::Goal(_) | Scope::Task { .. } => {
+                Scope::Goal(_) | Scope::Task { .. } | Scope::Global => {
                     post_card(&mut txn, ctx.project, card, Some(ctx.run_id)).await?;
                     automation::push(&mut txn, now).await?;
                     txn.commit().await?;
@@ -1905,16 +2017,24 @@ impl PlatformTool {
         .to_string())
     }
 
-    /// 對話 agent 只能暫停自己的 project；之後的總管可以指定任一 project。
-    fn pause_scope(&self, project_id: Option<&str>) -> Result<ProjectId, ToolError> {
-        let project = match project_id {
-            Some(p) => parse_id("project_id", p)?,
-            None => self.ctx.project,
-        };
-        if project != self.ctx.project {
-            return Err(bad("你只能暫停自己的 project"));
+    /// 對話 agent 只能暫停自己的 project；總管可以指定任一 project（不給就是全部）。
+    fn pause_scope(&self, project_id: Option<&str>) -> Result<Option<ProjectId>, ToolError> {
+        match self.ctx.scope {
+            Scope::Global => match project_id {
+                Some(p) => Ok(Some(parse_id("project_id", p)?)),
+                None => Ok(None),
+            },
+            _ => {
+                let project = match project_id {
+                    Some(p) => parse_id("project_id", p)?,
+                    None => self.ctx.project,
+                };
+                if project != self.ctx.project {
+                    return Err(bad("你只能暫停自己的 project"));
+                }
+                Ok(Some(project))
+            }
         }
-        Ok(project)
     }
 
     async fn pause(&self, args: PauseArgs) -> Result<String, ToolError> {
@@ -1935,19 +2055,23 @@ impl PlatformTool {
             if let Some(p) = automation::pauses(txn.conn())
                 .await?
                 .into_iter()
-                .find(|p| p.project == Some(project))
+                .find(|p| p.project == project)
                 && p.by != ctx.actor
             {
-                return Ok(Err(format!("這個 project 已經被{}暫停了", p.by.label())));
+                return Ok(Err(format!(
+                    "{}已經被{}暫停了",
+                    project.map(|_| "這個 project").unwrap_or("所有 project"),
+                    p.by.label()
+                )));
             }
-            automation::pause(txn.conn(), Some(project), until, &ctx.actor, now).await?;
+            automation::pause(txn.conn(), project, until, &ctx.actor, now).await?;
             automation::push(&mut txn, now).await?;
             txn.commit().await?;
             Ok(Ok(()))
         }
         .await;
         result.map_err(internal)?.map_err(bad)?;
-        ctx.cards.lock().unwrap().push(Card::Notice {
+        let card = Card::Notice {
             title: "已暫停排程與 listener".into(),
             body: match until {
                 Some(u) => format!(
@@ -1960,8 +2084,21 @@ impl PlatformTool {
                 pots_proto::NoticeAction::ViewAutomations,
                 pots_proto::NoticeAction::ResumeAutomations,
             ],
-        });
-        Ok(json!({"paused": project.to_string(), "until": until.map(format_utc)}).to_string())
+        };
+        if ctx.scope == Scope::Global {
+            let mut txn = ctx.hub.begin().await.map_err(internal)?;
+            post_card(&mut txn, ctx.project, card, Some(ctx.run_id))
+                .await
+                .map_err(internal)?;
+            txn.commit().await.map_err(internal)?;
+        } else {
+            ctx.cards.lock().unwrap().push(card);
+        }
+        Ok(json!({
+            "paused": project.map(|p| p.to_string()).unwrap_or_else(|| "all".into()),
+            "until": until.map(format_utc),
+        })
+        .to_string())
     }
 
     async fn resume(&self, args: ResumeArgs) -> Result<String, ToolError> {
@@ -1973,7 +2110,7 @@ impl PlatformTool {
             let pause = automation::pauses(txn.conn())
                 .await?
                 .into_iter()
-                .find(|p| p.project == Some(project));
+                .find(|p| p.project == project);
             match pause {
                 None => return Ok(Err("這個 project 沒有被暫停".into())),
                 // 使用者自己暫停的只有使用者能恢復。
@@ -1982,13 +2119,16 @@ impl PlatformTool {
                 }
                 Some(_) => {}
             }
-            automation::resume(txn.conn(), Some(project)).await?;
+            automation::resume(txn.conn(), project).await?;
             automation::push(&mut txn, now).await?;
             txn.commit().await?;
             Ok(Ok(()))
         }
         .await;
         result.map_err(internal)?.map_err(bad)?;
-        Ok(json!({"resumed": project.to_string()}).to_string())
+        Ok(json!({
+            "resumed": project.map(|p| p.to_string()).unwrap_or_else(|| "all".into()),
+        })
+        .to_string())
     }
 }

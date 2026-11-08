@@ -2,9 +2,9 @@
 //! 被拒絕或失敗時只回給發出指令的連線一個 `Error`。
 
 use pots_proto::{
-    AgentState, ArtifactId, ArtifactKind, Author, ClientCommand, ItemId, Msg, MsgStatus, ProjectId,
-    ProjectSnapshot, SendMode, ServerEvent, StreamItemKind, StreamItemView, StreamScope, TaskId,
-    Timestamp,
+    AgentState, ArtifactId, ArtifactKind, Author, Card, ClientCommand, ItemId, Msg, MsgStatus,
+    ProjectId, ProjectSnapshot, SendMode, ServerEvent, StreamItemKind, StreamItemView, StreamScope,
+    TaskId, Timestamp, TraceStepView, WhyView,
 };
 use tokio::sync::mpsc;
 
@@ -66,12 +66,16 @@ async fn run(app: &App, cmd: ClientCommand) -> Result<Option<ServerEvent>, Strin
     if let ClientCommand::ArtifactHistory { artifact } = cmd {
         return artifact_history(app, artifact).await.map(Some);
     }
+    if let ClientCommand::Why { item } = cmd {
+        return why(app, item).await.map(Some);
+    }
     run_logged(app, cmd).await.map(|()| None)
 }
 
 async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
     match cmd {
         ClientCommand::Resume { .. } => Err("這條連線已經 Resume 過".into()),
+        ClientCommand::Why { .. } => Err("這個指令要直接回覆".into()),
         ClientCommand::CreateProject { name } => create_project(app, name).await,
         ClientCommand::Send {
             project,
@@ -80,9 +84,18 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             mode,
         } => send(app, project, id, text, mode).await,
         ClientCommand::Stop { project } => {
+            if project == crate::store::OVERSIGHT_PROJECT_ID {
+                return Err("總管的對話請用 StopOverseer".into());
+            }
             app.runs.stop(project);
             Ok(())
         }
+        ClientCommand::SendOverseer { id, text } => send_overseer(app, id, text).await,
+        ClientCommand::StopOverseer => {
+            app.overseer_runs.stop(crate::store::OVERSIGHT_PROJECT_ID);
+            Ok(())
+        }
+        ClientCommand::MarkRead { project } => mark_read(app, project).await,
         ClientCommand::Decide {
             approval,
             approve,
@@ -473,7 +486,9 @@ async fn create_project(app: &App, name: String) -> Result<(), String> {
 
 /// 這個 project 屬於本機使用者（`Store::project` 依 user 過濾）。
 async fn owns(app: &App, project: ProjectId) -> Result<bool, crate::Error> {
-    Ok(app.store.project(project).await?.is_some())
+    // 總管的內部 project 不是使用者操作的 project；一般指令不接受它。
+    Ok(app.store.project(project).await?.is_some()
+        && app.store.project_kind(project).await?.as_deref() == Some("project"))
 }
 
 /// 你對 artifact 的修改。
@@ -536,6 +551,213 @@ async fn save_artifact(app: &App, id: ArtifactId, edit: Edit) -> Result<(), Stri
     }
     .await;
     result.map_err(internal)?
+}
+
+/// 「你不在期間」的門檻：距上次看到超過兩小時才插入摘要卡片。
+const CATCH_UP_SECS: i64 = 2 * 3600;
+
+/// 你看到這個 project 的對話了。離開超過兩小時而且期間有里程碑時，先插一張摘要卡片。
+async fn mark_read(app: &App, project: ProjectId) -> Result<(), String> {
+    if project == crate::store::OVERSIGHT_PROJECT_ID {
+        return Err("總管沒有已讀狀態".into());
+    }
+    if app
+        .store
+        .project(project)
+        .await
+        .map_err(internal)?
+        .is_none()
+    {
+        return Err("找不到這個 project".into());
+    }
+    let now = app.watcher.clock().now();
+    let last = app
+        .store
+        .project_last_read(project)
+        .await
+        .map_err(internal)?;
+    if let Some(last) = last
+        && now.0 - last.0 >= CATCH_UP_SECS
+    {
+        let result: Result<(), crate::Error> = async {
+            let mut conn = app.store.acquire().await?;
+            let milestones = crate::budget::milestones_since(&mut conn, project, last).await?;
+            drop(conn);
+            if milestones.any() {
+                let mut txn = app.hub.begin().await?;
+                crate::tools::post_card(
+                    &mut txn,
+                    project,
+                    Card::CatchUp {
+                        summary: milestones.summary(),
+                    },
+                    None,
+                )
+                .await?;
+                txn.commit().await?;
+            }
+            Ok(())
+        }
+        .await;
+        result.map_err(internal)?;
+    }
+    app.store
+        .mark_project_read(project, now)
+        .await
+        .map_err(internal)?;
+    Ok(())
+}
+
+/// 對總管說話。
+async fn send_overseer(app: &App, id: ItemId, text: String) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("訊息是空的".into());
+    }
+    let project = crate::store::OVERSIGHT_PROJECT_ID;
+    let item = StreamItemView {
+        id,
+        at: Timestamp::now(),
+        kind: StreamItemKind::Human(Msg {
+            author: Author::Human,
+            text: text.clone(),
+            status: MsgStatus::Done,
+            tools: None,
+            cards: Vec::new(),
+            steer: false,
+        }),
+    };
+    let inserted: Result<Result<(), String>, crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        match Store::item_project(txn.conn(), id).await? {
+            Some(p) if p == project => return Ok(Ok(())),
+            Some(_) => return Ok(Err("訊息 ID 重複".into())),
+            None => {}
+        }
+        Store::insert_item(txn.conn(), project, &item, ItemStatus::Pending, None).await?;
+        txn.push(|seq| ServerEvent::Item {
+            seq,
+            scope: StreamScope::Overseer,
+            item,
+        })
+        .await?;
+        txn.commit_then(|| {
+            app.overseer_runs
+                .enqueue(project, Trigger { item: id, text }, false)
+        })
+        .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    inserted.map_err(internal)?
+}
+
+/// 一則 agent 訊息為什麼這樣回答：觸發來源、當下的記憶版本、模型與工具順序。
+async fn why(app: &App, item: ItemId) -> Result<ServerEvent, String> {
+    let result: Result<Option<ServerEvent>, crate::Error> = async {
+        let mut conn = app.store.acquire().await?;
+        let row = sqlx::query("SELECT run_id, project_id FROM stream_items WHERE id = ?")
+            .bind(item.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        use sqlx::Row;
+        let project: ProjectId = crate::store::parse_id(row.try_get("project_id")?)?;
+        if app.store.project(project).await?.is_none() {
+            return Ok(None);
+        }
+        let run: Option<String> = row.try_get("run_id")?;
+        let Some(run) = run else {
+            return Ok(Some(ServerEvent::Why { why: None }));
+        };
+        let run: uuid::Uuid = crate::store::parse_id(run)?;
+        let row = sqlx::query(
+            "SELECT agent, model, trigger, memory_revision, started_at, finished_at, stop_reason, \
+             input_tokens, output_tokens FROM agent_runs WHERE id = ?",
+        )
+        .bind(run.to_string())
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(row) = row else {
+            return Ok(Some(ServerEvent::Why { why: None }));
+        };
+        let steps = app
+            .store
+            .trace(run)
+            .await?
+            .into_iter()
+            .map(|t| TraceStepView {
+                kind: t.kind,
+                name: t.name,
+                at: t.at,
+                ok: t.ok,
+                detail: t.detail.to_string(),
+            })
+            .collect();
+        Ok(Some(ServerEvent::Why {
+            why: Some(WhyView {
+                item,
+                agent: row.try_get("agent")?,
+                model: row.try_get("model")?,
+                trigger: trigger_summary(&row.try_get::<String, _>("trigger")?),
+                memory_revision: row.try_get("memory_revision")?,
+                started_at: Timestamp(row.try_get("started_at")?),
+                finished_at: row.try_get::<Option<i64>, _>("finished_at")?.map(Timestamp),
+                stop_reason: row.try_get("stop_reason")?,
+                input_tokens: row.try_get::<i64, _>("input_tokens")?.max(0) as u64,
+                output_tokens: row.try_get::<i64, _>("output_tokens")?.max(0) as u64,
+                steps,
+            }),
+        }))
+    }
+    .await;
+    result
+        .map_err(internal)?
+        .ok_or_else(|| "找不到這則訊息".into())
+}
+
+/// 把 `agent_runs.trigger` 的 JSON 轉成一句人看得懂的話。
+fn trigger_summary(trigger: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(trigger).unwrap_or(serde_json::Value::Null);
+    let pick = |v: &serde_json::Value, key: &str| {
+        v.get(key)
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .unwrap_or_default()
+    };
+    match value.get("kind").and_then(|k| k.as_str()) {
+        Some("messages") => {
+            let text = pick(&value, "text");
+            if text.is_empty() {
+                "使用者訊息".into()
+            } else {
+                format!("使用者訊息：{}", tasks::one_line(&text, 200))
+            }
+        }
+        Some("scheduled") => {
+            let prompt = pick(&value, "prompt");
+            format!("排程觸發：{}", tasks::one_line(&prompt, 200))
+        }
+        Some("subagent") => "subagent".into(),
+        Some(other) => other.to_string(),
+        None if value.get("triggers").is_some() => {
+            let kinds = value
+                .get("triggers")
+                .and_then(|t| t.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|t| t.get("kind").and_then(|k| k.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                })
+                .unwrap_or_default();
+            if kinds.is_empty() {
+                "Planner 被叫醒".into()
+            } else {
+                format!("Planner 觸發：{kinds}")
+            }
+        }
+        None => tasks::one_line(trigger, 200),
+    }
 }
 
 async fn artifact_history(app: &App, id: ArtifactId) -> Result<ServerEvent, String> {
@@ -702,6 +924,9 @@ async fn send(
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("訊息是空的".into());
+    }
+    if project == crate::store::OVERSIGHT_PROJECT_ID {
+        return Err("總管的對話請用 SendOverseer".into());
     }
     if app
         .store

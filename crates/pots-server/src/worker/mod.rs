@@ -965,6 +965,8 @@ impl Worker {
                  WHERE r.agent = 'worker' AND r.task_id IS NOT NULL AND r.state = 'queued' \
                  AND NOT EXISTS (SELECT 1 FROM agent_runs x WHERE x.task_id = r.task_id \
                      AND x.agent = 'worker' AND x.state = 'running') \
+                 AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = r.project_id \
+                     AND p.breaker_until IS NOT NULL) \
                  ORDER BY r.started_at, r.id LIMIT 1",
             )
             .fetch_optional(txn.conn())
@@ -1325,7 +1327,14 @@ impl Worker {
         result
     }
 
-    fn tool_ctx(&self, job: &Job, task: &TaskRow, work: Arc<WorkCtx>, code: bool) -> Arc<ToolCtx> {
+    async fn tool_ctx(
+        &self,
+        job: &Job,
+        task: &TaskRow,
+        work: Arc<WorkCtx>,
+        code: bool,
+        model: &str,
+    ) -> Result<Arc<ToolCtx>, Error> {
         let inner = &self.inner;
         let code: Option<Arc<dyn code::CodeAccess>> = code.then(|| {
             Arc::new(code::Worktree {
@@ -1333,7 +1342,18 @@ impl Worker {
                 base: work.checkout.base.clone(),
             }) as Arc<dyn code::CodeAccess>
         });
-        Arc::new(ToolCtx {
+        let budget = crate::budget::for_run(
+            &inner.store,
+            &inner.hub,
+            &inner.clock,
+            job.run,
+            job.project,
+            Some(job.goal),
+            Some(task.id),
+            model,
+        )
+        .await?;
+        Ok(Arc::new(ToolCtx {
             hub: inner.hub.clone(),
             store: inner.store.clone(),
             planner: self.planner().expect("planner").clone(),
@@ -1349,6 +1369,7 @@ impl Worker {
             cards: Default::default(),
             queued: None,
             finished: Arc::new(AtomicBool::new(false)),
+            budget,
             milestones: Default::default(),
             goals_created: Default::default(),
             clock: inner.clock.clone(),
@@ -1357,7 +1378,7 @@ impl Worker {
             code,
             stop: Arc::new(Notify::new()),
             cancel: job.cancel.clone(),
-        })
+        }))
     }
 
     async fn run_builtin(
@@ -1378,7 +1399,7 @@ impl Worker {
                 )));
             }
         };
-        let ctx = self.tool_ctx(job, task, work, true);
+        let ctx = self.tool_ctx(job, task, work, true, &route.model).await?;
         let config = RunConfig {
             provider: route.provider,
             model: route.model,
@@ -1397,11 +1418,6 @@ impl Worker {
         )
         .await;
         let finished = ctx.finished.load(std::sync::atomic::Ordering::SeqCst);
-        if let Ok(r) = &result {
-            let mut conn = inner.store.acquire().await?;
-            let usage = r.usage.input_tokens + r.usage.output_tokens;
-            tasks::add_spent(&mut conn, job.goal, usage).await?;
-        }
         Ok(match result {
             _ if finished => RunEnd::Finished,
             Ok(r) => {
@@ -1453,7 +1469,7 @@ impl Worker {
                 ToolName::EditFile | ToolName::Run | ToolName::RunSubagent
             )
         });
-        let ctx = self.tool_ctx(job, task, work, false);
+        let ctx = self.tool_ctx(job, task, work, false, "claude-code").await?;
         let tools = crate::tools::build(&profile, ctx.clone());
         let allowed: Vec<String> = tools
             .iter()
@@ -1637,6 +1653,12 @@ impl Worker {
         let shutdown = inner.shutdown.is_cancelled();
         let mut txn = inner.hub.begin().await?;
         let task = tasks::task(txn.conn(), job.task).await?;
+        let stop: Option<String> =
+            sqlx::query_scalar("SELECT stop_reason FROM agent_runs WHERE id = ?")
+                .bind(job.run.to_string())
+                .fetch_optional(txn.conn())
+                .await?
+                .flatten();
         let mut ends = Ends::default();
         let (state, error): (&str, Option<String>) = match result {
             Ok(RunEnd::Skipped) => ("cancelled", None),
@@ -1682,6 +1704,13 @@ impl Worker {
             }
             Ok(RunEnd::Cancelled) => ("cancelled", None),
             Ok(RunEnd::Stuck(why)) => {
+                let why = match stop.as_deref() {
+                    Some("budget") => {
+                        "這個 Goal 的預算用完了，等你決定要不要追加（Inbox）".to_string()
+                    }
+                    Some("breaker") => "這個 project 的預算熔斷中，暫停所有 run".to_string(),
+                    _ => why,
+                };
                 if let Some(t) = task.as_ref().filter(|t| t.state == TaskState::Running) {
                     ends = end_task(
                         &mut txn,
@@ -1724,7 +1753,20 @@ impl Worker {
             tasks::push_goal(&mut txn, t.goal).await?;
         }
         let w = self.clone();
-        txn.commit_then(|| ends.notify(&w, Some(job.task))).await
+        txn.commit_then(|| ends.notify(&w, Some(job.task))).await?;
+        if stop.as_deref() == Some("budget")
+            && let Err(e) = crate::budget::request_increase(
+                &inner.store,
+                &inner.hub,
+                &inner.clock,
+                job.project,
+                job.goal,
+            )
+            .await
+        {
+            tracing::warn!(run = %job.run, error = %e, "無法申請追加預算");
+        }
+        Ok(())
     }
 }
 

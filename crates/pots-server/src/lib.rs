@@ -12,6 +12,7 @@
 mod approvals;
 mod artifacts;
 mod automation;
+mod budget;
 mod commands;
 pub mod config;
 mod datadir;
@@ -40,9 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pots_llm::ModelProvider;
-use pots_proto::{
-    AgentState, InstanceId, MsgStatus, ProjectId, ServerEvent, StreamItemKind, StreamScope,
-};
+use pots_proto::{AgentState, InstanceId, MsgStatus, ProjectId, ServerEvent, StreamItemKind};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -128,6 +127,8 @@ pub(crate) struct App {
     pub hub: Arc<Hub>,
     pub store: Store,
     pub runs: Runs,
+    /// 總管的全域對話（`kind = 'overseer'` 的內部 project）。
+    pub overseer_runs: Runs,
     pub planner: Planner,
     pub worker: Worker,
     pub memory: Memory,
@@ -233,6 +234,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         .clone()
         .unwrap_or_else(default_instance_name);
     let instance = store.ensure_instance(&instance_name).await?;
+    store.ensure_overseer().await?;
     let pruned = store.prune_events(config.event_retention).await?;
     if pruned > 0 {
         tracing::debug!(pruned, "清掉舊的事件日誌");
@@ -320,9 +322,18 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         hub.clone(),
         store.clone(),
         memory.clone(),
-        router,
+        router.clone(),
         deps.model_auth.status(),
         profiles.chat,
+        planner.clone(),
+    );
+    let overseer_runs = Runs::new(
+        hub.clone(),
+        store.clone(),
+        memory.clone(),
+        router,
+        deps.model_auth.status(),
+        profiles.global.clone(),
         planner.clone(),
     );
     let watcher = Watcher::new(
@@ -334,6 +345,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         config.watcher.clone(),
     );
     watcher.init().await?;
+    watcher.bind_overseer(overseer_runs.clone());
     worker.bind(planner.clone(), watcher.clone());
     {
         let mut txn = hub.begin().await?;
@@ -348,6 +360,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         hub: hub.clone(),
         store: store.clone(),
         runs: runs.clone(),
+        overseer_runs: overseer_runs.clone(),
         planner: planner.clone(),
         worker: worker.clone(),
         memory: memory.clone(),
@@ -426,6 +439,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
                 watcher.shutdown(RUN_SHUTDOWN_GRACE).await;
                 tokio::join!(
                     runs.shutdown(RUN_SHUTDOWN_GRACE),
+                    overseer_runs.shutdown(RUN_SHUTDOWN_GRACE),
                     planner.shutdown(RUN_SHUTDOWN_GRACE),
                     worker.shutdown(RUN_SHUTDOWN_GRACE),
                     memory.shutdown(RUN_SHUTDOWN_GRACE)
@@ -483,7 +497,7 @@ async fn recover(hub: &Hub) -> Result<(), Error> {
         Store::update_item(txn.conn(), &item, ItemStatus::Failed).await?;
         txn.push(|seq| ServerEvent::ItemDone {
             seq,
-            scope: StreamScope::Project(project),
+            scope: store::stream_scope(project),
             item,
         })
         .await?;

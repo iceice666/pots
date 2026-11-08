@@ -38,7 +38,7 @@ use crate::planner::Planner;
 use crate::profiles::AgentProfile;
 use crate::providers::{ProviderRouter, Route};
 use crate::store::{ItemStatus, ProjectRow, RunState, Store};
-use crate::tasks::{self, Principal};
+use crate::tasks::{self, Principal, TaskState};
 use crate::tools::{self, Scope, ToolCtx};
 
 /// 對話 agent 的 instructions 裡列出幾張最近的里程碑卡片。
@@ -256,7 +256,7 @@ pub(crate) async fn post_system_trigger(
         .await?;
     txn.push(|seq| ServerEvent::Item {
         seq,
-        scope: StreamScope::Project(project),
+        scope: crate::store::stream_scope(project),
         item,
     })
     .await?;
@@ -285,7 +285,7 @@ pub(crate) async fn consume(
     if let Some(view) = Store::item(txn.conn(), item).await? {
         txn.push(|seq| ServerEvent::ItemUpdated {
             seq,
-            scope: StreamScope::Project(project),
+            scope: crate::store::stream_scope(project),
             item: view,
         })
         .await?;
@@ -362,7 +362,7 @@ impl Reply {
     }
 
     fn scope(&self) -> StreamScope {
-        StreamScope::Project(self.project)
+        crate::store::stream_scope(self.project)
     }
 
     fn append_note(&mut self, note: &str) {
@@ -391,7 +391,11 @@ async fn run_chat(
         at: Timestamp::now(),
         author: Author::Agent {
             label: row.agent_name.clone(),
-            role: AgentRole::Project,
+            role: if project == crate::store::OVERSIGHT_PROJECT_ID {
+                AgentRole::Overseer
+            } else {
+                AgentRole::Project
+            },
         },
         text: String::new(),
         tools: ToolLog::default(),
@@ -406,8 +410,11 @@ async fn run_chat(
         let trigger = serde_json::json!({
             "kind": "messages",
             "items": batch.iter().map(|t| t.item.to_string()).collect::<Vec<_>>(),
+            "text": batch.first().map(|t| tasks::truncate(&t.text, 300)).unwrap_or_default(),
         });
         Store::insert_run(txn.conn(), run_id, project, &profile.name, &trigger).await?;
+        let revision = Store::om_state(txn.conn(), project).await?.revision;
+        Store::set_run_memory_revision(txn.conn(), run_id, revision).await?;
         for t in &batch {
             consume(&mut txn, project, t.item, &t.text, Some(run_id)).await?;
         }
@@ -631,30 +638,97 @@ async fn drive_loop(
         instructions.push_str(project.instructions.trim());
     }
     instructions.push_str(&tail);
-    let goals = goal_overview(inner, project.id)
-        .await
-        .map_err(RunError::Server)?;
-    if !goals.is_empty() {
-        instructions.push_str("\n\n");
-        instructions.push_str(&goals);
+    let overseer = project.id == crate::store::OVERSIGHT_PROJECT_ID;
+    if overseer {
+        let mut overview = String::new();
+        let mut conn = inner.store.acquire().await.map_err(RunError::Server)?;
+        for p in inner
+            .store
+            .list_projects()
+            .await
+            .map_err(RunError::Server)?
+        {
+            let goals = tasks::project_goals(&mut conn, p.id)
+                .await
+                .map_err(RunError::Server)?;
+            let mut active: Vec<String> = Vec::new();
+            for g in goals
+                .iter()
+                .filter(|g| matches!(g.state, GoalState::Active))
+            {
+                let tasks = tasks::tasks(&mut conn, g.id)
+                    .await
+                    .map_err(RunError::Server)?;
+                let needs: usize = tasks
+                    .iter()
+                    .filter(|t| matches!(t.state, TaskState::NeedsHuman { .. }))
+                    .count();
+                active.push(format!(
+                    "  - 「{}」（{} 個任務{}）{}",
+                    g.title,
+                    tasks.len(),
+                    if needs > 0 {
+                        format!("，{needs} 個需要你處理")
+                    } else {
+                        String::new()
+                    },
+                    g.planner_note
+                ));
+            }
+            if active.is_empty() {
+                overview.push_str(&format!("- {}：沒有進行中的 Goal\n", p.name));
+            } else {
+                overview.push_str(&format!("- {}：\n{}\n", p.name, active.join("\n")));
+            }
+        }
+        instructions.push_str("\n\n# 目前的 project\n\n");
+        instructions.push_str(&overview);
+        instructions.push_str(
+            "派工時用 create_goal 指定 project；核准留在各 project 的 Inbox，你不在這裡代為決定。",
+        );
+    } else {
+        let goals = goal_overview(inner, project.id)
+            .await
+            .map_err(RunError::Server)?;
+        if !goals.is_empty() {
+            instructions.push_str("\n\n");
+            instructions.push_str(&goals);
+        }
     }
     let queued = {
         let inner = inner.clone();
         let project = project.id;
         Arc::new(move || inner.has_queued(project)) as Arc<dyn Fn() -> bool + Send + Sync>
     };
+    let budget = crate::budget::for_run(
+        &inner.store,
+        &inner.hub,
+        &inner.clock,
+        run_id,
+        project.id,
+        None,
+        None,
+        route.model.clone(),
+    )
+    .await
+    .map_err(RunError::Server)?;
     let ctx = Arc::new(ToolCtx {
         hub: inner.hub.clone(),
         store: inner.store.clone(),
         planner: inner.planner.clone(),
         project: project.id,
-        scope: Scope::Project,
+        scope: if overseer {
+            Scope::Global
+        } else {
+            Scope::Project
+        },
         actor: Principal::agent(&profile.name),
         reader: format!("chat:{}", project.id),
         artifact_kinds: profile.artifact_kinds.clone(),
         run_id,
         cards: reply.pending_cards.clone(),
         finished: Default::default(),
+        budget,
         milestones: Default::default(),
         goals_created: Default::default(),
         queued: Some(queued),
