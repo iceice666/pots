@@ -64,6 +64,14 @@ pub enum PlannerTrigger {
     BriefEdited {
         rev: u32,
     },
+    /// 這個 Goal 訂閱的資源上有新的外部事件（listener 開的 Goal）。`event` 是給 agent 看的說明。
+    External {
+        event: String,
+    },
+    /// Planner 自己設定的排程到了。
+    Scheduled {
+        prompt: String,
+    },
 }
 
 impl PlannerTrigger {
@@ -75,6 +83,15 @@ impl PlannerTrigger {
             }
             Self::BriefEdited { rev } => {
                 format!("使用者直接修改了 Brief（現在是 v{rev}），請依新的 Brief 重新檢查規劃。")
+            }
+            Self::External { event } => {
+                format!("這個 Goal 追蹤的資源有新的外部事件，看看要不要調整規劃：\n\n{event}")
+            }
+            Self::Scheduled { prompt } => {
+                format!(
+                    "你之前設定的排程時間到了：{}",
+                    tasks::one_line(prompt, 2000)
+                )
             }
         }
     }
@@ -211,6 +228,7 @@ struct Inner {
     store: Store,
     router: Arc<ProviderRouter>,
     profile: AgentProfile,
+    clock: crate::config::Clock,
     notify: Notify,
     active: Mutex<HashMap<GoalId, Active>>,
     tracker: TaskTracker,
@@ -237,6 +255,7 @@ impl Planner {
         store: Store,
         router: Arc<ProviderRouter>,
         profile: AgentProfile,
+        clock: crate::config::Clock,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -244,12 +263,18 @@ impl Planner {
                 store,
                 router,
                 profile,
+                clock,
                 notify: Notify::new(),
                 active: Mutex::new(HashMap::new()),
                 tracker: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
             }),
         }
+    }
+
+    /// 排程、等待與 listener 用的時鐘（工具共用）。
+    pub fn clock(&self) -> &crate::config::Clock {
+        &self.inner.clock
     }
 
     /// 開始處理佇列。
@@ -337,7 +362,7 @@ impl Planner {
                 "SELECT r.id, r.project_id, r.goal_id, r.trigger, r.attempts FROM agent_runs r \
                  WHERE r.agent = 'planner' AND r.goal_id IS NOT NULL AND r.state = 'queued' \
                  AND NOT EXISTS (SELECT 1 FROM agent_runs x WHERE x.goal_id = r.goal_id \
-                     AND x.state = 'running') \
+                     AND x.agent = 'planner' AND x.state = 'running') \
                  ORDER BY r.started_at, r.id LIMIT 1",
             )
             .fetch_optional(txn.conn())
@@ -506,6 +531,7 @@ impl Planner {
             milestones: Default::default(),
             goals_created: Default::default(),
             queued: None,
+            clock: inner.clock.clone(),
         });
         let gate = ctx.gate();
         let config = RunConfig {

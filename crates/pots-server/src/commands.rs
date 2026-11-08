@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::App;
 use crate::artifacts::{self, ArtifactRow};
+use crate::automation::{self, ListenerDbState};
 use crate::planner::{self, PlannerTrigger};
 use crate::runs::Trigger;
 use crate::store::{ItemStatus, ProjectRow, Store};
@@ -25,6 +26,16 @@ pub(crate) async fn handle(app: &App, text: &str, reply: &mpsc::Sender<ServerEve
             let reply = reply.clone();
             tokio::spawn(async move {
                 let ev = crate::providers::test(&providers, request, draft).await;
+                let _ = reply.send(ev).await;
+            });
+            return;
+        }
+        Ok(ClientCommand::TestGithub { request, draft }) => {
+            let watcher = app.watcher.clone();
+            let hub = app.hub.clone();
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let ev = crate::watcher::test_github(&watcher, &hub, request, draft).await;
                 let _ = reply.send(ev).await;
             });
             return;
@@ -121,7 +132,221 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
         ClientCommand::DeleteObservation { project, id } => {
             resync_on_error(app, project, app.memory.delete(project, id).await).await
         }
+        ClientCommand::SaveGithub { draft } => {
+            crate::watcher::save_github(&app.watcher, &app.hub, draft).await
+        }
+        ClientCommand::TestGithub { .. } => unreachable!("在 handle 處理"),
+        ClientCommand::SetProjectRepos { project, repos } => {
+            set_project_repos(app, project, repos).await
+        }
+        ClientCommand::SaveListener { id, spec } => save_listener(app, id, spec).await,
+        ClientCommand::SetListenerEnabled { id, enabled } => {
+            automation_edit(app, |conn, now| {
+                Box::pin(async move {
+                    let Some(l) = automation::listener(conn, id).await? else {
+                        return Ok(Err("找不到這個 listener".to_string()));
+                    };
+                    // 啟用 agent 提案的 listener 就是核准它（M5 之前）。
+                    let state = if enabled {
+                        ListenerDbState::Active
+                    } else {
+                        ListenerDbState::Disabled
+                    };
+                    if l.state != state {
+                        automation::set_listener_state(conn, id, state, now).await?;
+                    }
+                    Ok(Ok(()))
+                })
+            })
+            .await
+        }
+        ClientCommand::DeleteListener { id } => {
+            automation_edit(app, |conn, _| {
+                Box::pin(async move {
+                    Ok(if automation::delete_listener(conn, id).await? {
+                        Ok(())
+                    } else {
+                        Err("找不到這個 listener".to_string())
+                    })
+                })
+            })
+            .await
+        }
+        ClientCommand::SetScheduleEnabled { id, enabled } => {
+            automation_edit(app, |conn, now| {
+                Box::pin(async move {
+                    if automation::schedule(conn, id).await?.is_none() {
+                        return Ok(Err("找不到這個排程".to_string()));
+                    }
+                    automation::set_schedule_enabled(conn, id, enabled, now).await?;
+                    Ok(Ok(()))
+                })
+            })
+            .await
+        }
+        ClientCommand::RescheduleSchedule { id, next_at } => {
+            automation_edit(app, |conn, now| {
+                Box::pin(async move {
+                    let Some(s) = automation::schedule(conn, id).await? else {
+                        return Ok(Err("找不到這個排程".to_string()));
+                    };
+                    automation::reschedule(conn, &s, next_at, now).await
+                })
+            })
+            .await
+        }
+        ClientCommand::SetScheduleExpiry { id, expires_at } => {
+            automation_edit(app, |conn, now| {
+                Box::pin(async move {
+                    let Some(s) = automation::schedule(conn, id).await? else {
+                        return Ok(Err("找不到這個排程".to_string()));
+                    };
+                    automation::set_expiry(conn, &s, expires_at, now).await
+                })
+            })
+            .await
+        }
+        ClientCommand::DeleteSchedule { id } => {
+            automation_edit(app, |conn, _| {
+                Box::pin(async move {
+                    Ok(if automation::delete_schedule(conn, id).await? {
+                        Ok(())
+                    } else {
+                        Err("找不到這個排程".to_string())
+                    })
+                })
+            })
+            .await
+        }
+        ClientCommand::PauseAutomations { project, until } => {
+            if let Some(p) = project
+                && !owns(app, p).await.map_err(internal)?
+            {
+                return Err("找不到這個 project".into());
+            }
+            automation_edit(app, |conn, now| {
+                Box::pin(async move {
+                    if until.is_some_and(|u| u.0 <= now.0) {
+                        return Ok(Err("恢復時間已經過了".to_string()));
+                    }
+                    automation::pause(conn, project, until, &Principal::Human, now).await?;
+                    Ok(Ok(()))
+                })
+            })
+            .await
+        }
+        ClientCommand::ResumeAutomations { project } => {
+            automation_edit(app, |conn, _| {
+                Box::pin(async move {
+                    Ok(if automation::resume(conn, project).await? {
+                        Ok(())
+                    } else {
+                        Err("沒有暫停中的自動化".to_string())
+                    })
+                })
+            })
+            .await
+        }
     }
+}
+
+type EditFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Result<(), String>, crate::Error>> + Send + 'a>,
+>;
+
+/// 改自動化資料：在同一個 transaction 裡記一筆 `Automation`，完成後讓 sweeper 馬上掃一次
+/// （例如改了排程時間、恢復了暫停）。
+async fn automation_edit(
+    app: &App,
+    edit: impl for<'c> FnOnce(&'c mut sqlx::SqliteConnection, Timestamp) -> EditFuture<'c>,
+) -> Result<(), String> {
+    let now = app.watcher.clock().now();
+    let mut txn = app.hub.begin().await.map_err(internal)?;
+    match edit(txn.conn(), now).await.map_err(internal)? {
+        Ok(()) => {}
+        Err(e) => return Err(e),
+    }
+    automation::push(&mut txn, now).await.map_err(internal)?;
+    txn.commit().await.map_err(internal)?;
+    app.watcher.sweep_now();
+    Ok(())
+}
+
+async fn set_project_repos(
+    app: &App,
+    project: ProjectId,
+    repos: Vec<String>,
+) -> Result<(), String> {
+    if !owns(app, project).await.map_err(internal)? {
+        return Err("找不到這個 project".into());
+    }
+    let mut clean: Vec<String> = Vec::new();
+    for r in repos.iter().filter(|r| !r.trim().is_empty()) {
+        let r = crate::watcher::event::normalize_repo(r)?;
+        if !clean.contains(&r) {
+            clean.push(r);
+        }
+    }
+    if clean.len() > automation::MAX_REPOS_PER_PROJECT {
+        return Err(format!(
+            "每個 project 最多監看 {} 個 repo",
+            automation::MAX_REPOS_PER_PROJECT
+        ));
+    }
+    let now = app.watcher.clock().now();
+    let result: Result<(), crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        automation::set_project_repos(txn.conn(), project, &clean, now).await?;
+        // 不再監看的 repo 丟掉輪詢進度：之後再加回來時從當時開始，不把中間的事件當新的。
+        let watched = automation::all_repos(txn.conn()).await?;
+        crate::watcher::prune_cursor(txn.conn(), &watched).await?;
+        let repos = clean.clone();
+        txn.push(|seq| ServerEvent::ProjectRepos {
+            seq,
+            project,
+            repos,
+        })
+        .await?;
+        // listener 的來源說明會變。
+        automation::push(&mut txn, now).await?;
+        txn.commit().await
+    }
+    .await;
+    result.map_err(internal)?;
+    app.watcher.poll_now();
+    Ok(())
+}
+
+async fn save_listener(
+    app: &App,
+    id: Option<pots_proto::ListenerId>,
+    spec: pots_proto::ListenerSpec,
+) -> Result<(), String> {
+    if !owns(app, spec.project).await.map_err(internal)? {
+        return Err("找不到這個 project".into());
+    }
+    let spec = automation::check_spec(spec)?;
+    automation_edit(app, |conn, now| {
+        Box::pin(async move {
+            if let Some(id) = id
+                && automation::listener(conn, id).await?.is_none()
+            {
+                return Ok(Err("找不到這個 listener".to_string()));
+            }
+            // 你建立或修改的 listener 直接生效。
+            Ok(automation::save_listener(
+                conn,
+                id,
+                &spec,
+                ListenerDbState::Active,
+                &Principal::Human,
+                now,
+            )
+            .await?
+            .map(|_| ()))
+        })
+    })
+    .await
 }
 
 /// provider 或記憶用的模型改了：整理記憶不用等冷卻結束，馬上再試。
@@ -176,6 +401,7 @@ async fn create_project(app: &App, name: String) -> Result<(), String> {
             memory: Default::default(),
             goals: Vec::new(),
             artifacts: Vec::new(),
+            repos: Vec::new(),
         };
         txn.push(|seq| ServerEvent::ProjectAdded { seq, project })
             .await?;

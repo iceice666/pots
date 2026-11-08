@@ -3,7 +3,9 @@
 //! 任務樹是平台唯一的真相來源。所有變更都在 [`LogTxn`] 裡做，同一個 transaction 記一筆
 //! `GoalChanged`（整個 Goal 連同任務樹替換），客戶端不用自己拼狀態。
 //!
-//! M2 還沒有 worker：任務建立後停在 `Planned`，只會被 Planner、你或 Goal 的結束取消。
+//! M4 之前沒有 worker：任務建立後停在 `Planned`，只會被 Planner、你或 Goal 的結束取消。
+//! M3 加上 `Waiting`：`wait_for` 把任務掛起，外部事件或逾時時由 watcher 喚醒回 `Planned`
+//!（`crate::watcher`）。
 
 use pots_proto::{
     ArtifactKind, GoalId, GoalState, GoalView, ProjectId, ServerEvent, TaskId, TaskStateView,
@@ -17,6 +19,7 @@ use crate::Error;
 use crate::artifacts;
 use crate::hub::LogTxn;
 use crate::store::{LOCAL_USER_ID, parse_id, to_json};
+use crate::watcher::WaitCond;
 
 /// Goal 標題與任務標題最多幾個字。
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -52,22 +55,36 @@ impl Principal {
     }
 }
 
-/// 任務狀態。M2 只有規劃與取消；執行、等待與結果在 M3／M4 加上。
+/// 任務狀態。執行與結果在 M4 加上。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state")]
 pub enum TaskState {
     Planned,
-    Cancelled { by: Principal },
+    /// 等外部事件、子任務或時間；`deadline` 一到由 sweeper 以「逾時」喚醒。
+    Waiting {
+        on: WaitCond,
+        deadline: Timestamp,
+    },
+    Cancelled {
+        by: Principal,
+    },
 }
 
 impl TaskState {
     pub fn is_open(&self) -> bool {
-        matches!(self, Self::Planned)
+        matches!(self, Self::Planned | Self::Waiting { .. })
     }
 
     pub fn view(&self) -> TaskStateView {
         match self {
             Self::Planned => TaskStateView::Planned,
+            Self::Waiting { on, deadline } => TaskStateView::Waiting {
+                on: format!(
+                    "{}（{} 逾時）",
+                    on.describe(),
+                    crate::automation::local(*deadline)
+                ),
+            },
             Self::Cancelled { .. } => TaskStateView::Cancelled,
         }
     }
@@ -76,6 +93,7 @@ impl TaskState {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Planned => "planned",
+            Self::Waiting { .. } => "waiting",
             Self::Cancelled { .. } => "cancelled",
         }
     }
@@ -209,6 +227,20 @@ pub async fn set_goal_state(
     Ok(())
 }
 
+/// 改 Goal 的種類（`feature` 或 `quick`）。
+pub async fn set_goal_kind(
+    conn: &mut SqliteConnection,
+    id: GoalId,
+    kind: &str,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE goals SET kind = ? WHERE id = ?")
+        .bind(kind)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_planner_note(
     conn: &mut SqliteConnection,
     id: GoalId,
@@ -336,6 +368,24 @@ pub async fn set_task_state(
         .bind(task.id.to_string())
         .execute(&mut *conn)
         .await?;
+    // 取消了：被喚醒、還在等 worker 的 run 也不用跑了。
+    if matches!(to, TaskState::Cancelled { .. }) {
+        sqlx::query(
+            "UPDATE agent_runs SET state = 'cancelled', finished_at = ? \
+             WHERE agent = 'worker' AND task_id = ? AND state = 'queued'",
+        )
+        .bind(Timestamp::now().0)
+        .bind(task.id.to_string())
+        .execute(&mut *conn)
+        .await?;
+    }
+    // 不再等待了（喚醒、取消）：訂閱一起清掉。
+    if !matches!(to, TaskState::Waiting { .. }) {
+        sqlx::query("DELETE FROM subscriptions WHERE task_id = ?")
+            .bind(task.id.to_string())
+            .execute(&mut *conn)
+            .await?;
+    }
     insert_event(conn, task.id, Some(&task.state), to, cause).await
 }
 
@@ -374,9 +424,15 @@ async fn steps(conn: &mut SqliteConnection, task: TaskId) -> Result<Vec<TaskStep
         let to: TaskState = serde_json::from_str(&to)?;
         let cause: String = row.try_get("cause")?;
         let cause: Cause = serde_json::from_str(&cause)?;
+        let was_waiting = from
+            .as_deref()
+            .and_then(|f| serde_json::from_str::<TaskState>(f).ok())
+            .is_some_and(|f| matches!(f, TaskState::Waiting { .. }));
         let what = match (&from, &to) {
             (None, _) => "建立".to_string(),
             (_, TaskState::Cancelled { .. }) => "取消".to_string(),
+            (_, TaskState::Waiting { on, .. }) => format!("開始等待{}", on.describe()),
+            (_, TaskState::Planned) if was_waiting => "喚醒".to_string(),
             (_, TaskState::Planned) => "回到規劃".to_string(),
         };
         let mut text = format!("{what}（{}）", cause.by.label());

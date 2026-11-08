@@ -27,6 +27,13 @@ pub enum ToolName {
     CancelTask,
     PostMilestone,
     CompleteGoal,
+    /// 掛起任務等外部事件；M4 交給 worker，內建的 profile 還沒有。
+    WaitFor,
+    Schedule,
+    CreateListener,
+    /// 總管（M6）的工具；內建的 profile 還沒有。
+    PauseAutomations,
+    ResumeAutomations,
 }
 
 impl ToolName {
@@ -40,6 +47,11 @@ impl ToolName {
             Self::CancelTask => "cancel_task",
             Self::PostMilestone => "post_milestone",
             Self::CompleteGoal => "complete_goal",
+            Self::WaitFor => "wait_for",
+            Self::Schedule => "schedule",
+            Self::CreateListener => "create_listener",
+            Self::PauseAutomations => "pause_automations",
+            Self::ResumeAutomations => "resume_automations",
         }
     }
 }
@@ -97,6 +109,11 @@ const CHAT_RULES: Rules = Rules {
         ToolName::SteerGoal,
         ToolName::CancelGoal,
         ToolName::WriteArtifact,
+        ToolName::Schedule,
+        ToolName::CreateListener,
+        // 總管的工具；內建的 chat 沒有，覆寫時只能暫停自己的 project。
+        ToolName::PauseAutomations,
+        ToolName::ResumeAutomations,
     ],
     kinds: &[ArtifactKind::Spec, ArtifactKind::Report],
 };
@@ -110,6 +127,9 @@ const PLANNER_RULES: Rules = Rules {
         ToolName::PostMilestone,
         ToolName::CompleteGoal,
         ToolName::WriteArtifact,
+        ToolName::Schedule,
+        // worker 的工具（M4）；內建的 planner 沒有，覆寫時可以讓自己 Goal 的任務等待。
+        ToolName::WaitFor,
     ],
     kinds: &[ArtifactKind::Ledger, ArtifactKind::Report],
 };

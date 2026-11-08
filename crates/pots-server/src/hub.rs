@@ -51,6 +51,8 @@ pub struct HubState {
     pub model_auth: ModelAuthView,
     /// 最後一筆 `Providers` 事件的內容，快照用。
     pub providers: ProvidersView,
+    /// 最後一筆 `Github` 事件的內容，快照用。
+    github: pots_proto::GithubView,
     agent_states: HashMap<ProjectId, AgentState>,
 }
 
@@ -109,6 +111,7 @@ impl Hub {
                 head,
                 model_auth,
                 providers,
+                github: Default::default(),
                 agent_states: HashMap::new(),
             }),
             streaming: Mutex::new(HashMap::new()),
@@ -197,7 +200,7 @@ impl Hub {
     async fn snapshot(&self, state: &HubState) -> Result<InstanceSnapshot, Error> {
         let mut projects = Vec::new();
         for p in self.store.list_projects().await? {
-            let (memory, goals, artifacts) = {
+            let (memory, goals, artifacts, repos) = {
                 let mut conn = self.store.acquire().await?;
                 let memory = crate::memory::view(&mut conn, p.id).await?;
                 let goals = crate::tasks::project_goals(&mut conn, p.id).await?;
@@ -206,7 +209,8 @@ impl Hub {
                     .iter()
                     .map(|a| a.view())
                     .collect();
-                (memory, goals, artifacts)
+                let repos = crate::automation::project_repos(&mut conn, p.id).await?;
+                (memory, goals, artifacts, repos)
             };
             projects.push(ProjectSnapshot {
                 id: p.id,
@@ -217,8 +221,13 @@ impl Hub {
                 memory,
                 goals,
                 artifacts,
+                repos,
             });
         }
+        let automation = {
+            let mut conn = self.store.acquire().await?;
+            crate::automation::view(&mut conn, Timestamp::now()).await?
+        };
         Ok(InstanceSnapshot {
             id: self.instance.id,
             name: self.instance.name.clone(),
@@ -226,6 +235,8 @@ impl Hub {
             projects,
             model_auth: state.model_auth.clone(),
             providers: state.providers.clone(),
+            automation,
+            github: state.github.clone(),
         })
     }
 
@@ -309,6 +320,9 @@ impl LogTxn<'_> {
                 }
                 ServerEvent::Providers { providers, .. } => {
                     self.state.providers = providers.clone();
+                }
+                ServerEvent::Github { github, .. } => {
+                    self.state.github = github.clone();
                 }
                 ServerEvent::Item { scope, item, .. } => {
                     if let StreamItemKind::Agent(msg) = &item.kind

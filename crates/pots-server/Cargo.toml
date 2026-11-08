@@ -14,17 +14,25 @@ pots-proto = { path = "../pots-proto" }
 pots-llm = { path = "../pots-llm" }
 async-trait = "0.1"
 # 對話紀錄給 Observer 看時用本機時區（觀察的日期跟著使用者的日子走）。
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# 排程的 cron 解析與下一次觸發時間（proposal/events-and-automation.md#自我排程）。
+croner = "4"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 dirs = "6"
 futures = "0.3"
 gethostname = "1"
 getrandom = "0.3"
+# GitHub webhook 驗簽（X-Hub-Signature-256）。
+hex = "0.4"
+hmac = "0.12"
+# GitHub REST（輪詢與補漏）；與 pots-llm 用同一個 HTTP client。
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json"] }
 serde.workspace = true
 serde_json.workspace = true
 # artifact 的版本 diff（proposal/architecture.md#crate-選型）。
 similar = "2"
+sha2 = "0.10"
 # 只用執行期檢查的查詢（`sqlx::query`），`macros` 只為了 `sqlx::migrate!` 內嵌 migration。
 sqlx = { version = "0.9", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
 subtle = "2"

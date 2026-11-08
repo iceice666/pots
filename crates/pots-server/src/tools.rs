@@ -24,12 +24,15 @@ use uuid::Uuid;
 
 use crate::Error;
 use crate::artifacts::{self, ArtifactRow, Edit, WriteOutcome};
+use crate::automation::{self, ListenerDbState, ScheduleOwner, ScheduleSpec};
+use crate::config::Clock;
 use crate::hub::{Hub, LogTxn};
 use crate::planner::{self, Planner, PlannerTrigger};
 use crate::profiles::{AgentProfile, ToolName};
 use crate::runs::format_utc;
 use crate::store::{ItemStatus, Store};
 use crate::tasks::{self, Cause, GoalRow, Principal, TaskRow, TaskState};
+use crate::watcher::{self, WaitCond};
 
 /// 里程碑最多幾個字。
 const MAX_MILESTONE_CHARS: usize = 500;
@@ -75,6 +78,8 @@ pub struct ToolCtx {
     /// 這個 run 已經貼了幾張里程碑、開了幾個 Goal。
     pub milestones: AtomicUsize,
     pub goals_created: AtomicUsize,
+    /// 排程、等待與 listener 用的時鐘。
+    pub clock: Clock,
 }
 
 impl ToolCtx {
@@ -365,6 +370,108 @@ impl Tool for PlatformTool {
                 "在使用者的對話流貼一張里程碑卡片，回報值得讓使用者知道的進展（一句話）。",
                 object(json!({"text": {"type": "string"}}), &["text"]),
             ),
+            Kind::Granted(ToolName::WaitFor) => (
+                "wait_for",
+                "掛起任務直到條件成立（CI 結束、PR 被 review 或 merge、資源上的事件、子任務結束、指定時間），\
+                逾時也會喚醒。等待期間不消耗 token；呼叫成功後這一輪就結束。",
+                object(
+                    json!({
+                        "task_id": {"type": "string"},
+                        "on": {
+                            "type": "object",
+                            "description": "ci_finished：repo、sha（完整的 40 個字元）；change_reviewed／change_merged：change（owner/repo#42）；\
+                                resource：key（change:owner/repo#42、issue:owner/repo#42 或 commit:owner/repo@<sha>）、kinds；\
+                                subtasks：tasks；at：at（RFC 3339）",
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["ci_finished", "change_reviewed", "change_merged", "resource", "subtasks", "at"]},
+                                "repo": {"type": "string"},
+                                "sha": {"type": "string"},
+                                "change": {"type": "string"},
+                                "key": {"type": "string"},
+                                "kinds": {"type": "array", "items": {"type": "string"}},
+                                "tasks": {"type": "array", "items": {"type": "string"}},
+                                "at": {"type": "string"},
+                            },
+                            "required": ["kind"],
+                            "additionalProperties": false,
+                        },
+                        "timeout_minutes": {"type": "integer", "description": "最多等多久（1 到 10080）"},
+                    }),
+                    &["task_id", "on", "timeout_minutes"],
+                ),
+            ),
+            Kind::Granted(ToolName::Schedule) => (
+                "schedule",
+                match self.ctx.scope {
+                    Scope::Project => {
+                        "替自己設定時間醒來：時間到了會在這個 project 的對話裡帶著記憶繼續，prompt 是醒來時要做的事。\
+                        單次用 once（at 或 in_minutes），週期用 every（五個欄位的 cron，本機時區，最短間隔 10 分鐘，預設 30 天後過期）。\
+                        使用者會在對話裡看到一張卡片，可以在自動化頁停用或改時間。"
+                    }
+                    Scope::Goal(_) => {
+                        "替你負責的 Goal 設定時間醒來：時間到了 Planner 會被叫醒，prompt 是醒來時要做的事。\
+                        單次用 once（at 或 in_minutes），週期用 every（五個欄位的 cron，本機時區，最短間隔 10 分鐘，預設 30 天後過期）。"
+                    }
+                },
+                object(
+                    json!({
+                        "kind": {"type": "string", "enum": ["once", "every"]},
+                        "at": {"type": "string", "description": "once：RFC 3339 時間（帶時區）"},
+                        "in_minutes": {"type": "integer", "description": "once：幾分鐘後"},
+                        "cron": {"type": "string", "description": "every：例如 `0 8 * * *` 是每天 08:00"},
+                        "until": {"type": "string", "description": "every：到什麼時候為止（RFC 3339）"},
+                        "prompt": {"type": "string"},
+                    }),
+                    &["kind", "prompt"],
+                ),
+            ),
+            Kind::Granted(ToolName::CreateListener) => (
+                "create_listener",
+                "提案一個 listener：符合條件的外部事件（例如 issue 加上 agent label、main 的 CI 失敗）自動開 Goal 或通知對話。\
+                提案要等使用者在自動化頁啟用後才生效。可能來自任何人的事件（issue 開啟、留言、review）要自動開工，\
+                必須加上白名單條件（label 或 author）。",
+                object(
+                    json!({
+                        "kinds": {"type": "array", "items": {"type": "string", "enum": pots_proto::EVENT_KINDS.iter().map(|(k, _)| *k).collect::<Vec<_>>()}},
+                        "resource": {"type": "string", "description": "資源的 glob，例如 `issue:github.com/me/app#*`；不給就是 project 監看的所有 repo"},
+                        "fields": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "field": {"type": "string", "enum": ["label", "author", "branch", "conclusion", "state", "repo"]},
+                                    "any_of": {"type": "array", "items": {"type": "string"}},
+                                },
+                                "required": ["field", "any_of"],
+                                "additionalProperties": false,
+                            },
+                        },
+                        "action": {"type": "string", "enum": ["create_goal", "quick_fix", "notify_chat"]},
+                        "template": {"type": "string", "description": "create_goal／quick_fix：Goal brief 的模板（事件內容會自動附上）"},
+                        "max_per_hour": {"type": "integer", "description": "每小時最多觸發幾次（預設 5）"},
+                    }),
+                    &["kinds", "action"],
+                ),
+            ),
+            Kind::Granted(ToolName::PauseAutomations) => (
+                "pause_automations",
+                "暫停排程與 listener；暫停期間錯過的觸發不補跑。可以給 until 自動恢復。",
+                object(
+                    json!({
+                        "project_id": {"type": "string", "description": "不給就是這個 project"},
+                        "until": {"type": "string", "description": "RFC 3339 時間"},
+                    }),
+                    &[],
+                ),
+            ),
+            Kind::Granted(ToolName::ResumeAutomations) => (
+                "resume_automations",
+                "提前恢復被暫停的排程與 listener。",
+                object(
+                    json!({"project_id": {"type": "string", "description": "不給就是這個 project"}}),
+                    &[],
+                ),
+            ),
             Kind::Granted(ToolName::CompleteGoal) => (
                 "complete_goal",
                 "Goal 的目標都已達成時呼叫：Goal 標成完成，還沒結束的任務一起取消，對話流貼一張完成卡片。\
@@ -413,6 +520,13 @@ impl PlatformTool {
             Kind::Granted(ToolName::CancelTask) => self.cancel_task(parse(arguments)?).await,
             Kind::Granted(ToolName::PostMilestone) => self.post_milestone(parse(arguments)?).await,
             Kind::Granted(ToolName::CompleteGoal) => self.complete_goal(parse(arguments)?).await,
+            Kind::Granted(ToolName::WaitFor) => self.wait_for(parse(arguments)?).await,
+            Kind::Granted(ToolName::Schedule) => self.schedule(parse(arguments)?).await,
+            Kind::Granted(ToolName::CreateListener) => {
+                self.create_listener(parse(arguments)?).await
+            }
+            Kind::Granted(ToolName::PauseAutomations) => self.pause(parse(arguments)?).await,
+            Kind::Granted(ToolName::ResumeAutomations) => self.resume(parse(arguments)?).await,
         }
     }
 }
@@ -710,69 +824,30 @@ impl PlatformTool {
         if ctx.goals_created.load(Ordering::SeqCst) >= MAX_GOALS_PER_RUN {
             return Err(bad(format!("一次回覆最多開 {MAX_GOALS_PER_RUN} 個 Goal")));
         }
-        let body = if args.brief_md.trim_start().starts_with("# ") {
-            args.brief_md.clone()
-        } else {
-            format!("# {title}\n\n{}", args.brief_md.trim())
-        };
-        let body =
-            artifacts::apply_edits("", &[Edit::ReplaceAll { body_md: body }], true).map_err(bad)?;
-        let goal = GoalRow {
-            id: GoalId::new(),
-            project: ctx.project,
-            title: title.clone(),
-            state: GoalState::Active,
-            planner_note: "等待 Planner…".into(),
-            created_at: Timestamp::now(),
-        };
-        let brief = ArtifactRow {
-            id: ArtifactId::new(),
-            project: ctx.project,
-            goal: Some(goal.id),
-            kind: ArtifactKind::Brief,
-            title: title.clone(),
-            rev: 1,
-            body,
-            human_edits: Vec::new(),
-        };
-        let result: Result<Result<(), String>, Error> = async {
+        let result: Result<Result<(GoalId, ArtifactId), String>, Error> = async {
             let mut txn = ctx.hub.begin().await?;
-            let active = tasks::goals(txn.conn(), ctx.project)
-                .await?
-                .iter()
-                .filter(|g| g.state.is_active())
-                .count();
-            if active >= MAX_ACTIVE_GOALS {
-                return Ok(Err(format!(
-                    "這個 project 已經有 {active} 個進行中的 Goal，先完成或取消一些"
-                )));
-            }
-            tasks::insert_goal(txn.conn(), &goal, &ctx.actor).await?;
-            artifacts::insert(txn.conn(), &brief, &ctx.actor).await?;
-            artifacts::mark_read(txn.conn(), brief.id, &ctx.reader, brief.rev).await?;
-            planner::enqueue(
-                txn.conn(),
+            let opened = open_goal_with_brief(
+                &mut txn,
                 ctx.project,
-                goal.id,
-                &PlannerTrigger::GoalCreated {
-                    by: ctx.actor.label(),
-                },
+                &title,
+                &args.brief_md,
+                &ctx.actor,
+                &ctx.actor.label(),
+                Some(&ctx.reader),
             )
             .await?;
-            artifacts::push_changed(&mut txn, &brief).await?;
-            txn.commit_then(|| ctx.planner.kick()).await?;
-            Ok(Ok(()))
+            if opened.is_ok() {
+                txn.commit_then(|| ctx.planner.kick()).await?;
+            }
+            Ok(opened)
         }
         .await;
-        result.map_err(internal)?.map_err(bad)?;
+        let (goal, brief) = result.map_err(internal)?.map_err(bad)?;
         ctx.goals_created.fetch_add(1, Ordering::SeqCst);
-        ctx.cards
-            .lock()
-            .unwrap()
-            .push(Card::GoalCreated { goal: goal.id });
+        ctx.cards.lock().unwrap().push(Card::GoalCreated { goal });
         Ok(json!({
-            "goal_id": goal.id.to_string(),
-            "brief": {"artifact_id": brief.id.to_string(), "rev": brief.rev},
+            "goal_id": goal.to_string(),
+            "brief": {"artifact_id": brief.to_string(), "rev": 1},
             "note": "Goal 已建立，Planner 會在背景拆任務；使用者會在對話裡看到 Goal 卡片。",
         })
         .to_string())
@@ -1152,6 +1227,526 @@ pub async fn close_goal(
     )
     .await?;
     planner::drop_queued(txn.conn(), g.id).await?;
+    // 被喚醒、還在等 worker 的 run 也不用跑了（M4 之前沒有 worker）。
+    sqlx::query(
+        "UPDATE agent_runs SET state = 'cancelled', finished_at = ? \
+         WHERE agent = 'worker' AND goal_id = ? AND state = 'queued'",
+    )
+    .bind(Timestamp::now().0)
+    .bind(g.id.to_string())
+    .execute(txn.conn())
+    .await?;
+    if automation::finish_goal_schedules(txn.conn(), g.id, Timestamp::now()).await? > 0 {
+        automation::push(txn, Timestamp::now()).await?;
+    }
     tasks::push_goal(txn, g.id).await?;
     Ok(cancelled)
+}
+
+/// 開一個 Goal：寫入 Goal 與 Brief、排 Planner、記 `ArtifactChanged`。呼叫端在 commit 之後
+/// 叫醒 Planner（[`Planner::kick`]）。進行中的 Goal 太多或內容不合法時回說明。
+/// `by_label` 是告訴 Planner 誰開的，`reader` 是已經讀過這份 Brief 的 agent。
+pub async fn open_goal(
+    txn: &mut LogTxn<'_>,
+    project: ProjectId,
+    title: &str,
+    brief_md: &str,
+    by: &Principal,
+    by_label: &str,
+    reader: Option<&str>,
+) -> Result<Result<GoalId, String>, Error> {
+    Ok(
+        open_goal_with_brief(txn, project, title, brief_md, by, by_label, reader)
+            .await?
+            .map(|(g, _)| g),
+    )
+}
+
+async fn open_goal_with_brief(
+    txn: &mut LogTxn<'_>,
+    project: ProjectId,
+    title: &str,
+    brief_md: &str,
+    by: &Principal,
+    by_label: &str,
+    reader: Option<&str>,
+) -> Result<Result<(GoalId, ArtifactId), String>, Error> {
+    let title = match tasks::check_line("title ", title, tasks::MAX_TITLE_CHARS) {
+        Ok(t) => t,
+        Err(e) => return Ok(Err(e)),
+    };
+    if brief_md.trim().is_empty() {
+        return Ok(Err("brief_md 不能是空的".into()));
+    }
+    let body = if brief_md.trim_start().starts_with("# ") {
+        brief_md.to_string()
+    } else {
+        format!("# {title}\n\n{}", brief_md.trim())
+    };
+    let body = match artifacts::apply_edits("", &[Edit::ReplaceAll { body_md: body }], true) {
+        Ok(b) => b,
+        Err(e) => return Ok(Err(e)),
+    };
+    let active = tasks::goals(txn.conn(), project)
+        .await?
+        .iter()
+        .filter(|g| g.state.is_active())
+        .count();
+    if active >= MAX_ACTIVE_GOALS {
+        return Ok(Err(format!(
+            "這個 project 已經有 {active} 個進行中的 Goal，先完成或取消一些"
+        )));
+    }
+    let goal = GoalRow {
+        id: GoalId::new(),
+        project,
+        title: title.clone(),
+        state: GoalState::Active,
+        planner_note: "等待 Planner…".into(),
+        created_at: Timestamp::now(),
+    };
+    let brief = ArtifactRow {
+        id: ArtifactId::new(),
+        project,
+        goal: Some(goal.id),
+        kind: ArtifactKind::Brief,
+        title,
+        rev: 1,
+        body,
+        human_edits: Vec::new(),
+    };
+    tasks::insert_goal(txn.conn(), &goal, by).await?;
+    artifacts::insert(txn.conn(), &brief, by).await?;
+    if let Some(reader) = reader {
+        artifacts::mark_read(txn.conn(), brief.id, reader, brief.rev).await?;
+    }
+    planner::enqueue(
+        txn.conn(),
+        project,
+        goal.id,
+        &PlannerTrigger::GoalCreated {
+            by: by_label.to_string(),
+        },
+    )
+    .await?;
+    artifacts::push_changed(txn, &brief).await?;
+    Ok(Ok((goal.id, brief.id)))
+}
+
+/// RFC 3339 時間。
+fn parse_time_arg(what: &str, s: &str) -> Result<Timestamp, ToolError> {
+    chrono::DateTime::parse_from_rfc3339(s.trim())
+        .map(|t| Timestamp(t.timestamp()))
+        .map_err(|_| {
+            bad(format!(
+                "{what} 要是 RFC 3339 時間（例如 2026-11-08T09:00:00+08:00）：{s}"
+            ))
+        })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitOnArgs {
+    kind: String,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    sha: Option<String>,
+    #[serde(default)]
+    change: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    kinds: Vec<String>,
+    #[serde(default)]
+    tasks: Vec<String>,
+    #[serde(default)]
+    at: Option<String>,
+}
+
+impl WaitOnArgs {
+    fn into_cond(self) -> Result<WaitCond, ToolError> {
+        let need = |v: Option<String>, name: &str| {
+            v.filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| bad(format!("on 要給 {name}")))
+        };
+        let cond = match self.kind.as_str() {
+            "ci_finished" => WaitCond::CiFinished {
+                repo: need(self.repo, "repo")?,
+                sha: need(self.sha, "sha")?,
+            },
+            "change_reviewed" => WaitCond::ChangeReviewed {
+                change: need(self.change, "change")?,
+            },
+            "change_merged" => WaitCond::ChangeMerged {
+                change: need(self.change, "change")?,
+            },
+            "resource" => WaitCond::Resource {
+                key: need(self.key, "key")?,
+                kinds: self.kinds,
+            },
+            "subtasks" => WaitCond::Subtasks {
+                tasks: self
+                    .tasks
+                    .iter()
+                    .map(|t| parse_id("tasks", t))
+                    .collect::<Result<_, _>>()?,
+            },
+            "at" => WaitCond::At {
+                at: parse_time_arg("on.at", &need(self.at, "at")?)?,
+            },
+            k => return Err(bad(format!("不認得的等待種類：{k}"))),
+        };
+        cond.normalized().map_err(bad)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitForArgs {
+    task_id: String,
+    on: WaitOnArgs,
+    timeout_minutes: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleArgs {
+    kind: String,
+    #[serde(default)]
+    at: Option<String>,
+    #[serde(default)]
+    in_minutes: Option<i64>,
+    #[serde(default)]
+    cron: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+    prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListenerArgs {
+    kinds: Vec<String>,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default)]
+    fields: Vec<pots_proto::FieldMatch>,
+    action: String,
+    #[serde(default)]
+    template: Option<String>,
+    #[serde(default)]
+    max_per_hour: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauseArgs {
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeArgs {
+    #[serde(default)]
+    project_id: Option<String>,
+}
+
+/// 排程卡片與自動化卡片。
+fn notice(title: &str, body: String) -> Card {
+    Card::Notice {
+        title: title.into(),
+        body,
+        actions: vec![pots_proto::NoticeAction::ViewAutomations],
+    }
+}
+
+impl PlatformTool {
+    async fn wait_for(&self, args: WaitForArgs) -> Result<String, ToolError> {
+        let ctx = &self.ctx;
+        let id: TaskId = parse_id("task_id", &args.task_id)?;
+        if !(1..=10_080).contains(&args.timeout_minutes) {
+            return Err(bad("timeout_minutes 要在 1 到 10080 之間"));
+        }
+        let on = args.on.into_cond()?;
+        let now = ctx.clock.now();
+        let deadline = Timestamp(now.0 + args.timeout_minutes * 60);
+        let mut txn = ctx.hub.begin().await.map_err(internal)?;
+        let task = match tasks::task(txn.conn(), id).await.map_err(internal)? {
+            Some(t) => t,
+            None => return Err(bad(format!("沒有任務 {id}"))),
+        };
+        self.own_goal(txn.conn(), task.goal).await?;
+        if task.state != TaskState::Planned {
+            return Err(bad(format!(
+                "任務「{}」現在是 {}，不能等待",
+                task.title,
+                task.state.name()
+            )));
+        }
+        if let WaitCond::Subtasks { tasks: subs } = &on {
+            for sub in subs {
+                match tasks::task(txn.conn(), *sub).await.map_err(internal)? {
+                    Some(s) if s.goal == task.goal && s.id != task.id => {}
+                    _ => return Err(bad(format!("同一個 Goal 裡沒有任務 {sub}"))),
+                }
+            }
+        }
+        let desc = on.describe();
+        let result: Result<(), Error> = async {
+            watcher::suspend_task(&mut txn, &task, ctx.project, on, deadline, &ctx.actor, now)
+                .await?;
+            txn.commit().await
+        }
+        .await;
+        result.map_err(internal)?;
+        // 等待後這一輪就結束（等同 AllowThenStop，但參數錯誤時模型還能重試）。
+        ctx.finished.store(true, Ordering::SeqCst);
+        Ok(format!(
+            "suspended：{desc}，最多等到 {}",
+            format_utc(deadline)
+        ))
+    }
+
+    async fn schedule(&self, args: ScheduleArgs) -> Result<String, ToolError> {
+        let ctx = &self.ctx;
+        let now = ctx.clock.now();
+        let spec = match args.kind.as_str() {
+            "once" => {
+                let at = match (&args.at, args.in_minutes) {
+                    (Some(at), None) => parse_time_arg("at", at)?,
+                    (None, Some(m)) if (1..=366 * 24 * 60).contains(&m) => {
+                        Timestamp(now.0 + m * 60)
+                    }
+                    _ => return Err(bad("once 要給 at 或 in_minutes（擇一）")),
+                };
+                ScheduleSpec::Once { at }
+            }
+            "every" => ScheduleSpec::Every {
+                cron: args
+                    .cron
+                    .clone()
+                    .filter(|c| !c.trim().is_empty())
+                    .ok_or_else(|| bad("every 要給 cron"))?,
+                until: args
+                    .until
+                    .as_deref()
+                    .map(|u| parse_time_arg("until", u))
+                    .transpose()?,
+            },
+            k => return Err(bad(format!("kind 要是 once 或 every：{k}"))),
+        };
+        let owner = match ctx.scope {
+            Scope::Project => ScheduleOwner::Chat(ctx.project),
+            Scope::Goal(goal) => ScheduleOwner::Planner {
+                project: ctx.project,
+                goal,
+            },
+        };
+        let mut txn = ctx.hub.begin().await.map_err(internal)?;
+        if let Scope::Goal(goal) = ctx.scope {
+            self.active_goal(txn.conn(), goal).await?;
+        }
+        let result: Result<Result<automation::ScheduleRow, String>, Error> = async {
+            let row = match automation::insert_schedule(
+                txn.conn(),
+                owner,
+                spec,
+                &args.prompt,
+                &ctx.actor,
+                now,
+            )
+            .await?
+            {
+                Ok(r) => r,
+                Err(e) => return Ok(Err(e)),
+            };
+            let card = notice(
+                "已建立排程",
+                format!(
+                    "{}：{}（下一次 {}）",
+                    row.spec.cadence(),
+                    tasks::one_line(&row.prompt, 200),
+                    automation::local(row.next_at)
+                ),
+            );
+            match ctx.scope {
+                Scope::Project => {
+                    automation::push(&mut txn, now).await?;
+                    txn.commit().await?;
+                    // 對話 agent 的卡片附在這則回覆下面（commit 成功後才加）。
+                    ctx.cards.lock().unwrap().push(card);
+                }
+                Scope::Goal(_) => {
+                    post_card(&mut txn, ctx.project, card, Some(ctx.run_id)).await?;
+                    automation::push(&mut txn, now).await?;
+                    txn.commit().await?;
+                }
+            }
+            Ok(Ok(row))
+        }
+        .await;
+        let row = result.map_err(internal)?.map_err(bad)?;
+        Ok(json!({
+            "schedule_id": row.id.to_string(),
+            "next_at": format_utc(row.next_at),
+            "expires_at": row.expires_at.map(format_utc),
+        })
+        .to_string())
+    }
+
+    async fn create_listener(&self, args: ListenerArgs) -> Result<String, ToolError> {
+        let ctx = &self.ctx;
+        if !matches!(ctx.scope, Scope::Project) {
+            return Err(bad("只有對話 agent 能提案 listener"));
+        }
+        let action = match (args.action.as_str(), args.template) {
+            ("create_goal", Some(template)) => {
+                pots_proto::ListenerActionSpec::CreateGoal { template }
+            }
+            ("quick_fix", Some(template)) => pots_proto::ListenerActionSpec::QuickFix { template },
+            ("notify_chat", _) => pots_proto::ListenerActionSpec::NotifyChat,
+            ("create_goal" | "quick_fix", None) => {
+                return Err(bad("create_goal／quick_fix 要給 template"));
+            }
+            (a, _) => return Err(bad(format!("不認得的動作：{a}"))),
+        };
+        let spec = automation::check_spec(pots_proto::ListenerSpec {
+            project: ctx.project,
+            kinds: args.kinds,
+            resource: args.resource,
+            fields: args.fields,
+            action,
+            max_per_hour: args
+                .max_per_hour
+                .unwrap_or(automation::DEFAULT_MAX_PER_HOUR),
+            budget_per_trigger_cents: None,
+        })
+        .map_err(bad)?;
+        let now = ctx.clock.now();
+        let result: Result<Result<pots_proto::ListenerId, String>, Error> = async {
+            let mut txn = ctx.hub.begin().await?;
+            let id = match automation::save_listener(
+                txn.conn(),
+                None,
+                &spec,
+                ListenerDbState::Proposed,
+                &ctx.actor,
+                now,
+            )
+            .await?
+            {
+                Ok(id) => id,
+                Err(e) => return Ok(Err(e)),
+            };
+            automation::push(&mut txn, now).await?;
+            txn.commit().await?;
+            Ok(Ok(id))
+        }
+        .await;
+        let id = result.map_err(internal)?.map_err(bad)?;
+        ctx.cards.lock().unwrap().push(notice(
+            "提案新的 listener",
+            format!(
+                "{}。到自動化頁啟用後才會生效。",
+                automation::listener_title(&spec)
+            ),
+        ));
+        Ok(json!({
+            "listener_id": id.to_string(),
+            "state": "proposed",
+            "note": "已提案，等使用者在自動化頁啟用後生效。",
+        })
+        .to_string())
+    }
+
+    /// 對話 agent 只能暫停自己的 project；之後的總管可以指定任一 project。
+    fn pause_scope(&self, project_id: Option<&str>) -> Result<ProjectId, ToolError> {
+        let project = match project_id {
+            Some(p) => parse_id("project_id", p)?,
+            None => self.ctx.project,
+        };
+        if project != self.ctx.project {
+            return Err(bad("你只能暫停自己的 project"));
+        }
+        Ok(project)
+    }
+
+    async fn pause(&self, args: PauseArgs) -> Result<String, ToolError> {
+        let ctx = &self.ctx;
+        let project = self.pause_scope(args.project_id.as_deref())?;
+        let now = ctx.clock.now();
+        let until = args
+            .until
+            .as_deref()
+            .map(|u| parse_time_arg("until", u))
+            .transpose()?;
+        if until.is_some_and(|u| u.0 <= now.0) {
+            return Err(bad("until 已經過了"));
+        }
+        let result: Result<Result<(), String>, Error> = async {
+            let mut txn = ctx.hub.begin().await?;
+            // 別人（例如使用者）設的暫停不能被蓋掉（否則可以換成很短的期限再恢復）。
+            if let Some(p) = automation::pauses(txn.conn())
+                .await?
+                .into_iter()
+                .find(|p| p.project == Some(project))
+                && p.by != ctx.actor
+            {
+                return Ok(Err(format!("這個 project 已經被{}暫停了", p.by.label())));
+            }
+            automation::pause(txn.conn(), Some(project), until, &ctx.actor, now).await?;
+            automation::push(&mut txn, now).await?;
+            txn.commit().await?;
+            Ok(Ok(()))
+        }
+        .await;
+        result.map_err(internal)?.map_err(bad)?;
+        ctx.cards.lock().unwrap().push(Card::Notice {
+            title: "已暫停排程與 listener".into(),
+            body: match until {
+                Some(u) => format!(
+                    "{} 自動恢復；暫停期間錯過的觸發不補跑。",
+                    automation::local(u)
+                ),
+                None => "要手動恢復；暫停期間錯過的觸發不補跑。".into(),
+            },
+            actions: vec![
+                pots_proto::NoticeAction::ViewAutomations,
+                pots_proto::NoticeAction::ResumeAutomations,
+            ],
+        });
+        Ok(json!({"paused": project.to_string(), "until": until.map(format_utc)}).to_string())
+    }
+
+    async fn resume(&self, args: ResumeArgs) -> Result<String, ToolError> {
+        let ctx = &self.ctx;
+        let project = self.pause_scope(args.project_id.as_deref())?;
+        let now = ctx.clock.now();
+        let result: Result<Result<(), String>, Error> = async {
+            let mut txn = ctx.hub.begin().await?;
+            let pause = automation::pauses(txn.conn())
+                .await?
+                .into_iter()
+                .find(|p| p.project == Some(project));
+            match pause {
+                None => return Ok(Err("這個 project 沒有被暫停".into())),
+                // 使用者自己暫停的只有使用者能恢復。
+                Some(p) if p.by != ctx.actor => {
+                    return Ok(Err(format!("這是{}暫停的，請使用者自己恢復", p.by.label())));
+                }
+                Some(_) => {}
+            }
+            automation::resume(txn.conn(), Some(project)).await?;
+            automation::push(&mut txn, now).await?;
+            txn.commit().await?;
+            Ok(Ok(()))
+        }
+        .await;
+        result.map_err(internal)?.map_err(bad)?;
+        Ok(json!({"resumed": project.to_string()}).to_string())
+    }
 }

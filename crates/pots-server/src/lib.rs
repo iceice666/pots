@@ -10,6 +10,7 @@
 //! （見 `providers` 模組）。
 
 mod artifacts;
+mod automation;
 mod commands;
 pub mod config;
 mod datadir;
@@ -25,6 +26,7 @@ pub mod service;
 mod store;
 mod tasks;
 mod tools;
+mod watcher;
 mod ws;
 
 use std::collections::BTreeSet;
@@ -39,7 +41,9 @@ use pots_proto::{
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub use config::{AuthConfig, Config, ListenConfig, StoreConfig};
+pub use config::{
+    AuthConfig, Clock, Config, ListenConfig, ManualClock, StoreConfig, WatcherConfig,
+};
 pub use datadir::{BuildInfo, ConnectionInfo, LocalToken, read_connection_info};
 pub use memory::OmConfig;
 pub use model_auth::{FakeModelAuth, ModelAuthControl};
@@ -52,6 +56,7 @@ use crate::profiles::Profiles;
 use crate::providers::{ProviderRegistry, ProviderRouter};
 use crate::runs::Runs;
 use crate::store::{ItemStatus, Store};
+use crate::watcher::Watcher;
 
 /// 關閉時等 agent run 收尾的時間。
 const RUN_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
@@ -119,6 +124,7 @@ pub(crate) struct App {
     pub runs: Runs,
     pub planner: Planner,
     pub memory: Memory,
+    pub watcher: Watcher,
     pub providers: Arc<ProviderRegistry>,
     pub model_auth: Arc<dyn ModelAuthControl>,
     pub shutdown: CancellationToken,
@@ -284,7 +290,14 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         router.clone(),
         config.memory.clone(),
     );
-    let planner = Planner::new(hub.clone(), store.clone(), router.clone(), profiles.planner);
+    let clock = config.watcher.clock.clone();
+    let planner = Planner::new(
+        hub.clone(),
+        store.clone(),
+        router.clone(),
+        profiles.planner,
+        clock,
+    );
     let runs = Runs::new(
         hub.clone(),
         store.clone(),
@@ -294,6 +307,15 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         profiles.chat,
         planner.clone(),
     );
+    let watcher = Watcher::new(
+        hub.clone(),
+        store.clone(),
+        planner.clone(),
+        runs.clone(),
+        &config.data_dir,
+        config.watcher.clone(),
+    );
+    watcher.init().await?;
     let shutdown = CancellationToken::new();
     let app = Arc::new(App {
         hub: hub.clone(),
@@ -301,6 +323,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         runs: runs.clone(),
         planner: planner.clone(),
         memory: memory.clone(),
+        watcher: watcher.clone(),
         providers: registry,
         model_auth: deps.model_auth,
         shutdown: shutdown.clone(),
@@ -326,6 +349,8 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
     // 上次沒跑完（或排隊中）的 Planner run 接著跑。
     planner.start();
     planner.kick();
+    // 輪詢與 sweeper：啟動時馬上各跑一次，補上停機期間漏掉的事件與到期的等待、排程。
+    watcher.start();
 
     let forwarder = tokio::spawn(forward_model_auth(hub.clone(), auth_rx, shutdown.clone()));
     let router = gateway::router(
@@ -343,6 +368,8 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
                 .with_graceful_shutdown(shutdown.clone().cancelled_owned());
             let (served, ()) = tokio::join!(serve, async {
                 shutdown.cancelled().await;
+                // watcher 先停：它最後送出的觸發還要排得進 run（之後由 `recover` 補寫）。
+                watcher.shutdown(RUN_SHUTDOWN_GRACE).await;
                 tokio::join!(
                     runs.shutdown(RUN_SHUTDOWN_GRACE),
                     planner.shutdown(RUN_SHUTDOWN_GRACE),
@@ -418,7 +445,18 @@ async fn recover(hub: &Hub) -> Result<(), Error> {
             StreamItemKind::Human(msg) => {
                 runs::consume(&mut txn, project, item.id, &msg.text, None).await?;
             }
-            _ => Store::mark_consumed(txn.conn(), item.id, None).await?,
+            // 排程與 listener 的系統觸發：和人類訊息一樣寫進歷史（不自動觸發 run）。
+            _ => {
+                let text: Option<String> =
+                    sqlx::query_scalar("SELECT trigger_text FROM stream_items WHERE id = ?")
+                        .bind(item.id.to_string())
+                        .fetch_one(txn.conn())
+                        .await?;
+                match text {
+                    Some(text) => runs::consume(&mut txn, project, item.id, &text, None).await?,
+                    None => Store::mark_consumed(txn.conn(), item.id, None).await?,
+                }
+            }
         }
     }
     txn.commit().await?;

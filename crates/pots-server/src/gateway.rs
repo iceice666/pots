@@ -7,15 +7,18 @@
 //! - `Host` 必須剛好是 `127.0.0.1:<port>` 或 `localhost:<port>`，擋下 DNS rebinding。
 //! - 除了 `/healthz`，每個請求（含 WebSocket 升級）都要帶 `Authorization: Bearer <token>`，
 //!   以固定時間比較。
+//! - 例外：`POST /webhooks/github` 給 GitHub（經 tunnel 或反向代理）呼叫，不帶 token、Host 也不是
+//!   loopback；改以 webhook secret 驗 `X-Hub-Signature-256`，沒有設定 secret 時一律 404。
 
 use std::sync::Arc;
 
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, Request, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use pots_proto::{ItemId, ProjectId};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
@@ -81,8 +84,18 @@ pub(crate) fn router(app: Arc<App>, guard_state: Arc<Guard>) -> Router {
         .route("/healthz", get(healthz))
         .route("/ws", get(ws))
         .route("/projects/{id}/items", get(items))
-        .with_state(app)
+        .with_state(app.clone())
         .layer(middleware::from_fn_with_state(guard_state, guard))
+        .merge(
+            Router::new()
+                .route("/webhooks/github", post(github_webhook))
+                .with_state(app),
+        )
+}
+
+async fn github_webhook(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
+    let (status, text) = app.watcher.github_webhook(&headers, &body).await;
+    (status, text).into_response()
 }
 
 async fn healthz(State(app): State<Arc<App>>) -> impl IntoResponse {

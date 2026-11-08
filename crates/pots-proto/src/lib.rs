@@ -17,7 +17,9 @@ use uuid::Uuid;
 /// - 3：Observational Memory（`Memory` 事件、觀察的釘選／修正／刪除、記憶用的模型）。
 /// - 4：任務樹與 artifact（`GoalChanged`、`ArtifactChanged`、`ArtifactHistory`、
 ///   `SaveArtifact`、`RestoreArtifact`、`Card::Milestone`、快照帶 Goal 與 artifact）。
-pub const PROTOCOL_VERSION: u32 = 4;
+/// - 5：外部事件與自動化（`Automation`、`Github`、`ProjectRepos`、`GithubTest`、GitHub 設定、
+///   project 的 repo、listener 與排程的指令、`Card::Triggered`、快照帶自動化與 GitHub 設定）。
+pub const PROTOCOL_VERSION: u32 = 5;
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -152,6 +154,14 @@ pub struct InstanceView {
     pub listeners: Vec<ListenerView>,
     /// 批次暫停（`pause_automations`）；`None` 表示正常運作。
     pub automation_pause: Option<AutomationPause>,
+    /// 所有暫停（含單一 project 的）；`automation_pause` 是其中「所有 project」那一筆的顯示用文字。
+    #[serde(default)]
+    pub pauses: Vec<PauseView>,
+    /// 外部來源與健康狀態。
+    #[serde(default)]
+    pub sources: Vec<SourceView>,
+    #[serde(default)]
+    pub github: GithubView,
     /// 模型 provider 設定與使用中的 provider。
     pub providers: ProvidersView,
     /// 內建 ChatGPT provider 的登入狀態。
@@ -176,6 +186,11 @@ impl InstanceView {
     /// 頻道「自動化」分頁上的數字。
     pub fn automation_count(&self, project: ProjectId) -> usize {
         self.schedules_for(Some(project)).count() + self.listeners_for(Some(project)).count()
+    }
+
+    /// 這個 project 有沒有被單獨暫停。
+    pub fn project_paused(&self, project: ProjectId) -> Option<&PauseView> {
+        self.pauses.iter().find(|p| p.project == Some(project))
     }
 
     pub fn project_name(&self, project: ProjectId) -> Option<&str> {
@@ -245,6 +260,9 @@ pub struct ProjectView {
     /// 對話 agent 記得什麼（「記憶」分頁）。
     #[serde(default)]
     pub memory: MemoryView,
+    /// 監看的 repo，例如 `github.com/owner/repo`。
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +535,13 @@ pub enum Card {
         rows: Vec<(String, String)>,
         footer: String,
     },
+    /// listener 依外部事件自動開了一個 Goal。
+    Triggered {
+        listener: ListenerId,
+        goal: GoalId,
+        /// 例如「issue #118 加上 agent label」。
+        event: String,
+    },
     /// 已執行的動作回報，例如「已暫停 3 個排程」。
     Notice {
         title: String,
@@ -779,6 +804,18 @@ pub struct ScheduleView {
     pub next_after_pause: Option<String>,
     pub enabled: bool,
     pub history: Vec<TriggerRecord>,
+    /// 下一次觸發（改時間用）；已結束的排程是 `None`。
+    #[serde(default)]
+    pub next_at: Option<Timestamp>,
+    /// 週期排程的過期時間。
+    #[serde(default)]
+    pub expires_at: Option<Timestamp>,
+    /// Planner 的排程所屬的 Goal。
+    #[serde(default)]
+    pub goal: Option<GoalId>,
+    /// 單次排程已觸發、或週期排程已過期。
+    #[serde(default)]
+    pub finished: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,6 +841,10 @@ pub enum ListenerState {
     Disabled,
     /// agent 用 `create_listener` 提案，等 Inbox 裡這筆核准。
     PendingApproval(ApprovalId),
+    /// agent 用 `create_listener` 提案，等你在自動化頁啟用（M5 之前以啟用代替核准）。
+    Proposed,
+    /// 超過每小時觸發上限而暫停；重新啟用後恢復。
+    Throttled,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -830,6 +871,147 @@ pub struct ListenerView {
     pub triggers_this_week: u32,
     pub state: ListenerState,
     pub history: Vec<TriggerRecord>,
+    /// 結構化的條件與動作（編輯用）。假資料沒有。
+    #[serde(default)]
+    pub spec: Option<ListenerSpec>,
+}
+
+/// listener 的條件與動作（`proposal/events-and-automation.md#listener事件自動開工`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenerSpec {
+    pub project: ProjectId,
+    /// 要聽的事件種類，例如 `issue.labeled`、`ci.finished`（見 [`EVENT_KINDS`]）。
+    pub kinds: Vec<String>,
+    /// 資源的 glob，例如 `change:github.com/me/*`；`None` 是這個 project 監看的所有 repo。
+    pub resource: Option<String>,
+    /// 欄位條件，全部符合才觸發；也是 Public 來源自動開工時需要的白名單。
+    pub fields: Vec<FieldMatch>,
+    pub action: ListenerActionSpec,
+    pub max_per_hour: u32,
+    /// 每次觸發的預算（M6 才執行）。
+    pub budget_per_trigger_cents: Option<u32>,
+}
+
+/// 事件欄位要是其中一個值，例如 `label` 是 `agent`、`branch` 是 `main`、`author` 是白名單裡的人。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldMatch {
+    pub field: String,
+    pub any_of: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListenerActionSpec {
+    /// 模板加事件內容 → Goal brief。
+    CreateGoal { template: String },
+    /// 小修改走快速通道；M4 之前開一個 quick 種類的 Goal。
+    QuickFix { template: String },
+    /// 只在 project 對話裡告訴對話 agent。
+    NotifyChat,
+}
+
+impl ListenerActionSpec {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::CreateGoal { .. } => "開 Goal",
+            Self::QuickFix { .. } => "快速修正",
+            Self::NotifyChat => "通知對話",
+        }
+    }
+}
+
+/// listener 可以聽的事件種類與說明。
+pub const EVENT_KINDS: &[(&str, &str)] = &[
+    ("change.opened", "PR 開啟"),
+    ("change.reviewed", "PR 收到 review"),
+    ("change.commented", "PR 有新留言"),
+    ("change.merged", "PR 已 merge"),
+    ("issue.opened", "issue 開啟"),
+    ("issue.labeled", "issue 加上 label"),
+    ("issue.commented", "issue 有新留言"),
+    ("ci.finished", "CI 結束"),
+];
+
+/// 批次暫停。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PauseView {
+    /// `None` 表示所有 project（含全域排程）。
+    pub project: Option<ProjectId>,
+    /// 自動恢復的時間；`None` 表示要手動恢復。
+    pub until: Option<Timestamp>,
+    /// 例如「你」、「總管」。
+    pub by: String,
+    pub at: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceHealth {
+    /// 還沒收過或輪詢過。
+    Unknown,
+    Ok,
+    /// token 過期、連線失敗、連續輪詢失敗等；不會默默停止收事件。
+    Error {
+        message: String,
+        since: Timestamp,
+    },
+}
+
+/// 外部來源（connector 的一個實例）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceView {
+    /// 例如 `github:personal`。
+    pub id: String,
+    /// 例如「GitHub」。
+    pub kind: String,
+    pub name: String,
+    pub trust: TrustLevel,
+    /// 例如「輪詢（每 60 秒）」。
+    pub ingest: String,
+    pub health: SourceHealth,
+    pub last_ok: Option<Timestamp>,
+    pub enabled: bool,
+}
+
+/// 自動化頁的所有資料；任一項有變就整筆替換（`ServerEvent::Automation`）。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AutomationView {
+    pub schedules: Vec<ScheduleView>,
+    pub listeners: Vec<ListenerView>,
+    pub pauses: Vec<PauseView>,
+    pub sources: Vec<SourceView>,
+}
+
+/// GitHub 連線設定（設定視窗的「GitHub」類別）。客戶端只看得到 token 的末四碼。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubView {
+    /// 例如 `…1234`；沒有設定 token 時是 `None`。
+    pub token_hint: Option<String>,
+    /// API base URL，預設 `https://api.github.com`（GitHub Enterprise 是 `https://<host>/api/v3`）。
+    pub api_base: String,
+    /// 有沒有設定 webhook secret（`POST /webhooks/github` 驗簽用）。
+    pub webhook_secret_set: bool,
+    /// 最後一次驗證成功的帳號。
+    pub login: Option<String>,
+}
+
+/// 儲存 GitHub 設定。`token`、`webhook_secret` 為 `None` 時保留已存的，空字串表示清掉。
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubDraft {
+    pub token: Option<String>,
+    pub api_base: Option<String>,
+    pub webhook_secret: Option<String>,
+}
+
+impl std::fmt::Debug for GithubDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GithubDraft")
+            .field("token", &self.token.as_ref().map(|_| "***"))
+            .field("api_base", &self.api_base)
+            .field(
+                "webhook_secret",
+                &self.webhook_secret.as_ref().map(|_| "***"),
+            )
+            .finish()
+    }
 }
 
 impl ListenerView {
@@ -997,6 +1179,10 @@ pub struct InstanceSnapshot {
     pub projects: Vec<ProjectSnapshot>,
     pub model_auth: ModelAuthView,
     pub providers: ProvidersView,
+    #[serde(default)]
+    pub automation: AutomationView,
+    #[serde(default)]
+    pub github: GithubView,
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,6 +1316,9 @@ pub struct ProjectSnapshot {
     /// 所有 artifact，依建立時間。
     #[serde(default)]
     pub artifacts: Vec<ArtifactView>,
+    /// 監看的 repo，例如 `github.com/owner/repo`。
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 /// 模型 provider（ChatGPT Plan，經 SIWC 授權）的狀態。不含任何 token；`Debug` 不印出
@@ -1259,6 +1448,27 @@ pub enum ServerEvent {
         request: u64,
         result: Result<Vec<ModelOption>, String>,
     },
+    /// 排程、listener、暫停或來源健康狀態有變，整筆替換。
+    Automation {
+        seq: u64,
+        automation: AutomationView,
+    },
+    /// GitHub 設定有變。
+    Github {
+        seq: u64,
+        github: GithubView,
+    },
+    /// project 監看的 repo 有變。
+    ProjectRepos {
+        seq: u64,
+        project: ProjectId,
+        repos: Vec<String>,
+    },
+    /// 回給送出 `TestGithub` 的那條連線：成功時是帳號名稱。不寫入事件日誌。
+    GithubTest {
+        request: u64,
+        result: Result<String, String>,
+    },
     /// 回給按下「開始登入」的那條連線：要開啟的登入網址。不寫入事件日誌（網址可能
     /// 帶 `id_token_hint`），也不廣播給其他連線。
     LoginUrl {
@@ -1285,8 +1495,12 @@ impl ServerEvent {
             | Self::Providers { seq, .. }
             | Self::Memory { seq, .. }
             | Self::GoalChanged { seq, .. }
-            | Self::ArtifactChanged { seq, .. } => Some(*seq),
-            Self::Delta { .. }
+            | Self::ArtifactChanged { seq, .. }
+            | Self::Automation { seq, .. }
+            | Self::Github { seq, .. }
+            | Self::ProjectRepos { seq, .. } => Some(*seq),
+            Self::GithubTest { .. }
+            | Self::Delta { .. }
             | Self::StreamingText { .. }
             | Self::ArtifactHistory { .. }
             | Self::LoginUrl { .. }
@@ -1387,6 +1601,58 @@ pub enum ClientCommand {
     RestoreArtifact {
         artifact: ArtifactId,
         rev: u32,
+    },
+    /// 儲存 GitHub 設定；伺服器回 `Github`。
+    SaveGithub {
+        draft: GithubDraft,
+    },
+    /// 用這份 token（`None` 時用已存的）查詢帳號；不儲存。伺服器回 `GithubTest`。
+    TestGithub {
+        request: u64,
+        draft: GithubDraft,
+    },
+    /// 設定 project 監看的 repo（`owner/repo` 或 `github.com/owner/repo`）；伺服器回 `ProjectRepos`。
+    SetProjectRepos {
+        project: ProjectId,
+        repos: Vec<String>,
+    },
+    /// 新增（`id` 為 `None`）或修改 listener。你建立的 listener 直接生效。
+    SaveListener {
+        id: Option<ListenerId>,
+        spec: ListenerSpec,
+    },
+    /// 啟用或停用 listener；啟用 agent 提案的 listener 就是核准它。
+    SetListenerEnabled {
+        id: ListenerId,
+        enabled: bool,
+    },
+    DeleteListener {
+        id: ListenerId,
+    },
+    SetScheduleEnabled {
+        id: ScheduleId,
+        enabled: bool,
+    },
+    /// 改下一次觸發的時間。
+    RescheduleSchedule {
+        id: ScheduleId,
+        next_at: Timestamp,
+    },
+    /// 設定週期排程的過期時間（延長）。
+    SetScheduleExpiry {
+        id: ScheduleId,
+        expires_at: Timestamp,
+    },
+    DeleteSchedule {
+        id: ScheduleId,
+    },
+    /// 暫停一個 project（`None` 是所有 project）的排程與 listener；暫停期間錯過的觸發不補跑。
+    PauseAutomations {
+        project: Option<ProjectId>,
+        until: Option<Timestamp>,
+    },
+    ResumeAutomations {
+        project: Option<ProjectId>,
     },
 }
 

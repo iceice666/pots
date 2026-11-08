@@ -5,8 +5,11 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
-use pots_proto::{InstanceKind, ProviderId};
+use pots_proto::{InstanceKind, ProviderId, Timestamp};
 
 use crate::Error;
 use crate::memory::OmConfig;
@@ -34,6 +37,76 @@ pub struct Config {
     pub default_provider: Option<ProviderId>,
     /// Observational Memory 的閾值（`proposal/memory.md`）。
     pub memory: OmConfig,
+    /// 外部事件、等待與排程（`proposal/events-and-automation.md`）。
+    pub watcher: WatcherConfig,
+}
+
+/// 排程、逾時與 listener 上限用的時鐘。正式版是系統時間；測試用 [`ManualClock`] 撥時間。
+#[derive(Clone)]
+pub struct Clock(Arc<dyn Fn() -> Timestamp + Send + Sync>);
+
+impl Clock {
+    pub fn system() -> Self {
+        Self(Arc::new(Timestamp::now))
+    }
+
+    pub fn now(&self) -> Timestamp {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for Clock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Clock({})", self.now().0)
+    }
+}
+
+/// 手動撥的時鐘，給測試用。
+#[derive(Clone, Debug)]
+pub struct ManualClock(Arc<AtomicI64>);
+
+impl ManualClock {
+    pub fn new(start: Timestamp) -> Self {
+        Self(Arc::new(AtomicI64::new(start.0)))
+    }
+
+    pub fn clock(&self) -> Clock {
+        let secs = self.0.clone();
+        Clock(Arc::new(move || Timestamp(secs.load(Ordering::SeqCst))))
+    }
+
+    pub fn advance(&self, secs: i64) {
+        self.0.fetch_add(secs, Ordering::SeqCst);
+    }
+
+    pub fn now(&self) -> Timestamp {
+        Timestamp(self.0.load(Ordering::SeqCst))
+    }
+}
+
+/// GitHub API 的預設 base URL。
+pub const GITHUB_API: &str = "https://api.github.com";
+
+#[derive(Clone, Debug)]
+pub struct WatcherConfig {
+    /// 多久輪詢一次外部來源。
+    pub poll_interval: Duration,
+    /// sweeper（逾時、排程、自動恢復）多久掃一次。
+    pub sweep_interval: Duration,
+    /// 使用者沒有指定時的 GitHub API base URL。
+    pub github_api: String,
+    pub clock: Clock,
+}
+
+impl Default for WatcherConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(60),
+            sweep_interval: Duration::from_secs(60),
+            github_api: GITHUB_API.into(),
+            clock: Clock::system(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +161,7 @@ impl Config {
             instance_name: None,
             default_provider: None,
             memory: OmConfig::default(),
+            watcher: WatcherConfig::default(),
         }
     }
 
@@ -117,6 +191,9 @@ impl Config {
         }
         if self.agent_name.trim().is_empty() {
             return Err(Error::Config("agent 名稱不能是空的".into()));
+        }
+        if self.watcher.poll_interval.is_zero() || self.watcher.sweep_interval.is_zero() {
+            return Err(Error::Config("輪詢與 sweeper 的間隔不能是 0".into()));
         }
         Ok(())
     }

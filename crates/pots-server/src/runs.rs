@@ -80,6 +80,7 @@ struct Inner {
     router: Arc<ProviderRouter>,
     /// 模型授權控制的狀態，用來在 run 成功後校正 hub 裡的授權狀態。
     auth_status: watch::Receiver<ModelAuthView>,
+    clock: crate::config::Clock,
     lanes: Mutex<HashMap<ProjectId, Lane>>,
     tracker: TaskTracker,
     shutdown: CancellationToken,
@@ -100,6 +101,7 @@ impl Runs {
         profile: AgentProfile,
         planner: Planner,
     ) -> Self {
+        let clock = planner.clock().clone();
         Self {
             inner: Arc::new(Inner {
                 hub,
@@ -109,6 +111,7 @@ impl Runs {
                 memory,
                 router,
                 auth_status,
+                clock,
                 lanes: Mutex::new(HashMap::new()),
                 tracker: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
@@ -225,6 +228,39 @@ async fn consume_without_run(
     txn.commit().await?;
     inner.memory.wake(project);
     Ok(())
+}
+
+/// 不是人類訊息的觸發（排程、listener 的通知）：在對話流貼一則只給人看的事件（`display`），
+/// 狀態是 pending，給 agent 的文字（`text`）存在 `stream_items.trigger_text`。commit 之後用它的
+/// ID 加上同一段文字呼叫 [`Runs::enqueue`]；run 開始時那段文字才寫進 `om_raw`（和人類訊息
+/// 一樣）。服務在那之前關閉或當掉的話，下次啟動時 `recover` 照樣寫進 `om_raw`。
+pub(crate) async fn post_system_trigger(
+    txn: &mut LogTxn<'_>,
+    project: ProjectId,
+    display: &str,
+    text: &str,
+) -> Result<ItemId, Error> {
+    let item = StreamItemView {
+        id: ItemId::new(),
+        at: Timestamp::now(),
+        kind: StreamItemKind::Event {
+            text: tasks::one_line(display, 300),
+        },
+    };
+    let id = item.id;
+    Store::insert_item(txn.conn(), project, &item, ItemStatus::Pending, None).await?;
+    sqlx::query("UPDATE stream_items SET trigger_text = ? WHERE id = ?")
+        .bind(text)
+        .bind(id.to_string())
+        .execute(txn.conn())
+        .await?;
+    txn.push(|seq| ServerEvent::Item {
+        seq,
+        scope: StreamScope::Project(project),
+        item,
+    })
+    .await?;
+    Ok(id)
 }
 
 /// 人類訊息進入原始歷史：寫 `om_raw`、標成已處理，並記一筆 `ItemUpdated`，
@@ -615,6 +651,7 @@ async fn drive_loop(
         milestones: Default::default(),
         goals_created: Default::default(),
         queued: Some(queued),
+        clock: inner.clock.clone(),
     });
     let gate = ctx.gate();
     let config = RunConfig {
