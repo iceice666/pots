@@ -635,6 +635,7 @@ pub fn store() -> Store {
             },
         ],
         repos: vec![],
+        merge_method: MergeMethod::Squash,
     };
 
     // ---- 家用伺服器 · 其他 project ----------------------------------------
@@ -749,6 +750,7 @@ pub fn store() -> Store {
             ),
         ],
         repos: vec![],
+        merge_method: MergeMethod::Squash,
     };
 
     let infra = ProjectView {
@@ -795,6 +797,7 @@ pub fn store() -> Store {
             ),
         ],
         repos: vec![],
+        merge_method: MergeMethod::Squash,
     };
     let infra_id = infra.id;
 
@@ -821,6 +824,7 @@ pub fn store() -> Store {
             "# Project Notes\n\n## 建置\n\n- 文件站用 `mdbook build`，輸出在 `book/`。\n",
         )],
         repos: vec![],
+        merge_method: MergeMethod::Squash,
     };
     let docs_id = docs.id;
     let auth_id = auth;
@@ -1004,6 +1008,7 @@ pub fn store() -> Store {
             "# 整理 shell 設定\n\n## 目標\n\n合併重複的 alias，移除過期的 PATH 設定。\n",
         )],
         repos: vec![],
+        merge_method: MergeMethod::Squash,
     };
     let side_id = ProjectId::from_u64(ids.next());
     let side = ProjectView {
@@ -1031,6 +1036,7 @@ pub fn store() -> Store {
         goals: vec![],
         artifacts: vec![],
         repos: vec![],
+        merge_method: MergeMethod::Squash,
     };
 
     // ---- 家用伺服器 · 自動化 -------------------------------------------------
@@ -1221,6 +1227,8 @@ pub fn store() -> Store {
                 WorkerBackendKind::ClaudeCode,
                 "/Users/you/Library/Application Support/pots",
             ),
+            notifications: NotificationSettings::default(),
+            user_md: UserMdView::default(),
         },
         InstanceView {
             id: home,
@@ -1254,6 +1262,8 @@ pub fn store() -> Store {
             sources: vec![],
             github: GithubView::default(),
             worker: mock_worker(WorkerBackendKind::Builtin, "/var/lib/pots"),
+            notifications: NotificationSettings::default(),
+            user_md: UserMdView::default(),
         },
     ];
 
@@ -1279,6 +1289,8 @@ pub fn store() -> Store {
             at: at(11, 5),
             expiry: Some("72 小時內有效".into()),
             decision: Decision::Pending,
+            task: None,
+            approval: None,
         },
         InboxItem {
             id: pr9,
@@ -1300,6 +1312,8 @@ pub fn store() -> Store {
             at: at(10, 42),
             expiry: Some("72 小時內有效".into()),
             decision: Decision::Pending,
+            task: None,
+            approval: None,
         },
         InboxItem {
             id: infra_listener_approval,
@@ -1323,6 +1337,8 @@ pub fn store() -> Store {
             at: at(10, 7),
             expiry: None,
             decision: Decision::Pending,
+            task: None,
+            approval: None,
         },
         InboxItem {
             id: ApprovalId::from_u64(ids.next()),
@@ -1342,6 +1358,8 @@ pub fn store() -> Store {
             at: at(8, 7),
             expiry: None,
             decision: Decision::Pending,
+            task: None,
+            approval: None,
         },
         InboxItem {
             id: ApprovalId::from_u64(ids.next()),
@@ -1357,6 +1375,8 @@ pub fn store() -> Store {
             at: at(6, 7),
             expiry: None,
             decision: Decision::Pending,
+            task: None,
+            approval: None,
         },
         InboxItem {
             id: ApprovalId::from_u64(ids.next()),
@@ -1372,6 +1392,8 @@ pub fn store() -> Store {
             at: at(8, 30),
             expiry: None,
             decision: Decision::Pending,
+            task: None,
+            approval: None,
         },
     ];
 

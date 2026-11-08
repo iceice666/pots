@@ -1,7 +1,8 @@
 //! 根視圖：持有 [`Store`] 與所有 UI 狀態，各區塊的 render 拆在 `views/`。
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 
@@ -17,7 +18,8 @@ use markdown_editor::{BlockEditorEvent, BlockEditorState};
 
 use crate::connection::{self, ConnEvent, Connection, Endpoint};
 use crate::model::*;
-use crate::sync::{self, Sync};
+use crate::notify::{self, Notifier};
+use crate::sync::{self, Notice, Sync};
 use crate::theme;
 
 gpui_kit::actions!(pots, [OpenOverseer, CloseSettings]);
@@ -64,16 +66,22 @@ pub enum SettingsTab {
     Github,
     /// Coding worker：後端、執行環境、同時執行數，Claude Code 的登入指令。
     Worker,
+    /// 桌面通知與靜音時段。
+    Notifications,
+    /// 跨 project 的使用者偏好（USER.md）。
+    UserMd,
     /// 版本與目前實例的資訊。
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Providers,
         Self::Memory,
         Self::Github,
         Self::Worker,
+        Self::Notifications,
+        Self::UserMd,
         Self::About,
     ];
 
@@ -83,6 +91,8 @@ impl SettingsTab {
             Self::Memory => "記憶",
             Self::Github => "GitHub",
             Self::Worker => "Worker",
+            Self::Notifications => "通知",
+            Self::UserMd => "USER.md",
             Self::About => "關於",
         }
     }
@@ -118,6 +128,32 @@ pub struct WorkerEditor {
     /// 已送出 `SaveWorkerSettings`、等服務回 `Worker`。
     pub saving: bool,
     pub error: Option<String>,
+}
+
+/// 設定視窗「通知」類別正在改的設定。
+pub struct NotificationEditor {
+    pub enabled: bool,
+    pub quiet: bool,
+    pub start: Entity<InputState>,
+    pub end: Entity<InputState>,
+    pub saving: bool,
+    pub error: Option<String>,
+}
+
+/// 設定視窗「USER.md」類別正在改的內容。
+pub struct UserMdEditor {
+    pub input: Entity<TextareaState>,
+    /// 開始編輯時的版本（儲存時當 `base_rev`）。
+    pub base_rev: u32,
+    pub saving: bool,
+    pub error: Option<String>,
+}
+
+/// 拒絕核准時填理由的對話框。
+pub struct RejectDialog {
+    pub id: ApprovalId,
+    pub input: Entity<InputState>,
+    _subscription: Subscription,
 }
 
 /// 右欄「新增 listener」表單。
@@ -362,6 +398,13 @@ pub struct PotsApp {
     pub copied: Option<&'static str>,
     pub listener_form: Option<ListenerForm>,
     pub repo_editor: Option<RepoEditor>,
+    pub notification_editor: Option<NotificationEditor>,
+    pub user_md_editor: Option<UserMdEditor>,
+    pub reject_dialog: Option<RejectDialog>,
+    /// 桌面通知；假資料模式是 `None`。
+    pub notifier: Option<Notifier>,
+    /// 最後一則送出的通知：視窗在之後幾分鐘內被叫到前景時開啟它。
+    pub last_notice: Option<(Notice, Instant)>,
     pub(crate) next_test_request: u64,
     /// 左欄「新增專案」的輸入框；`None` 時顯示按鈕。
     pub new_project: Option<(Entity<InputState>, Subscription)>,
@@ -438,6 +481,13 @@ impl PotsApp {
 
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        // 點了通知（或之後幾分鐘內回到視窗）：開啟那一筆。
+        let mut subscriptions = subscriptions;
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.open_last_notice(window, cx);
+            }
+        }));
 
         let mut this = Self {
             store,
@@ -467,6 +517,11 @@ impl PotsApp {
             copied: None,
             listener_form: None,
             repo_editor: None,
+            notification_editor: None,
+            user_md_editor: None,
+            reject_dialog: None,
+            notifier: None,
+            last_notice: None,
             next_test_request: 0,
             stream_scroll: ScrollHandle::new(),
             overseer_scroll: ScrollHandle::new(),
@@ -494,6 +549,7 @@ impl PotsApp {
         this.screen = Screen::Inbox(Some(placeholder));
 
         let (conn, mut events) = connection::spawn(endpoint);
+        this.notifier = Some(Notifier::new(Arc::new(notify::Os)));
         this.live = Some(Live {
             conn,
             sync: Sync::new(offset),
@@ -520,6 +576,7 @@ impl PotsApp {
                     .await;
                 let alive = this.update(cx, |app, cx| {
                     app.store.now = Timestamp(Timestamp::now().0 + offset);
+                    app.tick_notifications();
                     cx.notify();
                 });
                 if alive.is_err() {
@@ -586,6 +643,8 @@ impl PotsApp {
                     worker: &mut self.worker_editor,
                     listener: &mut self.listener_form,
                     repo: &mut self.repo_editor,
+                    notifications: &mut self.notification_editor,
+                    user_md: &mut self.user_md_editor,
                     panel: &mut self.panel,
                 }
                 .applied(&applied);
@@ -610,6 +669,8 @@ impl PotsApp {
                         worker: &mut self.worker_editor,
                         listener: &mut self.listener_form,
                         repo: &mut self.repo_editor,
+                        notifications: &mut self.notification_editor,
+                        user_md: &mut self.user_md_editor,
                         panel: &mut self.panel,
                     }
                     .route_error(t)
@@ -722,9 +783,78 @@ impl PotsApp {
                 } else if let Some(id) = applied.artifact_changed {
                     self.on_artifact_changed(id, window, cx);
                 }
+                // 決定好了的核准不再需要拒絕的對話框。
+                if let Some(d) = &self.reject_dialog
+                    && self.store.approval(d.id).is_none_or(|i| !i.is_open())
+                {
+                    self.reject_dialog = None;
+                }
+                let active = window.is_window_active();
+                for notice in applied.notices {
+                    self.push_notice(notice, active);
+                }
             }
         }
         cx.notify();
+    }
+
+    /// 依通知設定送出（或累積）一則通知。
+    fn push_notice(&mut self, notice: Notice, window_active: bool) {
+        let Some(notifier) = &mut self.notifier else {
+            return;
+        };
+        let Some(settings) = self
+            .store
+            .instance(notice.instance)
+            .map(|i| i.notifications.clone())
+        else {
+            return;
+        };
+        let focused = window_active
+            && notice.instance == self.instance
+            && notice
+                .project
+                .is_some_and(|p| self.screen == Screen::Project(p));
+        if notifier.notice(notice.clone(), &settings, notify::local_minute(), focused) {
+            self.last_notice = Some((notice, Instant::now()));
+        }
+    }
+
+    /// 靜音時段結束：把累積的通知合併成一則。
+    fn tick_notifications(&mut self) {
+        let Some(notifier) = &mut self.notifier else {
+            return;
+        };
+        let Some(settings) = self
+            .live
+            .as_ref()
+            .and_then(|l| self.store.instance(l.instance))
+            .map(|i| i.notifications.clone())
+        else {
+            return;
+        };
+        if let Some(n) = notifier.tick(&settings, notify::local_minute()) {
+            self.last_notice = Some((n, Instant::now()));
+        }
+    }
+
+    /// 送出通知後不久視窗被叫到前景（多半是點了通知）：開啟那一筆。
+    fn open_last_notice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((notice, at)) = self.last_notice.take() else {
+            return;
+        };
+        if at.elapsed() > Duration::from_secs(10 * 60) {
+            return;
+        }
+        match (notice.item, notice.project) {
+            (Some(id), _) if self.store.approval(id).is_some() => {
+                self.open_inbox_item(id, window, cx);
+            }
+            (_, Some(p)) if self.store.project(notice.instance, p).is_some() => {
+                self.open_project(notice.instance, p, window, cx);
+            }
+            _ => self.open_inbox(Some(notice.instance), cx),
+        }
     }
 
     fn forms(&mut self) -> crate::views::automation_forms::Forms<'_> {
@@ -733,6 +863,8 @@ impl PotsApp {
             worker: &mut self.worker_editor,
             listener: &mut self.listener_form,
             repo: &mut self.repo_editor,
+            notifications: &mut self.notification_editor,
+            user_md: &mut self.user_md_editor,
             panel: &mut self.panel,
         }
     }
@@ -804,6 +936,8 @@ impl PotsApp {
         self.memory_model_editor = None;
         self.github_editor = None;
         self.worker_editor = None;
+        self.notification_editor = None;
+        self.user_md_editor = None;
         self.copied = None;
         cx.notify();
     }
@@ -942,7 +1076,9 @@ impl PotsApp {
     }
 
     fn on_close_settings(&mut self, _: &CloseSettings, _: &mut Window, cx: &mut Context<Self>) {
-        if self.settings.is_some() {
+        if self.reject_dialog.is_some() {
+            self.cancel_reject(cx);
+        } else if self.settings.is_some() {
             self.close_settings(cx);
         } else {
             cx.propagate();
@@ -1655,14 +1791,69 @@ impl PotsApp {
                 }
                 self.open_settings(SettingsTab::Providers, cx);
             }
-            InboxAction::ViewDiff | InboxAction::EditConditions => {
+            InboxAction::ViewDiff => {
+                let url = self.store.approval(id).and_then(|i| match &i.approval {
+                    Some(ApprovalView {
+                        action: ApprovalActionView::MergePr { url: Some(u), .. },
+                        ..
+                    }) => Some(u.clone()),
+                    _ => None,
+                });
+                match url {
+                    Some(u) => cx.open_url(&u),
+                    None => self.notify_unimplemented(action.label(), cx),
+                }
+            }
+            InboxAction::EditConditions => {
                 self.notify_unimplemented(action.label(), cx);
+            }
+            // 服務的核准：先問理由（選填，會轉告 agent）。
+            InboxAction::Reject
+                if self
+                    .store
+                    .approval(id)
+                    .is_some_and(|i| i.approval.is_some() && i.is_open()) =>
+            {
+                self.begin_reject(id, window, cx);
             }
             _ => {
                 self.store.act(id, action);
                 cx.notify();
             }
         }
+    }
+
+    pub fn begin_reject(&mut self, id: ApprovalId, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("理由（選填）：例如「請補上測試」，會轉告 agent")
+        });
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe(&input, |this, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.confirm_reject(cx);
+            }
+        });
+        self.reject_dialog = Some(RejectDialog {
+            id,
+            input,
+            _subscription: sub,
+        });
+        cx.notify();
+    }
+
+    pub fn confirm_reject(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.reject_dialog.take() else {
+            return;
+        };
+        let note = d.input.read(cx).value().trim().to_string();
+        self.store.decide(d.id, false, Some(note));
+        cx.notify();
+    }
+
+    pub fn cancel_reject(&mut self, cx: &mut Context<Self>) {
+        self.reject_dialog = None;
+        cx.notify();
     }
 
     /// 頂端的「停止」：中斷對話 agent 本輪。
@@ -1836,6 +2027,7 @@ impl Render for PotsApp {
             .child(center)
             .children(panel)
             .children(self.render_settings_dialog(cx))
+            .children(self.render_reject_dialog(cx))
             .children(self.render_toast(cx))
     }
 }

@@ -1,5 +1,6 @@
 //! Inbox：需要你決定的事。全域 Inbox 合併所有已連線實例；左欄的 Inbox 只看目前實例。
 
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -237,6 +238,29 @@ impl PotsApp {
                 .line_height(relative(1.5))
                 .text_color(theme::text_muted())
                 .child(item.detail.clone())
+        };
+        // 服務的核准：理由之外也列出具體的動作（PR、sha、方式）與修改的 diff。
+        let body = if item.approval.is_some() {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(body)
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .children(item.facts.iter().map(|f| chip(f.clone()))),
+                )
+                .when_some(super::preferences::approval_diff(item), |d, diff| {
+                    d.child(super::preferences::diff_block(
+                        diff,
+                        cx.theme().mono_font_family.clone(),
+                    ))
+                })
+        } else {
+            body
         };
 
         let footer = if open {

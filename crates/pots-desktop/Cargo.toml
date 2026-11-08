@@ -18,6 +18,8 @@ futures = "0.3"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 tokio-tungstenite = "0.30"
 tracing = "0.1"
+# 桌面通知（核准、需要你處理的任務、Goal 完成）；服務沒有視窗，所以由客戶端發出。
+notify-rust = "4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

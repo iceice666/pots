@@ -1,6 +1,7 @@
 //! 對話流的訊息與內嵌卡片；project 頻道、總管與任務 thread 共用。
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -657,7 +658,7 @@ impl PotsApp {
                 theme::warn_border(),
             ),
             Decision::Approved => (
-                "已核准 · 平台正在執行 merge".to_string(),
+                "已核准 · 平台正在執行".to_string(),
                 theme::ok(),
                 theme::ok_soft(),
                 theme::border(),
@@ -709,6 +710,9 @@ impl PotsApp {
                             .font_weight(FontWeight::BOLD)
                             .child(a.title.clone()),
                     )
+                    .when(!a.detail.is_empty() && a.approval.is_some(), |d| {
+                        d.child(div().line_height(relative(1.5)).child(a.detail.clone()))
+                    })
                     .child(
                         div()
                             .flex()
@@ -716,6 +720,12 @@ impl PotsApp {
                             .gap(px(4.))
                             .children(a.facts.iter().map(|f| muted(f.clone()))),
                     )
+                    .when_some(super::preferences::approval_diff(a), |d, diff| {
+                        d.child(super::preferences::diff_block(
+                            diff,
+                            cx.theme().mono_font_family.clone(),
+                        ))
+                    })
                     .when(pending, |d| {
                         d.child(self.render_actions(id, &a.actions, "card", cx))
                     }),

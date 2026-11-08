@@ -7,6 +7,7 @@ pub mod app;
 pub mod connection;
 pub mod mock;
 pub mod model;
+pub mod notify;
 pub mod sync;
 mod theme;
 mod views;

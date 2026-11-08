@@ -17,8 +17,8 @@ use super::panel::{panel_frame, white_box};
 use super::settings::{card, detail_row, field};
 use super::widgets::*;
 use crate::app::{
-    GithubEditor, GithubTest, ListenerActionKind, ListenerForm, Panel, PotsApp, RepoEditor,
-    WorkerEditor,
+    GithubEditor, GithubTest, ListenerActionKind, ListenerForm, NotificationEditor, Panel, PotsApp,
+    RepoEditor, UserMdEditor, WorkerEditor,
 };
 use crate::model::*;
 use crate::sync::{Applied, month_day_time};
@@ -115,6 +115,8 @@ pub(crate) struct Forms<'a> {
     pub worker: &'a mut Option<WorkerEditor>,
     pub listener: &'a mut Option<ListenerForm>,
     pub repo: &'a mut Option<RepoEditor>,
+    pub notifications: &'a mut Option<NotificationEditor>,
+    pub user_md: &'a mut Option<UserMdEditor>,
     pub panel: &'a mut Option<Panel>,
 }
 
@@ -135,6 +137,18 @@ impl Forms<'_> {
         {
             w.saving = false;
             w.error = Some("連線中斷，請再儲存一次".into());
+        }
+        if let Some(n) = self.notifications
+            && n.saving
+        {
+            n.saving = false;
+            n.error = Some("連線中斷，請再儲存一次".into());
+        }
+        if let Some(u) = self.user_md
+            && u.saving
+        {
+            u.saving = false;
+            u.error = Some("連線中斷，請再儲存一次".into());
         }
         if let Some(f) = self.listener
             && f.saving
@@ -166,6 +180,20 @@ impl Forms<'_> {
             w.error = Some(toast);
             return None;
         }
+        if let Some(n) = self.notifications
+            && n.saving
+        {
+            n.saving = false;
+            n.error = Some(toast);
+            return None;
+        }
+        if let Some(u) = self.user_md
+            && u.saving
+        {
+            u.saving = false;
+            u.error = Some(toast);
+            return None;
+        }
         if let Some(f) = self.listener
             && f.saving
         {
@@ -190,6 +218,12 @@ impl Forms<'_> {
         }
         if applied.github_changed && self.github.as_ref().is_some_and(|e| e.saving) {
             *self.github = None;
+        }
+        if applied.notifications_changed && self.notifications.as_ref().is_some_and(|e| e.saving) {
+            *self.notifications = None;
+        }
+        if applied.user_md_changed && self.user_md.as_ref().is_some_and(|e| e.saving) {
+            *self.user_md = None;
         }
         if let Some((request, result)) = &applied.github_test
             && let Some(e) = self.github
@@ -881,7 +915,47 @@ impl PotsApp {
                 );
             }
         }
-        b
+        // 你核准 merge 後平台用的方式（agent 申請時可以另外指定，核准卡片上看得到）。
+        b.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .flex_wrap()
+                .pt(px(4.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(theme::text_muted())
+                        .child("核准後 merge 的方式"),
+                )
+                .children(MergeMethod::ALL.map(|m| {
+                    chip(
+                        SharedString::from(format!("merge-method-{}", m.as_str())),
+                        m.label(),
+                        p.merge_method == m,
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_merge_method(project, m, cx)),
+                    )
+                })),
+        )
+    }
+
+    pub fn set_merge_method(
+        &mut self,
+        project: ProjectId,
+        method: MergeMethod,
+        cx: &mut Context<Self>,
+    ) {
+        let instance = self.instance;
+        if let Some(p) = self.store.project_mut(instance, project) {
+            p.merge_method = method;
+        }
+        self.store
+            .outbox
+            .push((instance, ClientCommand::SetMergeMethod { project, method }));
+        cx.notify();
     }
 
     // ---- 暫停與來源 ------------------------------------------------------------

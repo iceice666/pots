@@ -40,6 +40,91 @@ pub struct Applied {
     pub worker_changed: bool,
     /// 這個 project 監看的 repo 換了（`ProjectRepos`）。
     pub repos_changed: Option<ProjectId>,
+    /// 要不要彈桌面通知的事（新的核准、需要你處理的任務、Goal 完成）。快照不產生通知。
+    pub notices: Vec<Notice>,
+    /// 通知設定有變（`Notifications` 事件或快照）。
+    pub notifications_changed: bool,
+    /// USER.md 有變（`UserMd` 事件或快照）。
+    pub user_md_changed: bool,
+}
+
+/// 一則可能要推播的事。點通知（或之後回到視窗）時開 `item`，沒有就開 project。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub instance: InstanceId,
+    pub project: Option<ProjectId>,
+    pub item: Option<ApprovalId>,
+    pub title: String,
+    pub body: String,
+}
+
+/// 「需要你處理」的任務在 Inbox 裡用任務的 UUID 當 ID。
+pub fn task_item_id(task: TaskId) -> ApprovalId {
+    ApprovalId(task.0)
+}
+
+/// 交給 Planner 決定的（worker 的 escalate、快速修改升級）不算需要你處理。
+fn needs_you(state: &TaskStateView) -> Option<&str> {
+    match state {
+        TaskStateView::NeedsHuman { reason }
+            if !reason.starts_with("worker 需要決定：") && !reason.starts_with("升級：") =>
+        {
+            Some(reason)
+        }
+        _ => None,
+    }
+}
+
+/// 核准的狀態 → Inbox 與卡片上的決定。
+fn approval_decision(a: &ApprovalView) -> Decision {
+    let result = a.result.clone().unwrap_or_default();
+    match a.state {
+        ApprovalState::Pending => Decision::Pending,
+        ApprovalState::Executing => Decision::Approved,
+        ApprovalState::Rejected => Decision::Rejected,
+        ApprovalState::Executed if result.is_empty() => Decision::Resolved("已核准".into()),
+        ApprovalState::Executed => Decision::Resolved(format!("已核准 · {result}")),
+        ApprovalState::Failed => Decision::Resolved(format!("核准了，但沒有執行：{result}")),
+        ApprovalState::Expired => Decision::Resolved("已逾時，沒有決定".into()),
+        ApprovalState::Cancelled => Decision::Resolved("已撤回，不再需要".into()),
+    }
+}
+
+/// 核准卡片與 Inbox 上列出的細節。
+fn approval_facts(a: &ApprovalView) -> Vec<String> {
+    let mut facts = match &a.action {
+        ApprovalActionView::MergePr {
+            pr,
+            sha,
+            method,
+            branch,
+            base,
+            ..
+        } => vec![
+            format!("PR {pr}"),
+            format!("{branch} → {base}"),
+            format!(
+                "head {} · 用 {} merge",
+                &sha[..sha.len().min(7)],
+                method.label()
+            ),
+        ],
+        ApprovalActionView::DeleteBranch { repo, branch } => {
+            vec![repo.clone(), format!("刪除分支 {branch}")]
+        }
+        ApprovalActionView::CreateListener { summary, .. } => vec![summary.clone()],
+        ApprovalActionView::EditUserMd { base_rev, .. } => {
+            vec![format!("修改 USER.md（目前 v{base_rev}）")]
+        }
+        ApprovalActionView::EditProjectNotes { base_rev, .. } => {
+            vec![format!("修改 Project Notes（目前 v{base_rev}）")]
+        }
+    };
+    facts.push(format!("{}申請 · 動作 {}", a.requested_by, a.action_hash));
+    if let Some(note) = &a.note {
+        facts.push(format!("你的理由：{note}"));
+    }
+    facts
 }
 
 /// 已經換成本地時間的 `Timestamp` 顯示成 `11/08 09:00`。
@@ -78,6 +163,8 @@ pub fn placeholder_instance(id: InstanceId, name: &str) -> InstanceView {
         sources: vec![],
         github: GithubView::default(),
         worker: WorkerSettingsView::default(),
+        notifications: NotificationSettings::default(),
+        user_md: UserMdView::default(),
         providers: ProvidersView::default(),
         model_auth: ModelAuthView::SignedOut,
     }
@@ -150,7 +237,117 @@ impl Sync {
                 .collect(),
             memory: p.memory,
             repos: p.repos,
+            merge_method: p.merge_method,
         }
+    }
+
+    /// 服務的核准 → Inbox 項目。
+    fn approval_item(&self, store: &Store, instance: InstanceId, a: ApprovalView) -> InboxItem {
+        let goal = a
+            .goal
+            .and_then(|g| store.goal(instance, g))
+            .map(|g| g.title.clone())
+            .unwrap_or_default();
+        let mut actions = vec![InboxAction::Approve, InboxAction::Reject];
+        if matches!(&a.action, ApprovalActionView::MergePr { url: Some(_), .. }) {
+            actions.push(InboxAction::ViewDiff);
+        }
+        actions.push(InboxAction::OpenThread);
+        let left = a.expires_at.0 - Timestamp::now().0;
+        let expiry = (a.is_pending() && left > 0).then(|| {
+            if left >= 3600 {
+                format!("{} 小時內有效", (left + 3599) / 3600)
+            } else {
+                format!("{} 分鐘內有效", ((left + 59) / 60).max(1))
+            }
+        });
+        InboxItem {
+            id: a.id,
+            instance,
+            project: Some(a.project),
+            context: goal,
+            kind: InboxKind::Approval,
+            title: a.title.clone(),
+            detail: a.reason.clone(),
+            facts: approval_facts(&a),
+            actions,
+            at: self.local(a.created_at),
+            expiry,
+            decision: approval_decision(&a),
+            task: a.task,
+            approval: Some(a),
+        }
+    }
+
+    /// 核准新增或有變：換掉 Inbox 那一筆。回傳是不是新的、要推播的核准。
+    fn upsert_approval(&self, store: &mut Store, instance: InstanceId, a: ApprovalView) -> bool {
+        let fresh = a.is_pending() && a.notify;
+        let item = self.approval_item(store, instance, a);
+        match store.inbox.iter_mut().find(|i| i.id == item.id) {
+            Some(existing) => {
+                *existing = item;
+                false
+            }
+            None => {
+                store.inbox.push(item);
+                fresh
+            }
+        }
+    }
+
+    /// 依 Goal 的任務更新「需要你處理」的項目。回傳新出現的那些（推播用）。
+    fn sync_task_items(
+        &self,
+        store: &mut Store,
+        instance: InstanceId,
+        project: ProjectId,
+        goal: &GoalView,
+    ) -> Vec<(ApprovalId, String, String)> {
+        let mut fresh = Vec::new();
+        for t in &goal.tasks {
+            let id = task_item_id(t.id);
+            let existing = store.inbox.iter_mut().find(|i| i.id == id);
+            match (needs_you(&t.state), existing) {
+                (Some(reason), Some(item)) => {
+                    if !item.is_open() {
+                        item.at = store.now;
+                        fresh.push((id, t.title.clone(), reason.to_string()));
+                    }
+                    item.detail = reason.to_string();
+                    item.decision = Decision::Pending;
+                    item.context = goal.title.clone();
+                }
+                (Some(reason), None) => {
+                    store.inbox.push(InboxItem {
+                        id,
+                        instance,
+                        project: Some(project),
+                        context: goal.title.clone(),
+                        kind: InboxKind::NeedsYou,
+                        title: format!("任務需要你處理：{}", t.title),
+                        detail: reason.to_string(),
+                        facts: vec![],
+                        actions: vec![
+                            InboxAction::Retry,
+                            InboxAction::CancelTask,
+                            InboxAction::OpenThread,
+                        ],
+                        at: store.now,
+                        expiry: None,
+                        decision: Decision::Pending,
+                        task: Some(t.id),
+                        approval: None,
+                    });
+                    fresh.push((id, t.title.clone(), reason.to_string()));
+                }
+                (None, Some(item)) if item.is_open() => {
+                    item.decision =
+                        Decision::Resolved(format!("已處理：{}", t.state.bucket().label()));
+                }
+                (None, _) => {}
+            }
+        }
+        fresh
     }
 
     /// 自動化頁的資料整份換掉。排程與 listener 的顯示文字服務已經用本地時間排好；
@@ -223,7 +420,11 @@ impl Sync {
                 view.model_auth = snap.model_auth;
                 view.github = snap.github;
                 view.worker = snap.worker;
+                view.notifications = snap.notifications;
+                view.user_md = snap.user_md;
                 self.apply_automation(view, snap.automation);
+                out.notifications_changed = true;
+                out.user_md_changed = true;
                 out.providers_changed = true;
                 out.github_changed = true;
                 out.worker_changed = true;
@@ -237,6 +438,26 @@ impl Sync {
                     store.inbox.retain(|i| i.id != old_login);
                     out.rekeyed = Some((instance, new_id));
                     instance = new_id;
+                }
+                // 核准與「需要你處理」的任務整份換掉（本機的登入提示留著）。
+                let login = model_login_item_id(instance);
+                store
+                    .inbox
+                    .retain(|i| i.instance != instance || i.id == login);
+                for a in snap.approvals {
+                    self.upsert_approval(store, instance, a);
+                }
+                let goals: Vec<(ProjectId, GoalView)> = store
+                    .instance(instance)
+                    .map(|v| {
+                        v.projects
+                            .iter()
+                            .flat_map(|p| p.goals.iter().map(|g| (p.id, g.clone())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for (p, g) in &goals {
+                    self.sync_task_items(store, instance, *p, g);
                 }
                 refresh_setup_prompt(store, instance);
             }
@@ -339,11 +560,65 @@ impl Sync {
             }
             ServerEvent::GoalChanged { project, goal, .. } => {
                 let goal = self.localize_goal(goal);
+                let was_active = store
+                    .goal(instance, goal.id)
+                    .is_some_and(|g| g.state.is_active());
+                for (id, title, reason) in self.sync_task_items(store, instance, project, &goal) {
+                    out.notices.push(Notice {
+                        instance,
+                        project: Some(project),
+                        item: Some(id),
+                        title: format!("需要你處理：{title}"),
+                        body: reason,
+                    });
+                }
+                if was_active && let GoalState::Done { summary } = &goal.state {
+                    out.notices.push(Notice {
+                        instance,
+                        project: Some(project),
+                        item: None,
+                        title: format!("Goal 完成：{}", goal.title),
+                        body: summary.clone(),
+                    });
+                }
                 if let Some(p) = store.project_mut(instance, project) {
                     match p.goals.iter_mut().find(|g| g.id == goal.id) {
                         Some(g) => *g = goal,
                         None => p.goals.push(goal),
                     }
+                }
+            }
+            ServerEvent::ApprovalChanged { approval, .. } => {
+                let a = *approval;
+                let (project, title, reason, id) =
+                    (a.project, a.title.clone(), a.reason.clone(), a.id);
+                if self.upsert_approval(store, instance, a) {
+                    out.notices.push(Notice {
+                        instance,
+                        project: Some(project),
+                        item: Some(id),
+                        title: format!("等你核准：{title}"),
+                        body: reason,
+                    });
+                }
+            }
+            ServerEvent::Notifications { settings, .. } => {
+                if let Some(view) = store.instance_mut(instance) {
+                    view.notifications = settings;
+                }
+                out.notifications_changed = true;
+            }
+            ServerEvent::UserMd { user_md, .. } => {
+                if let Some(view) = store.instance_mut(instance) {
+                    view.user_md = user_md;
+                }
+                out.user_md_changed = true;
+            }
+            ServerEvent::ProjectMergeMethod {
+                project, method, ..
+            } => {
+                if let Some(p) = store.project_mut(instance, project) {
+                    p.merge_method = method;
                 }
             }
             ServerEvent::ArtifactChanged {
@@ -396,8 +671,8 @@ impl Sync {
                 out.github_test = Some((request, result));
             }
             ServerEvent::Error { message } => out.toast = Some(message),
-            // 任務的變化隨 `GoalChanged` 整個 Goal 送來；核准在 M5。
-            ServerEvent::TaskChanged { .. } | ServerEvent::Inbox { .. } => {}
+            // 任務的變化隨 `GoalChanged` 整個 Goal 送來。
+            ServerEvent::TaskChanged { .. } => {}
         }
         if let Some(seq) = seq
             && let Some(view) = store.instance_mut(instance)
@@ -467,6 +742,8 @@ pub fn refresh_setup_prompt(store: &mut Store, instance: InstanceId) {
         at: store.now,
         expiry: None,
         decision: Decision::Pending,
+        task: None,
+        approval: None,
     };
     match store.inbox.iter_mut().find(|i| i.id == id) {
         Some(existing) => *existing = item,
@@ -561,7 +838,7 @@ mod tests {
     fn snapshot(id: InstanceId, project: ProjectId, auth: ModelAuthView) -> ServerEvent {
         ServerEvent::Snapshot {
             seq: 3,
-            instance: InstanceSnapshot {
+            instance: Box::new(InstanceSnapshot {
                 id,
                 name: "本機".into(),
                 kind: InstanceKind::Desktop,
@@ -575,13 +852,17 @@ mod tests {
                     goals: vec![],
                     artifacts: vec![],
                     repos: vec![],
+                    merge_method: Default::default(),
                 }],
                 model_auth: auth,
                 providers: chatgpt_active(),
                 automation: Default::default(),
                 github: Default::default(),
                 worker: Default::default(),
-            },
+                approvals: vec![],
+                notifications: Default::default(),
+                user_md: Default::default(),
+            }),
         }
     }
 
@@ -756,6 +1037,234 @@ mod tests {
             },
         );
         assert_eq!(out.provider_test, Some((7, Err("連不上".into()))));
+    }
+
+    fn approval(id: u64, project: ProjectId, state: ApprovalState) -> ApprovalView {
+        ApprovalView {
+            id: ApprovalId::from_u64(id),
+            project,
+            goal: None,
+            task: None,
+            title: "merge PR #40：Add hello".into(),
+            reason: "CI 通過".into(),
+            requested_by: "worker".into(),
+            action: ApprovalActionView::MergePr {
+                pr: "github.com/me/app#40".into(),
+                url: Some("https://github.com/me/app/pull/40".into()),
+                sha: "a".repeat(40),
+                method: MergeMethod::Squash,
+                branch: "pots/x".into(),
+                base: "main".into(),
+            },
+            action_hash: "0123456789ab".into(),
+            state,
+            note: None,
+            result: None,
+            notify: true,
+            created_at: Timestamp::now(),
+            expires_at: Timestamp(Timestamp::now().0 + 72 * 3600),
+            decided_at: None,
+        }
+    }
+
+    fn goal(id: GoalId, state: GoalState, task: TaskId, task_state: TaskStateView) -> GoalView {
+        GoalView {
+            id,
+            title: "加 hello".into(),
+            state,
+            planner_note: String::new(),
+            budget_used_pct: 0,
+            tasks: vec![TaskView {
+                id: task,
+                goal: id,
+                title: "Add hello".into(),
+                assignee: "worker".into(),
+                summary: String::new(),
+                state: task_state,
+                branch: None,
+                elapsed_min: 0,
+                cost_cents: 0,
+                steps: vec![],
+                thread: vec![],
+                pr: None,
+                pr_url: None,
+                progress: String::new(),
+            }],
+            team: vec![],
+            brief: String::new(),
+            quick: false,
+        }
+    }
+
+    #[test]
+    fn approvals_and_tasks_become_inbox_items_and_notices() {
+        let inst = InstanceId::from_u64(1);
+        let project = ProjectId::from_u64(2);
+        let mut store = empty_store(inst);
+        let sync = Sync::new(0);
+        let mut snap = snapshot(inst, project, ModelAuthView::SignedIn { account: None });
+        if let ServerEvent::Snapshot { instance, .. } = &mut snap {
+            instance.approvals = vec![approval(7, project, ApprovalState::Executed)];
+        }
+        let out = sync.apply(&mut store, inst, snap);
+        assert!(out.notices.is_empty(), "快照不推播");
+        assert!(!store.approval(ApprovalId::from_u64(7)).unwrap().is_open());
+
+        // 新的核准：Inbox 多一筆、要推播；核准後送 `Decide`。
+        let a = approval(8, project, ApprovalState::Pending);
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::ApprovalChanged {
+                seq: 4,
+                approval: Box::new(a.clone()),
+            },
+        );
+        assert_eq!(out.notices.len(), 1);
+        assert_eq!(out.notices[0].item, Some(a.id));
+        let item = store.approval(a.id).unwrap();
+        assert!(item.is_open());
+        assert_eq!(item.kind, InboxKind::Approval);
+        assert_eq!(
+            item.actions,
+            vec![
+                InboxAction::Approve,
+                InboxAction::Reject,
+                InboxAction::ViewDiff,
+                InboxAction::OpenThread
+            ]
+        );
+        assert_eq!(item.expiry.as_deref(), Some("72 小時內有效"));
+        assert!(item.facts.iter().any(|f| f.contains("用 squash merge")));
+        assert!(store.act(a.id, InboxAction::Approve));
+        assert!(matches!(
+            store.outbox.last(),
+            Some((_, ClientCommand::Decide { approve: true, .. }))
+        ));
+        let mut done = a.clone();
+        done.state = ApprovalState::Executed;
+        done.result = Some("用 squash merge 了 PR #40".into());
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::ApprovalChanged {
+                seq: 5,
+                approval: Box::new(done),
+            },
+        );
+        assert!(out.notices.is_empty());
+        assert_eq!(
+            store.approval(a.id).unwrap().decision,
+            Decision::Resolved("已核准 · 用 squash merge 了 PR #40".into())
+        );
+        assert!(!store.decide(a.id, false, None), "已決定的不再送");
+
+        // 需要你處理的任務：出現在 Inbox 並推播；重試後收掉。交給 Planner 的不算。
+        let (g, t) = (GoalId::from_u64(3), TaskId::from_u64(4));
+        let needs = TaskStateView::NeedsHuman {
+            reason: "CI 連續失敗 3 次".into(),
+        };
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::GoalChanged {
+                seq: 6,
+                project,
+                goal: goal(g, GoalState::Active, t, needs.clone()),
+            },
+        );
+        assert_eq!(out.notices.len(), 1);
+        let item = store.approval(task_item_id(t)).unwrap();
+        assert_eq!(item.kind, InboxKind::NeedsYou);
+        assert_eq!(item.task, Some(t));
+        assert!(store.project_needs_you(inst, project));
+        assert!(store.act(task_item_id(t), InboxAction::Retry));
+        assert!(matches!(
+            store.outbox.last(),
+            Some((_, ClientCommand::RetryTask { task })) if *task == t
+        ));
+        let escalated = TaskStateView::NeedsHuman {
+            reason: "worker 需要決定：用哪個套件？".into(),
+        };
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::GoalChanged {
+                seq: 7,
+                project,
+                goal: goal(g, GoalState::Active, t, escalated),
+            },
+        );
+        assert!(out.notices.is_empty(), "交給 Planner 的不推播");
+        assert!(!store.project_needs_you(inst, project));
+
+        // Goal 完成：推播一次。
+        let done = GoalState::Done {
+            summary: "hello 加好了".into(),
+        };
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::GoalChanged {
+                seq: 8,
+                project,
+                goal: goal(
+                    g,
+                    done.clone(),
+                    t,
+                    TaskStateView::Done {
+                        outcome: "好了".into(),
+                    },
+                ),
+            },
+        );
+        assert_eq!(out.notices.len(), 1);
+        assert!(out.notices[0].title.starts_with("Goal 完成"));
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::GoalChanged {
+                seq: 9,
+                project,
+                goal: goal(
+                    g,
+                    done,
+                    t,
+                    TaskStateView::Done {
+                        outcome: "好了".into(),
+                    },
+                ),
+            },
+        );
+        assert!(out.notices.is_empty());
+
+        // 通知設定、USER.md 與 merge 方式。
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::UserMd {
+                seq: 10,
+                user_md: UserMdView {
+                    rev: 2,
+                    body: "x".into(),
+                },
+            },
+        );
+        assert!(out.user_md_changed);
+        assert_eq!(store.instance(inst).unwrap().user_md.rev, 2);
+        sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::ProjectMergeMethod {
+                seq: 11,
+                project,
+                method: MergeMethod::Rebase,
+            },
+        );
+        assert_eq!(
+            store.project(inst, project).unwrap().merge_method,
+            MergeMethod::Rebase
+        );
     }
 
     fn text_of(store: &Store, instance: InstanceId, project: ProjectId, item: ItemId) -> String {

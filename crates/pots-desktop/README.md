@@ -33,12 +33,13 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | --- | --- |
 | 實例與 project | 本機實例、建立 project、project 列表 |
 | 頻道對話 | 傳訊息（排隊／改方向）、串流回覆、工具摘要、停止 |
-| Inbox | 還沒設定 provider、ChatGPT 需要登入時的提示 |
+| Inbox | 服務的核准（merge PR、刪除分支、listener 提案、USER.md／Project Notes 的修改）：理由、具體動作（PR、sha、merge 方式）、提案的 diff、有效期限，「核准」、「拒絕」（可以填理由）、「看 diff」（開 PR）、「在頻道中查看」；需要你處理的任務（重試、取消）；還沒設定 provider、ChatGPT 需要登入時的提示。對話裡的核准卡片是同一筆 |
+| 通知 | 新的核准、需要你處理的任務、Goal 完成時送系統通知（`notify-rust`）；設定的「通知」類別可以關掉、設定靜音時段（期間累積，結束時合併成一則）。視窗在前景而且正看著那個 project 時不另外通知；送出後 10 分鐘內回到視窗會開啟那一筆 |
 | 記憶 | 頻道的「記憶」分頁：Observer 整理出的觀察與「目前在做什麼」，可以釘選、修正（Enter 儲存）、刪除；整理失敗時顯示原因 |
 | Goal 與任務 | agent 開 Goal 時回覆下面附 Goal 卡片（狀態、任務數、Planner 的最後一句話；快速修改的 Goal 標「快速修改」），Planner 的里程碑是對話裡的卡片。右欄 Goal 面板：任務依狀態分組，每列是現在怎樣了（進行中是 worker 最後一句進度、需要你的原因、完成的結果、失敗的次數與錯誤）與執行者、分支、PR（點了用系統瀏覽器開）；Brief 全文、Ledger；Team 分頁是 Planner 與 worker 的發現、問題、決定、阻礙與交接（新的在上面，唯讀）。任務 thread 的「取消任務」會送到服務；「留言給 Planner」與直接對 worker 說話還沒接上 |
 | Artifacts | 頻道「Artifacts」分頁與右欄編輯器：修改先是草稿（「未儲存」），按「儲存」帶著編輯開始時的版本送出；期間 agent 改過時服務以 `##` 區段合併，同一段兩邊都改過會拒絕並保留草稿。沒有草稿時，agent 的修改直接顯示。「版本紀錄」列出每一版的作者、時間與 diff，可以還原。改 Goal 的 Brief 會叫醒 Planner |
-| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；「記憶」：整理記憶用的 provider 與模型（預設跟對話相同）；「GitHub」：fine-grained token（只顯示末四碼）、API base URL（改了要重新輸入 token）、webhook secret、測試連線、來源狀態；「Worker」：後端（內建 worker／Claude Code）、執行環境（容器／本機，本機沒有沙箱）、容器執行檔與 image（`docker build -t pots-worker:latest docker/worker`）、Claude Code 模型、同時執行的 worker 數，以及登入 Claude Code 的指令（可複製；你在終端機自己執行 `/login`，Pots 不碰憑證）；「關於」：版本與實例資訊 |
-| 自動化 | 頻道「自動化」分頁：監看的 repo（編輯後 Enter 儲存）、暫停／恢復這個 project 的自動化、這個 project 的排程與 listener。左欄「排程」「Listener」進實例的自動化頁：「全部暫停」與暫停橫幅的「立即恢復」、排程的啟用開關與刪除、listener 的啟用／停用／刪除、agent 提案的 listener 按「啟用」才生效（核准流程在 M5）、「新增 listener」表單（事件種類、label／author／branch／conclusion 條件、開 Goal／快速修正／通知對話、每小時上限）、外部來源的健康狀態。listener 開的 Goal 在對話裡是 Goal 卡片；排程與 listener 送給對話 agent 的通知是對話裡的一則事件。等待中的任務在 Goal 面板顯示在等什麼與逾時時間 |
+| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；「記憶」：整理記憶用的 provider 與模型（預設跟對話相同）；「GitHub」：fine-grained token（只顯示末四碼）、API base URL（改了要重新輸入 token）、webhook secret、測試連線、來源狀態；「通知」：桌面通知與靜音時段；「USER.md」：跨 project 的使用者偏好（直接編輯，agent 只能提案）；「Worker」：後端（內建 worker／Claude Code）、執行環境（容器／本機，本機沒有沙箱）、容器執行檔與 image（`docker build -t pots-worker:latest docker/worker`）、Claude Code 模型、同時執行的 worker 數，以及登入 Claude Code 的指令（可複製；你在終端機自己執行 `/login`，Pots 不碰憑證）；「關於」：版本與實例資訊 |
+| 自動化 | 頻道「自動化」分頁：監看的 repo（編輯後 Enter 儲存）、核准後 merge 的方式（squash／merge commit／rebase）、暫停／恢復這個 project 的自動化、這個 project 的排程與 listener。左欄「排程」「Listener」進實例的自動化頁：「全部暫停」與暫停橫幅的「立即恢復」、排程的啟用開關與刪除、listener 的啟用／停用／刪除、agent 提案的 listener 要在核准卡片或 Inbox 核准才生效、「新增 listener」表單（事件種類、label／author／branch／conclusion 條件、開 Goal／快速修正／通知對話、每小時上限）、外部來源的健康狀態。listener 開的 Goal 在對話裡是 Goal 卡片；排程與 listener 送給對話 agent 的通知是對話裡的一則事件。等待中的任務在 Goal 面板顯示在等什麼與逾時時間 |
 | 其他 | 總管在 live 模式是空的（M6）；「改時間」「編輯條件」還沒接上 |
 
 ## 已有的畫面（`--mock` 假資料）
@@ -64,10 +65,11 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 
 - `src/model.rs`：客戶端的整體狀態 `Store`；view model 與即時協定在 [`pots-proto`](../pots-proto/)。使用者動作把要送出的指令記在 `Store::outbox`，live 模式下每次重繪前送給服務。
 - `src/connection.rs`：一個實例的 WebSocket 連線，跑在自己的執行緒與 tokio runtime；斷線自動重連並帶 `Resume { last_seq }`。
-- `src/sync.rs`：把 `ServerEvent` 套用到 `Store`（快照換掉暫用的實例 ID、串流文字、provider 與登入狀態轉成 Inbox 提示、`Memory` 整份替換 project 的記憶、`GoalChanged`／`ArtifactChanged` 整筆替換 Goal 與 artifact、`Automation` 整份替換排程／listener／暫停／來源、`Github`、`Worker` 與 `ProjectRepos`、UTC 轉本地時間）。
+- `src/sync.rs`：把 `ServerEvent` 套用到 `Store`（快照換掉暫用的實例 ID、串流文字、provider 與登入狀態轉成 Inbox 提示、`Memory` 整份替換 project 的記憶、`GoalChanged`／`ArtifactChanged` 整筆替換 Goal 與 artifact、`Automation` 整份替換排程／listener／暫停／來源、`Github`、`Worker` 與 `ProjectRepos`、`ApprovalChanged` 與任務樹轉成 Inbox 項目與要推播的事、`Notifications`、`UserMd`、`ProjectMergeMethod`、UTC 轉本地時間）。
+- `src/notify.rs`：桌面通知與靜音時段（累積、結束時合併）。
 - `src/mock.rs`：假資料。
 - `src/app.rs`：根視圖 `PotsApp`，持有 `Store` 與 UI 狀態（目前畫面、右欄、篩選、輸入框）。
-- `src/views/`：各區塊的 render；`memory.rs` 是「記憶」分頁，`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`automation_forms.rs` 是 GitHub 設定、新增 listener、監看 repo 與暫停的表單，`worker_settings.rs` 是設定視窗的「Worker」類別，`widgets.rs` 是手刻的小元件，`theme.rs` 是色票。
+- `src/views/`：各區塊的 render；`memory.rs` 是「記憶」分頁，`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`automation_forms.rs` 是 GitHub 設定、新增 listener、監看 repo 與暫停的表單，`worker_settings.rs` 是設定視窗的「Worker」類別，`preferences.rs` 是「通知」與「USER.md」類別和拒絕核准的對話框，`widgets.rs` 是手刻的小元件，`theme.rs` 是色票。
 
 ## 驗證
 
@@ -77,7 +79,7 @@ cargo test -p pots-desktop --test screenshots    # 用離屏 renderer 輸出主�
 cargo run -p pots-desktop --example probe -- <資料目錄> project 名稱 send 你好   # 不開視窗直接和服務說話
 ```
 
-截圖裡的 `11-live-*` 到 `21-live-*` 會在背景起一個真的服務（模型換成腳本，GitHub API 指到沒有服務的本機 port），走一次「還沒設定 provider → 設定視窗新增 OpenAI 相容 API、測試連線、儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開 Goal、Planner 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄 → 設定 GitHub token → Worker 設定（不合法的容器執行檔被拒絕、改好後儲存）→ 監看 repo、agent 建立排程 → 新增 listener」。
+截圖裡的 `11-live-*` 到 `26-live-*` 會在背景起一個真的服務（模型換成腳本，GitHub API 指到沒有服務的本機 port），走一次「還沒設定 provider → 設定視窗新增 OpenAI 相容 API、測試連線、儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開 Goal、Planner 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄 → 設定 GitHub token → Worker 設定（不合法的容器執行檔被拒絕、改好後儲存）→ 監看 repo、agent 建立排程 → 新增 listener → agent 提案 listener（Inbox 的核准、推播、對話裡的卡片）→ 拒絕並填理由 → 設定靜音時段 → 編輯 USER.md」。
 
 截圖寫到 `target/tmp/screenshots/`，需要 Metal（macOS）或 WGPU（Linux）。這只是產生圖檔方便檢查版面，不是 golden-image 比對。
 

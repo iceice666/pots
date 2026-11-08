@@ -336,7 +336,7 @@ mod tests {
 
         state.ack(&ServerEvent::Snapshot {
             seq: 2,
-            instance: InstanceSnapshot {
+            instance: Box::new(InstanceSnapshot {
                 id: InstanceId::from_u64(1),
                 name: String::new(),
                 kind: InstanceKind::Desktop,
@@ -350,13 +350,17 @@ mod tests {
                     goals: vec![],
                     artifacts: vec![],
                     repos: vec![],
+                    merge_method: Default::default(),
                 }],
                 model_auth: ModelAuthView::SignedOut,
                 providers: ProvidersView::default(),
                 automation: Default::default(),
                 github: Default::default(),
                 worker: Default::default(),
-            },
+                approvals: vec![],
+                notifications: Default::default(),
+                user_md: Default::default(),
+            }),
         });
         assert!(state.unacked.is_empty());
     }

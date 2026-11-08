@@ -7,7 +7,8 @@
 //!
 //! 「記憶」類別：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。
 //!
-//! 「GitHub」在 `automation_forms.rs`，「Worker」在 `worker_settings.rs`。
+//! 「GitHub」在 `automation_forms.rs`，「Worker」在 `worker_settings.rs`，「通知」與「USER.md」在
+//! `preferences.rs`。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
@@ -131,6 +132,8 @@ impl PotsApp {
                 SettingsTab::Memory => IconName::Brain,
                 SettingsTab::Github => IconName::GitPullRequest,
                 SettingsTab::Worker => IconName::Bot,
+                SettingsTab::Notifications => IconName::Bell,
+                SettingsTab::UserMd => IconName::User,
                 SettingsTab::About => IconName::Info,
             };
             nav = nav.child(
@@ -171,6 +174,8 @@ impl PotsApp {
             SettingsTab::Memory => self.render_memory_section(cx).into_any_element(),
             SettingsTab::Github => self.render_github_section(cx).into_any_element(),
             SettingsTab::Worker => self.render_worker_section(cx).into_any_element(),
+            SettingsTab::Notifications => self.render_notifications_section(cx).into_any_element(),
+            SettingsTab::UserMd => self.render_user_md_section(cx).into_any_element(),
             SettingsTab::About => self.render_about_section().into_any_element(),
         };
         let content = div()

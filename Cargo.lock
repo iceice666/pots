@@ -5802,6 +5802,7 @@ dependencies = [
  "gpui-kit-markdown-editor",
  "image",
  "libc",
+ "notify-rust",
  "pots-llm",
  "pots-proto",
  "pots-server",

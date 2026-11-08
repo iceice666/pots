@@ -238,6 +238,11 @@ mod shots {
                     "schedule",
                     r#"{"kind":"every","cron":"0 9 * * 1-5","prompt":"整理昨天失敗的 CI，有需要就開 Goal"}"#,
                 ),
+                (Some(t), 0) if t.contains("listener") => ScriptedTurn::new().tool_call(
+                    "l1",
+                    "create_listener",
+                    r#"{"kinds":["issue.labeled"],"fields":[{"field":"label","any_of":["agent"]}],"action":"create_goal","template":"處理這個 issue"}"#,
+                ),
                 (Some(t), 0) if t.contains("開 Goal") => ScriptedTurn::new().tool_call(
                     "g1",
                     "create_goal",
@@ -270,6 +275,14 @@ mod shots {
         };
 
         let mut s = Shooter::with(move |window, cx| PotsApp::new_live(Fixed(target), window, cx));
+        // 截圖不送真的系統通知，記下來檢查。
+        let notices = Arc::new(pots_desktop::notify::Recorder::default());
+        {
+            let notices = notices.clone();
+            s.update(move |app, _, _| {
+                app.notifier = Some(pots_desktop::notify::Notifier::new(notices));
+            });
+        }
         s.wait_until("快照與設定提示", |app| {
             app.current_instance().connection == ConnectionState::Connected
                 && app.store.pending(None) == 1
@@ -496,6 +509,98 @@ mod shots {
             app.open_panel(Some(Panel::Listener(id)), cx);
         });
         s.shot("21-live-automations");
+
+        // agent 提案 listener：Inbox 多一筆核准並推播（你不在那個 project）；對話裡是核准卡片。
+        s.update(|app, _, cx| {
+            let instance = app.instance;
+            let project = app.current_instance().projects[0].id;
+            app.open_inbox(Some(instance), cx);
+            app.store.send_to_project(
+                instance,
+                project,
+                "幫我提案一個 listener：issue 加上 agent label 就開 Goal".into(),
+                SendMode::Queue,
+            );
+            cx.notify();
+        });
+        s.wait_until("listener 提案等核准", |app| {
+            app.store.inbox.iter().any(|i| {
+                i.is_open()
+                    && matches!(
+                        i.approval.as_ref().map(|a| &a.action),
+                        Some(ApprovalActionView::CreateListener { .. })
+                    )
+            })
+        });
+        assert_eq!(notices.0.lock().unwrap().len(), 1, "新的核准推播一次");
+        s.shot("22-live-inbox-approval");
+        s.update(|app, window, cx| {
+            let instance = app.instance;
+            let project = app.current_instance().projects[0].id;
+            app.open_project(instance, project, window, cx);
+            app.channel_tab = pots_desktop::app::ChannelTab::Chat;
+        });
+        s.wait_until("回覆完成", |app| {
+            app.current_project()
+                .is_some_and(|p| p.agent_state == AgentState::Idle)
+        });
+        s.shot("23-live-approval-card");
+
+        // 拒絕：先填理由，服務撤掉提案的 listener。
+        s.update(|app, window, cx| {
+            let id = app
+                .store
+                .inbox
+                .iter()
+                .find(|i| i.is_open() && i.approval.is_some())
+                .map(|i| i.id)
+                .expect("待核准");
+            app.act(id, InboxAction::Reject, window, cx);
+            let d = app.reject_dialog.as_ref().expect("拒絕對話框");
+            d.input.update(cx, |state, cx| {
+                state.set_value("先不要自動開工", window, cx)
+            });
+        });
+        s.shot("24-live-reject-dialog");
+        s.update(|app, _, cx| app.confirm_reject(cx));
+        s.wait_until("提案被拒絕", |app| {
+            app.store.inbox.iter().any(|i| {
+                i.approval
+                    .as_ref()
+                    .is_some_and(|a| a.state == ApprovalState::Rejected)
+            }) && app.current_instance().listeners.len() == 1
+        });
+
+        // 設定的「通知」：開啟靜音時段。
+        s.update(|app, window, cx| {
+            app.open_settings(pots_desktop::app::SettingsTab::Notifications, cx);
+            app.edit_notifications(window, cx);
+            app.toggle_notification_flag(true, cx);
+            app.save_notifications(cx);
+        });
+        s.wait_until("通知設定已儲存", |app| {
+            app.current_instance().notifications.quiet && app.notification_editor.is_none()
+        });
+        s.shot("25-live-settings-notifications");
+
+        // 「USER.md」：直接編輯、儲存。
+        s.update(|app, window, cx| {
+            app.open_settings(pots_desktop::app::SettingsTab::UserMd, cx);
+            app.edit_user_md(window, cx);
+            let e = app.user_md_editor.as_ref().expect("USER.md 表單");
+            e.input.update(cx, |state, cx| {
+                state.set_value(
+                    "## 語言\n\n用繁體中文回答。\n\n## commit\n\n用 Conventional Commits。",
+                    window,
+                    cx,
+                )
+            });
+            app.save_user_md(cx);
+        });
+        s.wait_until("USER.md 已儲存", |app| {
+            app.current_instance().user_md.rev == 1 && app.user_md_editor.is_none()
+        });
+        s.shot("26-live-settings-user-md");
 
         handle.shutdown();
         runtime.block_on(handle.wait()).expect("shutdown");

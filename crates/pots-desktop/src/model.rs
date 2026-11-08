@@ -463,6 +463,34 @@ impl Store {
         }
     }
 
+    /// 核准或拒絕服務的一筆核准（可以附理由）。先標成已決定，服務回 `ApprovalChanged` 時整筆替換
+    ///（被拒絕時服務也會重送目前的狀態）。
+    pub fn decide(&mut self, id: ApprovalId, approve: bool, note: Option<String>) -> bool {
+        let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|i| i.id == id && i.approval.is_some() && i.is_open())
+        else {
+            return false;
+        };
+        item.decision = if approve {
+            Decision::Approved
+        } else {
+            Decision::Rejected
+        };
+        let instance = item.instance;
+        let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        self.outbox.push((
+            instance,
+            ClientCommand::Decide {
+                approval: id,
+                approve,
+                note,
+            },
+        ));
+        true
+    }
+
     /// 處理 Inbox 項目或對話內核准卡上的按鈕。回傳是否改變了狀態。
     pub fn act(&mut self, id: ApprovalId, action: InboxAction) -> bool {
         let Some(item) = self.inbox.iter_mut().find(|i| i.id == id) else {
@@ -470,6 +498,30 @@ impl Store {
         };
         if !item.is_open() {
             return false;
+        }
+        // 服務的核准：送 `Decide`，listener 等服務的 `Automation` 更新。
+        if item.approval.is_some() {
+            return match action {
+                InboxAction::Approve => self.decide(id, true, None),
+                InboxAction::Reject => self.decide(id, false, None),
+                _ => false,
+            };
+        }
+        // 需要你處理的任務：重試或取消，等服務的 `GoalChanged` 收掉這筆。
+        if let Some(task) = item.task {
+            let instance = item.instance;
+            let label = match action {
+                InboxAction::Retry => "已要求重試",
+                InboxAction::CancelTask => "已取消任務",
+                _ => return false,
+            };
+            item.decision = Decision::Resolved(label.into());
+            if action == InboxAction::Retry {
+                self.retry_task(instance, task);
+            } else {
+                self.cancel_task(instance, task);
+            }
+            return true;
         }
         // 模型登入：交給伺服器，這筆等它回報登入完成才收掉。
         if action == InboxAction::StartLogin

@@ -10,6 +10,7 @@ mod nav;
 mod overlay;
 mod overseer;
 mod panel;
+mod preferences;
 mod settings;
 mod stream;
 mod widgets;
