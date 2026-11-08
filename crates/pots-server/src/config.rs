@@ -39,6 +39,45 @@ pub struct Config {
     pub memory: OmConfig,
     /// 外部事件、等待與排程（`proposal/events-and-automation.md`）。
     pub watcher: WatcherConfig,
+    /// Coding worker（`proposal/agent-runtime.md#worker-adapter內建-worker-與外部-coding-cli`）。
+    pub worker: WorkerConfig,
+}
+
+/// worker 的部署設定；使用者可改的（後端、執行環境、image）存在資料庫，由設定視窗修改。
+#[derive(Clone, Debug)]
+pub struct WorkerConfig {
+    /// 資料庫還沒有 worker 設定時用的值。
+    pub defaults: pots_proto::WorkerSettingsDraft,
+    /// `claude` 執行檔（本機執行時的路徑；容器裡一律是 `claude`）。
+    pub claude_bin: String,
+    /// 測試用：git 的 base URL（例如 `file:///tmp/remotes`）；`None` 時依 GitHub API 推算。
+    pub git_base: Option<String>,
+    /// 一次 worker run 最多跑多久。
+    pub run_timeout: Duration,
+    /// 中斷後等 CLI 收尾的時間。
+    pub grace: Duration,
+    /// `false` 時不處理 worker 佇列（任務排著不跑），給只測規劃與等待的測試用。
+    pub run_queue: bool,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            defaults: pots_proto::WorkerSettingsDraft {
+                backend: pots_proto::WorkerBackendKind::Builtin,
+                exec: pots_proto::ExecKind::Container,
+                runtime: "docker".into(),
+                image: "pots-worker:latest".into(),
+                claude_model: String::new(),
+                max_parallel: 2,
+            },
+            claude_bin: "claude".into(),
+            git_base: None,
+            run_timeout: Duration::from_secs(60 * 60),
+            grace: Duration::from_secs(15),
+            run_queue: true,
+        }
+    }
 }
 
 /// 排程、逾時與 listener 上限用的時鐘。正式版是系統時間；測試用 [`ManualClock`] 撥時間。
@@ -162,6 +201,7 @@ impl Config {
             default_provider: None,
             memory: OmConfig::default(),
             watcher: WatcherConfig::default(),
+            worker: WorkerConfig::default(),
         }
     }
 

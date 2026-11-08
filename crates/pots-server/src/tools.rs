@@ -11,6 +11,9 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
+
 use pots_llm::ToolSpec;
 use pots_llm::agent::{Hook, Tool, ToolError};
 use pots_proto::{
@@ -33,6 +36,8 @@ use crate::runs::format_utc;
 use crate::store::{ItemStatus, Store};
 use crate::tasks::{self, Cause, GoalRow, Principal, TaskRow, TaskState};
 use crate::watcher::{self, WaitCond};
+use crate::worker::code::CodeAccess;
+use crate::worker::{self, WorkCtx, Worker, WorkerTrigger};
 
 /// 里程碑最多幾個字。
 const MAX_MILESTONE_CHARS: usize = 500;
@@ -54,6 +59,25 @@ pub enum Scope {
     Project,
     /// Planner：project 裡的一個 Goal。
     Goal(GoalId),
+    /// worker：Goal 裡的一個任務。
+    Task { goal: GoalId, task: TaskId },
+}
+
+impl Scope {
+    /// 這個範圍所屬的 Goal（對話 agent 是 `None`）。
+    pub fn goal(self) -> Option<GoalId> {
+        match self {
+            Self::Project => None,
+            Self::Goal(g) | Self::Task { goal: g, .. } => Some(g),
+        }
+    }
+
+    pub fn task(self) -> Option<TaskId> {
+        match self {
+            Self::Task { task, .. } => Some(task),
+            _ => None,
+        }
+    }
 }
 
 /// 一個 run 的工具共用的 context。
@@ -80,6 +104,15 @@ pub struct ToolCtx {
     pub goals_created: AtomicUsize,
     /// 排程、等待與 listener 用的時鐘。
     pub clock: Clock,
+    pub worker: Worker,
+    /// worker 的工作位置（`open_pr`、`edit_file`、`run` 用）。
+    pub work: Option<Arc<WorkCtx>>,
+    /// 看得到的程式碼；有的話自動加上程式碼的唯讀工具。
+    pub code: Option<Arc<dyn CodeAccess>>,
+    /// `finished` 變成 `true` 時通知（Claude Code adapter 據此中斷 CLI）。
+    pub stop: Arc<Notify>,
+    /// 這個 run 的取消（subagent 跟著停）。
+    pub cancel: CancellationToken,
 }
 
 impl ToolCtx {
@@ -88,6 +121,13 @@ impl ToolCtx {
         Gate {
             finished: self.finished.clone(),
         }
+    }
+
+    /// 這個 run 該結束了（結束類的工具成功）。
+    pub fn finish(&self) {
+        self.finished.store(true, Ordering::SeqCst);
+        self.stop.notify_waiters();
+        self.stop.notify_one();
     }
 }
 
@@ -106,17 +146,26 @@ struct PlatformTool {
 
 /// 依 profile 組出這個 run 的工具。
 pub fn build(profile: &AgentProfile, ctx: Arc<ToolCtx>) -> Vec<Arc<dyn Tool>> {
-    let mut kinds = vec![Kind::GetStatus, Kind::ListGoals, Kind::ReadArtifact];
-    kinds.extend(profile.tools.iter().map(|t| Kind::Granted(*t)));
-    kinds
-        .into_iter()
-        .map(|kind| {
-            Arc::new(PlatformTool {
-                kind,
+    let mut out: Vec<Arc<dyn Tool>> = Vec::new();
+    for kind in [Kind::GetStatus, Kind::ListGoals, Kind::ReadArtifact] {
+        out.push(Arc::new(PlatformTool {
+            kind,
+            ctx: ctx.clone(),
+        }));
+    }
+    if ctx.code.is_some() {
+        out.extend(worker::tools::code_tools(ctx.clone()));
+    }
+    for t in &profile.tools {
+        match worker::tools::granted(*t, ctx.clone()) {
+            Some(tool) => out.push(tool),
+            None => out.push(Arc::new(PlatformTool {
+                kind: Kind::Granted(*t),
                 ctx: ctx.clone(),
-            }) as Arc<dyn Tool>
-        })
-        .collect()
+            })),
+        }
+    }
+    out
 }
 
 /// 平台的 gate：每次工具呼叫前後把關（`proposal/agent-collaboration.md#一個-loop`）。
@@ -135,12 +184,12 @@ impl Hook for Gate {
     }
 }
 
-fn internal(e: Error) -> ToolError {
+pub(crate) fn internal(e: Error) -> ToolError {
     tracing::error!(error = %e, "工具執行失敗");
     ToolError("伺服器內部錯誤，請稍後再試".into())
 }
 
-fn parse<T: DeserializeOwned>(arguments: &str) -> Result<T, ToolError> {
+pub(crate) fn parse<T: DeserializeOwned>(arguments: &str) -> Result<T, ToolError> {
     let text = if arguments.trim().is_empty() {
         "{}"
     } else {
@@ -149,17 +198,17 @@ fn parse<T: DeserializeOwned>(arguments: &str) -> Result<T, ToolError> {
     serde_json::from_str(text).map_err(|e| ToolError(format!("參數錯誤：{e}")))
 }
 
-fn bad(msg: impl Into<String>) -> ToolError {
+pub(crate) fn bad(msg: impl Into<String>) -> ToolError {
     ToolError(msg.into())
 }
 
-fn parse_id<T: std::str::FromStr>(what: &str, s: &str) -> Result<T, ToolError> {
+pub(crate) fn parse_id<T: std::str::FromStr>(what: &str, s: &str) -> Result<T, ToolError> {
     s.trim()
         .parse()
         .map_err(|_| bad(format!("{what} 格式不對：{s}")))
 }
 
-fn object(properties: Value, required: &[&str]) -> Value {
+pub(crate) fn object(properties: Value, required: &[&str]) -> Value {
     json!({
         "type": "object",
         "properties": properties,
@@ -211,13 +260,24 @@ fn artifact_ref(a: &Option<ArtifactRow>) -> Value {
     }
 }
 
-fn task_json(t: &TaskRow) -> Value {
+pub(crate) fn task_json(t: &TaskRow) -> Value {
+    let detail = match &t.state {
+        TaskState::Done { outcome } => Some(outcome.clone()),
+        TaskState::Failed { error } => Some(error.clone()),
+        TaskState::NeedsHuman { reason } => Some(reason.clone()),
+        _ => None,
+    };
     json!({
         "id": t.id.to_string(),
         "title": t.title,
         "summary": t.summary,
         "state": t.state.name(),
+        "detail": detail,
         "parent_id": t.parent.map(|p| p.to_string()),
+        "repo": t.repo,
+        "branch": t.branch,
+        "pr": t.pr,
+        "progress": (!t.progress.is_empty()).then_some(&t.progress),
     })
 }
 
@@ -268,6 +328,9 @@ impl Tool for PlatformTool {
                     }
                     Scope::Goal(_) => {
                         "查詢你負責的 Goal 的即時狀態：Goal 狀態、任務樹、Brief／Ledger 的版本與現在時間（UTC）。"
+                    }
+                    Scope::Task { .. } => {
+                        "查詢你的任務與所屬 Goal 的即時狀態：任務狀態、分支、PR、Goal 的任務樹與現在時間（UTC）。"
                     }
                 },
                 object(json!({}), &[]),
@@ -347,12 +410,14 @@ impl Tool for PlatformTool {
             }
             Kind::Granted(ToolName::CreateTask) => (
                 "create_task",
-                "在你負責的 Goal 建立一個任務。summary 寫清楚要做什麼與完成條件。",
+                "在你負責的 Goal 建立一個任務，馬上派給一個 worker（在自己的分支上改 code、開 PR、等 CI）。\
+                summary 寫清楚要做什麼與完成條件。",
                 object(
                     json!({
                         "title": {"type": "string"},
                         "summary": {"type": "string"},
                         "parent_id": {"type": "string", "description": "上層任務（拆子任務時）"},
+                        "repo": {"type": "string", "description": "在哪個 repo 做（owner/repo）；project 只監看一個 repo 時可以不給"},
                     }),
                     &["title", "summary"],
                 ),
@@ -376,7 +441,7 @@ impl Tool for PlatformTool {
                 逾時也會喚醒。等待期間不消耗 token；呼叫成功後這一輪就結束。",
                 object(
                     json!({
-                        "task_id": {"type": "string"},
+                        "task_id": {"type": "string", "description": "要等待的任務；worker 不用給（就是自己的任務）"},
                         "on": {
                             "type": "object",
                             "description": "ci_finished：repo、sha（完整的 40 個字元）；change_reviewed／change_merged：change（owner/repo#42）；\
@@ -397,7 +462,10 @@ impl Tool for PlatformTool {
                         },
                         "timeout_minutes": {"type": "integer", "description": "最多等多久（1 到 10080）"},
                     }),
-                    &["task_id", "on", "timeout_minutes"],
+                    match self.ctx.scope {
+                        Scope::Task { .. } => &["on", "timeout_minutes"][..],
+                        _ => &["task_id", "on", "timeout_minutes"][..],
+                    },
                 ),
             ),
             Kind::Granted(ToolName::Schedule) => (
@@ -408,7 +476,7 @@ impl Tool for PlatformTool {
                         單次用 once（at 或 in_minutes），週期用 every（五個欄位的 cron，本機時區，最短間隔 10 分鐘，預設 30 天後過期）。\
                         使用者會在對話裡看到一張卡片，可以在自動化頁停用或改時間。"
                     }
-                    Scope::Goal(_) => {
+                    Scope::Goal(_) | Scope::Task { .. } => {
                         "替你負責的 Goal 設定時間醒來：時間到了 Planner 會被叫醒，prompt 是醒來時要做的事。\
                         單次用 once（at 或 in_minutes），週期用 every（五個欄位的 cron，本機時區，最短間隔 10 分鐘，預設 30 天後過期）。"
                     }
@@ -481,6 +549,7 @@ impl Tool for PlatformTool {
                     &["summary"],
                 ),
             ),
+            Kind::Granted(t) => unreachable!("{} 由 worker::tools 提供", t.as_str()),
         };
         ToolSpec {
             name: name.into(),
@@ -527,6 +596,7 @@ impl PlatformTool {
             }
             Kind::Granted(ToolName::PauseAutomations) => self.pause(parse(arguments)?).await,
             Kind::Granted(ToolName::ResumeAutomations) => self.resume(parse(arguments)?).await,
+            Kind::Granted(t) => Err(bad(format!("{} 由 worker::tools 提供", t.as_str()))),
         }
     }
 }
@@ -592,6 +662,8 @@ struct CreateTaskArgs {
     summary: String,
     #[serde(default)]
     parent_id: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -615,10 +687,10 @@ struct CompleteGoalArgs {
 
 impl PlatformTool {
     fn goal_scope(&self) -> Result<GoalId, ToolError> {
-        match self.ctx.scope {
-            Scope::Goal(g) => Ok(g),
-            Scope::Project => Err(bad("這個工具只能在 Goal 的範圍內使用")),
-        }
+        self.ctx
+            .scope
+            .goal()
+            .ok_or_else(|| bad("這個工具只能在 Goal 的範圍內使用"))
     }
 
     /// 這個 project 的 Goal；Planner 只能指定自己的 Goal。
@@ -627,7 +699,7 @@ impl PlatformTool {
         conn: &mut sqlx::SqliteConnection,
         id: GoalId,
     ) -> Result<GoalRow, ToolError> {
-        if let Scope::Goal(own) = self.ctx.scope
+        if let Some(own) = self.ctx.scope.goal()
             && own != id
         {
             return Err(bad("你只能操作自己負責的 Goal"));
@@ -655,9 +727,14 @@ impl PlatformTool {
         let mut tx = ctx.store.read().await.map_err(internal)?;
         let now = format_utc(Timestamp::now());
         match ctx.scope {
-            Scope::Goal(goal) => {
+            Scope::Goal(goal) | Scope::Task { goal, .. } => {
                 let g = self.own_goal(&mut tx, goal).await?;
                 let tasks = tasks::tasks(&mut tx, goal).await.map_err(internal)?;
+                let mine = ctx
+                    .scope
+                    .task()
+                    .and_then(|id| tasks.iter().find(|t| t.id == id))
+                    .map(task_json);
                 let brief = artifacts::for_goal(&mut tx, goal, ArtifactKind::Brief)
                     .await
                     .map_err(internal)?;
@@ -666,6 +743,7 @@ impl PlatformTool {
                     .map_err(internal)?;
                 Ok(json!({
                     "now": now,
+                    "your_task": mine,
                     "goal": {
                         "id": g.id.to_string(),
                         "title": g.title,
@@ -748,8 +826,8 @@ impl PlatformTool {
             if !args.include_closed && !g.state.is_active() {
                 continue;
             }
-            // Planner 只看得到自己的 Goal。
-            if let Scope::Goal(own) = self.ctx.scope
+            // Planner 與 worker 只看得到自己的 Goal。
+            if let Some(own) = self.ctx.scope.goal()
                 && own != g.id
             {
                 continue;
@@ -783,7 +861,7 @@ impl PlatformTool {
             _ => return Err(bad(format!("這個 project 沒有 artifact {id}"))),
         };
         // Planner 讀得到自己 Goal 的與掛在 project 上的 artifact，讀不到別的 Goal 的。
-        if let Scope::Goal(own) = self.ctx.scope
+        if let Some(own) = self.ctx.scope.goal()
             && a.goal.is_some_and(|g| g != own)
         {
             return Err(bad("你只能讀自己負責的 Goal 與 project 層級的 artifact"));
@@ -834,6 +912,7 @@ impl PlatformTool {
                 &ctx.actor,
                 &ctx.actor.label(),
                 Some(&ctx.reader),
+                false,
             )
             .await?;
             if opened.is_ok() {
@@ -860,6 +939,11 @@ impl PlatformTool {
             tasks::check_text("reason ", &args.reason, MAX_REASON_CHARS, true).map_err(bad)?;
         let mut txn = ctx.hub.begin().await.map_err(internal)?;
         let g = self.active_goal(txn.conn(), goal).await?;
+        if tasks::goal_kind(txn.conn(), g.id).await.map_err(internal)? == "quick" {
+            return Err(bad(
+                "這是快速修改，沒有 Planner 可以改方向：要改就用 cancel_goal 取消它，再開一個新的",
+            ));
+        }
         let mut rev = None;
         if !args.edits.is_empty() {
             let base_rev = args
@@ -932,9 +1016,12 @@ impl PlatformTool {
         )
         .await
         .map_err(internal)?;
-        txn.commit_then(|| ctx.planner.close_goal(g.id))
-            .await
-            .map_err(internal)?;
+        txn.commit_then(|| {
+            ctx.planner.close_goal(g.id);
+            ctx.worker.close_goal(g.id);
+        })
+        .await
+        .map_err(internal)?;
         Ok(json!({"cancelled": g.id.to_string(), "tasks_cancelled": cancelled}).to_string())
     }
 
@@ -952,7 +1039,7 @@ impl PlatformTool {
                 if !ctx.artifact_kinds.contains(&a.kind) {
                     return Err(bad(format!("你不能修改 {}", kind_name(a.kind))));
                 }
-                if let Scope::Goal(own) = ctx.scope
+                if let Some(own) = ctx.scope.goal()
                     && a.goal != Some(own)
                 {
                     return Err(bad("你只能修改自己負責的 Goal 的 artifact"));
@@ -986,7 +1073,7 @@ impl PlatformTool {
                     return Err(bad(format!("你不能建立 {}", kind_name(kind))));
                 }
                 let goal = match (ctx.scope, &args.goal_id) {
-                    (Scope::Goal(own), _) => Some(own),
+                    (Scope::Goal(own) | Scope::Task { goal: own, .. }, _) => Some(own),
                     (Scope::Project, Some(g)) => {
                         let g: GoalId = parse_id("goal_id", g)?;
                         Some(self.own_goal(txn.conn(), g).await?.id)
@@ -1087,27 +1174,55 @@ impl PlatformTool {
             }
             None => None,
         };
-        let task = TaskRow {
-            id: TaskId::new(),
-            goal: g.id,
-            parent,
-            title,
-            summary,
-            assignee: String::new(),
-            state: TaskState::Planned,
+        // project 還沒有設定 repo：任務只記在任務樹上，不派給 worker。
+        let none = crate::automation::project_repos(txn.conn(), ctx.project)
+            .await
+            .map_err(internal)?
+            .is_empty()
+            && args.repo.as_deref().is_none_or(|r| r.trim().is_empty());
+        let repo = if none {
+            None
+        } else {
+            Some(
+                worker::pick_repo(txn.conn(), ctx.project, args.repo.as_deref())
+                    .await
+                    .map_err(internal)?
+                    .map_err(bad)?,
+            )
         };
+        let mut task = TaskRow::new(g.id, title, summary);
+        task.parent = parent;
+        task.repo = repo.clone();
+        if repo.is_some() {
+            task.assignee = "worker".into();
+        }
         let cause = Cause {
             by: ctx.actor.clone(),
             reason: String::new(),
         };
         let result: Result<(), Error> = async {
             tasks::insert_task(txn.conn(), &task, &cause).await?;
+            if repo.is_some() {
+                worker::enqueue(
+                    txn.conn(),
+                    ctx.project,
+                    g.id,
+                    task.id,
+                    &WorkerTrigger::Assigned,
+                )
+                .await?;
+            }
             tasks::push_goal(&mut txn, g.id).await?;
-            txn.commit().await
+            txn.commit_then(|| ctx.worker.kick()).await
         }
         .await;
         result.map_err(internal)?;
-        Ok(json!({"task_id": task.id.to_string()}).to_string())
+        let note = if repo.is_some() {
+            "已派給 worker"
+        } else {
+            "這個 project 還沒有設定 repo，任務只記在任務樹上、不會派給 worker（請使用者在頻道的「自動化」分頁加上 repo）"
+        };
+        Ok(json!({"task_id": task.id.to_string(), "repo": repo, "note": note}).to_string())
     }
 
     async fn cancel_task(&self, args: CancelTaskArgs) -> Result<String, ToolError> {
@@ -1134,7 +1249,7 @@ impl PlatformTool {
             };
             tasks::set_task_state(txn.conn(), &task, &to, &cause).await?;
             tasks::push_goal(&mut txn, goal).await?;
-            txn.commit().await
+            txn.commit_then(|| ctx.worker.interrupt(id)).await
         }
         .await;
         result.map_err(internal)?;
@@ -1201,8 +1316,9 @@ impl PlatformTool {
         }
         .await;
         result.map_err(internal)?;
+        ctx.worker.close_goal(goal);
         // Goal 結束了，這個 run 不該再做事：Gate 在下一輪開始前停下。
-        ctx.finished.store(true, Ordering::SeqCst);
+        ctx.finish();
         Ok("Goal 已標成完成，這一輪到此結束".into())
     }
 }
@@ -1227,7 +1343,7 @@ pub async fn close_goal(
     )
     .await?;
     planner::drop_queued(txn.conn(), g.id).await?;
-    // 被喚醒、還在等 worker 的 run 也不用跑了（M4 之前沒有 worker）。
+    // 排隊中的 worker run 也不用跑了（正在跑的由呼叫端在 commit 之後中斷：`Worker::close_goal`）。
     sqlx::query(
         "UPDATE agent_runs SET state = 'cancelled', finished_at = ? \
          WHERE agent = 'worker' AND goal_id = ? AND state = 'queued'",
@@ -1256,13 +1372,15 @@ pub async fn open_goal(
     reader: Option<&str>,
 ) -> Result<Result<GoalId, String>, Error> {
     Ok(
-        open_goal_with_brief(txn, project, title, brief_md, by, by_label, reader)
+        open_goal_with_brief(txn, project, title, brief_md, by, by_label, reader, false)
             .await?
             .map(|(g, _)| g),
     )
 }
 
-async fn open_goal_with_brief(
+/// 開 Goal 與 Brief。`quick` 時是快速修改：種類是 `quick`，不排 Planner（呼叫端自己建任務）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn open_goal_with_brief(
     txn: &mut LogTxn<'_>,
     project: ProjectId,
     title: &str,
@@ -1270,6 +1388,7 @@ async fn open_goal_with_brief(
     by: &Principal,
     by_label: &str,
     reader: Option<&str>,
+    quick: bool,
 ) -> Result<Result<(GoalId, ArtifactId), String>, Error> {
     let title = match tasks::check_line("title ", title, tasks::MAX_TITLE_CHARS) {
         Ok(t) => t,
@@ -1320,15 +1439,19 @@ async fn open_goal_with_brief(
     if let Some(reader) = reader {
         artifacts::mark_read(txn.conn(), brief.id, reader, brief.rev).await?;
     }
-    planner::enqueue(
-        txn.conn(),
-        project,
-        goal.id,
-        &PlannerTrigger::GoalCreated {
-            by: by_label.to_string(),
-        },
-    )
-    .await?;
+    if quick {
+        tasks::set_goal_kind(txn.conn(), goal.id, "quick").await?;
+    } else {
+        planner::enqueue(
+            txn.conn(),
+            project,
+            goal.id,
+            &PlannerTrigger::GoalCreated {
+                by: by_label.to_string(),
+            },
+        )
+        .await?;
+    }
     artifacts::push_changed(txn, &brief).await?;
     Ok(Ok((goal.id, brief.id)))
 }
@@ -1404,7 +1527,9 @@ impl WaitOnArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WaitForArgs {
-    task_id: String,
+    /// worker 可以不給（就是自己的任務）。
+    #[serde(default)]
+    task_id: Option<String>,
     on: WaitOnArgs,
     timeout_minutes: i64,
 }
@@ -1467,7 +1592,18 @@ fn notice(title: &str, body: String) -> Card {
 impl PlatformTool {
     async fn wait_for(&self, args: WaitForArgs) -> Result<String, ToolError> {
         let ctx = &self.ctx;
-        let id: TaskId = parse_id("task_id", &args.task_id)?;
+        // worker 的任務已經結束或在等待了；Planner 可以在同一輪讓好幾個任務等待。
+        if ctx.scope.task().is_some() && ctx.finished.load(Ordering::SeqCst) {
+            return Err(bad("這一輪已經結束，沒有執行"));
+        }
+        let id: TaskId = match (
+            args.task_id.as_deref().filter(|s| !s.trim().is_empty()),
+            ctx.scope.task(),
+        ) {
+            (Some(s), _) => parse_id("task_id", s)?,
+            (None, Some(own)) => own,
+            (None, None) => return Err(bad("要給 task_id")),
+        };
         if !(1..=10_080).contains(&args.timeout_minutes) {
             return Err(bad("timeout_minutes 要在 1 到 10080 之間"));
         }
@@ -1480,7 +1616,15 @@ impl PlatformTool {
             None => return Err(bad(format!("沒有任務 {id}"))),
         };
         self.own_goal(txn.conn(), task.goal).await?;
-        if task.state != TaskState::Planned {
+        // worker 只能讓自己的任務等待（正在跑）；Planner 只能讓還沒開始的任務等待。
+        let allowed = match ctx.scope.task() {
+            Some(own) if own != task.id => {
+                return Err(bad("你只能讓自己的任務等待"));
+            }
+            Some(_) => task.state == TaskState::Running,
+            None => task.state == TaskState::Planned,
+        };
+        if !allowed {
             return Err(bad(format!(
                 "任務「{}」現在是 {}，不能等待",
                 task.title,
@@ -1495,6 +1639,15 @@ impl PlatformTool {
                 }
             }
         }
+        // 只能等這個 project 監看的 repo（token 看得到的其他 repo 不行）。
+        if let Some(repo) = on.repo() {
+            let repos = automation::project_repos(txn.conn(), ctx.project)
+                .await
+                .map_err(internal)?;
+            if !repos.contains(&repo) {
+                return Err(bad(format!("這個 project 沒有監看 {repo}，不能等它的事件")));
+            }
+        }
         let desc = on.describe();
         let result: Result<(), Error> = async {
             watcher::suspend_task(&mut txn, &task, ctx.project, on, deadline, &ctx.actor, now)
@@ -1504,7 +1657,7 @@ impl PlatformTool {
         .await;
         result.map_err(internal)?;
         // 等待後這一輪就結束（等同 AllowThenStop，但參數錯誤時模型還能重試）。
-        ctx.finished.store(true, Ordering::SeqCst);
+        ctx.finish();
         Ok(format!(
             "suspended：{desc}，最多等到 {}",
             format_utc(deadline)
@@ -1545,6 +1698,7 @@ impl PlatformTool {
                 project: ctx.project,
                 goal,
             },
+            Scope::Task { .. } => return Err(bad("worker 不能設排程；要等時間用 wait_for")),
         };
         let mut txn = ctx.hub.begin().await.map_err(internal)?;
         if let Scope::Goal(goal) = ctx.scope {
@@ -1580,7 +1734,7 @@ impl PlatformTool {
                     // 對話 agent 的卡片附在這則回覆下面（commit 成功後才加）。
                     ctx.cards.lock().unwrap().push(card);
                 }
-                Scope::Goal(_) => {
+                Scope::Goal(_) | Scope::Task { .. } => {
                     post_card(&mut txn, ctx.project, card, Some(ctx.run_id)).await?;
                     automation::push(&mut txn, now).await?;
                     txn.commit().await?;

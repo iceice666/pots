@@ -9,7 +9,7 @@
 //! - **sweeper**（每 `sweep_interval`）：`deadline` 到了的等待以「逾時」喚醒、`At` 與 `Subtasks`
 //!   的等待、到期的排程、到期的暫停。
 //! - **喚醒**：任務回到 `Planned`，並排一個 `worker` 的 `agent_runs`（觸發寫明在等什麼、結果是
-//!   什麼）。M4 之前沒有 worker，那筆 run 會留在佇列。
+//!   什麼），commit 後叫醒 worker。
 //!
 //! 排程與 listener 的時間都用 [`Clock`]，測試可以撥時間。
 
@@ -627,7 +627,7 @@ impl Watcher {
                     && (on.is_state() || ev.occurred_at.0 >= since.0 - WAIT_SLACK_SECS)
                 {
                     let on = on.clone();
-                    wake_task(&mut txn, &t, &on, &ev.summary, now).await?;
+                    wake_task(&mut txn, &t, &on, &ev.summary).await?;
                     matched.tasks.push(t.id.to_string());
                     routed.insert(project);
                 }
@@ -703,6 +703,8 @@ impl Watcher {
             if after.kick_planner {
                 planner.kick();
             }
+            // 可能有任務被喚醒或快速修改排了 worker。
+            planner.worker().kick();
         })
         .await?;
         for (project, item, text) in after.chat {
@@ -771,6 +773,73 @@ impl Watcher {
             ListenerActionSpec::CreateGoal { template }
             | ListenerActionSpec::QuickFix { template } => {
                 let quick = matches!(l.spec.action, ListenerActionSpec::QuickFix { .. });
+                if quick && let Some(repo) = ev.repo() {
+                    let description = format!(
+                        "{}\n\n## 觸發事件\n\n{}",
+                        template.trim(),
+                        ev.render_for_agent(ev.trust != TrustLevel::Public || whitelisted)
+                    );
+                    let goal_title = tasks::one_line(&ev.summary, tasks::MAX_TITLE_CHARS);
+                    let opened = crate::worker::open_quick(
+                        txn,
+                        project,
+                        &goal_title,
+                        &description,
+                        repo,
+                        &Principal::System,
+                        None,
+                    )
+                    .await?;
+                    match opened {
+                        // 快速修改沒有 Planner，不訂閱資源（之後的事件不會送給它）。
+                        Ok((goal, _)) => {
+                            crate::tools::post_card(
+                                txn,
+                                project,
+                                Card::Triggered {
+                                    listener: l.id,
+                                    goal,
+                                    event: ev.summary.clone(),
+                                },
+                                None,
+                            )
+                            .await?;
+                            automation::record_trigger(
+                                txn.conn(),
+                                &TriggerRow {
+                                    listener: Some(l.id),
+                                    project: Some(project),
+                                    goal: Some(goal),
+                                    event: Some(event_id),
+                                    title: format!("{title} → 快速修改"),
+                                    status: "done",
+                                    ..Default::default()
+                                },
+                                now,
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            automation::record_trigger(
+                                txn.conn(),
+                                &TriggerRow {
+                                    listener: Some(l.id),
+                                    project: Some(project),
+                                    event: Some(event_id),
+                                    title,
+                                    status: "failed",
+                                    error: Some(e),
+                                    ..Default::default()
+                                },
+                                now,
+                            )
+                            .await?;
+                        }
+                    }
+                    return Ok(());
+                }
+                // 事件沒有 repo 時快速修正沒辦法派 worker：改開一般 Goal（觸發紀錄註明）。
+                let fallback = quick;
                 let brief = format!(
                     "## 目標\n\n{}\n\n## 觸發事件\n\n{}",
                     template.trim(),
@@ -789,9 +858,6 @@ impl Watcher {
                 .await?;
                 match opened {
                     Ok(goal) => {
-                        if quick {
-                            tasks::set_goal_kind(txn.conn(), goal, "quick").await?;
-                        }
                         tasks::push_goal(txn, goal).await?;
                         subscribe_goal(txn.conn(), project, goal, &ev.resource, now).await?;
                         crate::tools::post_card(
@@ -812,7 +878,11 @@ impl Watcher {
                                 project: Some(project),
                                 goal: Some(goal),
                                 event: Some(event_id),
-                                title: format!("{title} → 開 Goal"),
+                                title: if fallback {
+                                    format!("{title} → 開 Goal（事件沒有 repo，不能快速修正）")
+                                } else {
+                                    format!("{title} → 開 Goal")
+                                },
                                 status: "done",
                                 ..Default::default()
                             },
@@ -918,7 +988,7 @@ impl Watcher {
             };
             let result = result.or_else(|| (deadline.0 <= now.0).then(|| "逾時".to_string()));
             if let Some(result) = result {
-                wake_task(&mut txn, &t, &on, &result, now).await?;
+                wake_task(&mut txn, &t, &on, &result).await?;
             }
         }
 
@@ -1002,13 +1072,12 @@ impl Watcher {
     }
 }
 
-/// 喚醒等待中的任務：回到 `Planned`、清掉訂閱，排一個 worker 的 run（M4 之前留在佇列）。
+/// 喚醒等待中的任務：回到 `Planned`、清掉訂閱，排一個 worker 的 run（呼叫端 commit 後叫醒 worker）。
 pub async fn wake_task(
     txn: &mut LogTxn<'_>,
     task: &TaskRow,
     waited: &WaitCond,
     result: &str,
-    now: Timestamp,
 ) -> Result<(), Error> {
     let Some(goal) = tasks::goal(txn.conn(), task.goal).await? else {
         return Ok(());
@@ -1028,33 +1097,17 @@ pub async fn wake_task(
         .bind(task.id.to_string())
         .execute(txn.conn())
         .await?;
-    let trigger = serde_json::json!({
-        "kind": "wake",
-        "waited": waited,
-        "result": result,
-    });
-    // 同一個任務已經有排隊中的 run 時換成最新的觸發，不另排一個。
-    let updated = sqlx::query(
-        "UPDATE agent_runs SET trigger = ? WHERE agent = 'worker' AND task_id = ? AND state = 'queued'",
+    crate::worker::enqueue(
+        txn.conn(),
+        goal.project,
+        goal.id,
+        task.id,
+        &crate::worker::WorkerTrigger::Wake {
+            waited: waited.clone(),
+            result: result.to_string(),
+        },
     )
-    .bind(trigger.to_string())
-    .bind(task.id.to_string())
-    .execute(txn.conn())
     .await?;
-    if updated.rows_affected() == 0 {
-        sqlx::query(
-            "INSERT INTO agent_runs (id, project_id, agent, trigger, state, started_at, goal_id, task_id) \
-             VALUES (?, ?, 'worker', ?, 'queued', ?, ?, ?)",
-        )
-        .bind(Uuid::now_v7().to_string())
-        .bind(goal.project.to_string())
-        .bind(trigger.to_string())
-        .bind(now.0)
-        .bind(goal.id.to_string())
-        .bind(task.id.to_string())
-        .execute(txn.conn())
-        .await?;
-    }
     tasks::push_goal(txn, goal.id).await
 }
 

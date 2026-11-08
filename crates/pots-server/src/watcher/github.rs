@@ -91,6 +91,16 @@ pub struct RepoCursor {
 
 pub type Cursor = BTreeMap<String, RepoCursor>;
 
+/// PR 回應裡的編號與網址。
+fn pull_ref(v: &Value) -> Result<(u64, String), GhError> {
+    let number = v.get("number").and_then(Value::as_u64);
+    let url = v.get("html_url").and_then(Value::as_str);
+    match (number, url) {
+        (Some(n), Some(u)) => Ok((n, u.to_string())),
+        _ => Err(GhError::Http("PR 回應格式不對".into())),
+    }
+}
+
 pub struct Github {
     data_dir: PathBuf,
     default_api: String,
@@ -235,7 +245,7 @@ impl Github {
                 .ok_or_else(|| GhError::NoToken.to_string())?,
         };
         let resp = self
-            .request(&base, &token, "/user", None)
+            .request(&base, &token, reqwest::Method::GET, "/user", None, None)
             .await
             .map_err(|e| e.to_string())?;
         resp.json
@@ -258,26 +268,93 @@ impl Github {
             .token
             .clone()
             .ok_or(GhError::NoToken)?;
-        self.request(&self.api_base(config), &token, path, etag)
-            .await
+        self.request(
+            &self.api_base(config),
+            &token,
+            reqwest::Method::GET,
+            path,
+            etag,
+            None,
+        )
+        .await
+    }
+
+    /// 平台自己用的 token（push 任務分支）；不會交給 worker 或容器。
+    pub fn token(&self) -> Option<String> {
+        self.secrets.lock().unwrap().token.clone()
+    }
+
+    /// 目前設定的 API base URL。
+    pub fn api(&self, config: &GithubConfig) -> String {
+        self.api_base(config)
+    }
+
+    /// 開 PR；同一個分支已經有開著的 PR 時回傳那一個。回傳 (編號, 網址, 是不是新開的)。
+    pub async fn open_pull(
+        &self,
+        config: &GithubConfig,
+        repo: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<(u64, String, bool), GhError> {
+        let token = self.token().ok_or(GhError::NoToken)?;
+        let api = self.api_base(config);
+        let path = repo_path(repo);
+        let owner = path.split('/').next().unwrap_or_default();
+        let list = self
+            .request(
+                &api,
+                &token,
+                reqwest::Method::GET,
+                &format!("/repos/{path}/pulls?state=open&head={owner}:{head}"),
+                None,
+                None,
+            )
+            .await?;
+        if let Some(pr) = list.json.as_array().and_then(|a| a.first()) {
+            return pull_ref(pr).map(|(n, u)| (n, u, false));
+        }
+        let created = self
+            .request(
+                &api,
+                &token,
+                reqwest::Method::POST,
+                &format!("/repos/{path}/pulls"),
+                None,
+                Some(&serde_json::json!({
+                    "title": title,
+                    "head": head,
+                    "base": base,
+                    "body": body,
+                })),
+            )
+            .await?;
+        pull_ref(&created.json).map(|(n, u)| (n, u, true))
     }
 
     async fn request(
         &self,
         base: &str,
         token: &str,
+        method: reqwest::Method,
         path: &str,
         etag: Option<&str>,
+        body: Option<&Value>,
     ) -> Result<Resp, GhError> {
         let url = format!("{}{path}", base.trim_end_matches('/'));
         let mut req = self
             .http
-            .get(&url)
+            .request(method, &url)
             .bearer_auth(token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
         if let Some(etag) = etag {
             req = req.header("If-None-Match", etag);
+        }
+        if let Some(body) = body {
+            req = req.json(body);
         }
         let resp = req
             .send()

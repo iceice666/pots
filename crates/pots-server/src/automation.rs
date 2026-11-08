@@ -1119,7 +1119,7 @@ async fn listener_view(
             Some(template.clone()),
         ),
         ListenerActionSpec::QuickFix { template } => (
-            "快速修正（M4 之前先開一個 quick Goal）".to_string(),
+            "快速修正（直接派 worker）".to_string(),
             Some(template.clone()),
         ),
         ListenerActionSpec::NotifyChat => ("在 project 對話裡告訴對話 agent".to_string(), None),

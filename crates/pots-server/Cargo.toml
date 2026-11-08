@@ -9,6 +9,14 @@ publish.workspace = true
 name = "pots-server"
 path = "src/main.rs"
 
+# 測試用的假 Claude Code CLI：重播 stream-json 劇本並透過 MCP 呼叫平台工具
+# （tests/worker.rs 以 `CARGO_BIN_EXE_pots-fake-claude` 啟動）。不是給使用者的程式。
+[[bin]]
+name = "pots-fake-claude"
+path = "src/bin/pots-fake-claude.rs"
+test = false
+doc = false
+
 [dependencies]
 pots-proto = { path = "../pots-proto" }
 pots-llm = { path = "../pots-llm" }
@@ -26,6 +34,11 @@ getrandom = "0.3"
 # GitHub webhook 驗簽（X-Hub-Signature-256）。
 hex = "0.4"
 hmac = "0.12"
+# 中斷 worker 的整個行程群組（本機執行環境）。
+libc = "0.2"
+# 給 Claude Code worker 的平台工具（proposal/agent-runtime.md#worker-adapter內建-worker-與外部-coding-cli）。
+# client 端只有假的 Claude CLI 與測試用。
+rmcp = { version = "3.9", default-features = false, features = ["server", "transport-streamable-http-server", "client", "transport-streamable-http-client-reqwest"] }
 # GitHub REST（輪詢與補漏）；與 pots-llm 用同一個 HTTP client。
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json"] }
 serde.workspace = true
@@ -37,7 +50,7 @@ sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
 subtle = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "process", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 # agent profile 設定檔（profiles/*.toml）。
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }

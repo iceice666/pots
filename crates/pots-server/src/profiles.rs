@@ -1,9 +1,12 @@
 //! Agent profile（`proposal/agent-collaboration.md#profile-一覽`）。
 //!
 //! profile 是設定檔：內建的 `profiles/*.toml` 編進執行檔；資料目錄裡有同名的
-//! `profiles/<name>.toml` 時用它取代（整份，不合併）。目前執行期只認得 `chat` 與 `planner`
-//! 兩種 agent，所以只讀這兩個檔；工具清單與可寫的 artifact 種類依 agent 檢查，
-//! 不合法時服務不啟動。
+//! `profiles/<name>.toml` 時用它取代（整份，不合併）。執行期認得 `chat`、`planner`、`worker` 與
+//! 唯讀的 subagent（`explorer`、`reviewer`），只讀這幾個檔；工具清單與可寫的 artifact 種類依 agent
+//! 檢查，不合法時服務不啟動。
+//!
+//! 程式碼的唯讀工具（`list_files`、`read_file`、`grep`、`git_log`，worker 另有 `git_diff`）不列在
+//! profile 裡：run 看得到程式碼（worker 的工作目錄、subagent 指定的 repo）時自動都有。
 
 use std::path::Path;
 
@@ -14,6 +17,9 @@ use crate::Error;
 
 const BUILTIN_CHAT: &str = include_str!("../profiles/chat.toml");
 const BUILTIN_PLANNER: &str = include_str!("../profiles/planner.toml");
+const BUILTIN_WORKER: &str = include_str!("../profiles/worker.toml");
+const BUILTIN_EXPLORER: &str = include_str!("../profiles/explorer.toml");
+const BUILTIN_REVIEWER: &str = include_str!("../profiles/reviewer.toml");
 
 /// 唯讀基礎集以外、要在 profile 裡授權的工具。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -27,13 +33,27 @@ pub enum ToolName {
     CancelTask,
     PostMilestone,
     CompleteGoal,
-    /// 掛起任務等外部事件；M4 交給 worker，內建的 profile 還沒有。
+    /// 掛起任務等外部事件（worker 用；Planner 覆寫 profile 時可以讓自己 Goal 還沒開始的任務等待）。
     WaitFor,
     Schedule,
     CreateListener,
     /// 總管（M6）的工具；內建的 profile 還沒有。
     PauseAutomations,
     ResumeAutomations,
+    /// 快速通道：直接派一個 worker，不經 Planner。
+    QuickFix,
+    /// 開唯讀的 subagent（explorer、reviewer）。
+    RunSubagent,
+    PostToTeam,
+    ReadTeam,
+    // worker 的工具
+    EditFile,
+    Run,
+    OpenPr,
+    ReportProgress,
+    CompleteTask,
+    FailTask,
+    Escalate,
 }
 
 impl ToolName {
@@ -52,6 +72,17 @@ impl ToolName {
             Self::CreateListener => "create_listener",
             Self::PauseAutomations => "pause_automations",
             Self::ResumeAutomations => "resume_automations",
+            Self::QuickFix => "quick_fix",
+            Self::RunSubagent => "run_subagent",
+            Self::PostToTeam => "post_to_team",
+            Self::ReadTeam => "read_team",
+            Self::EditFile => "edit_file",
+            Self::Run => "run",
+            Self::OpenPr => "open_pr",
+            Self::ReportProgress => "report_progress",
+            Self::CompleteTask => "complete_task",
+            Self::FailTask => "fail_task",
+            Self::Escalate => "escalate",
         }
     }
 }
@@ -92,6 +123,9 @@ impl AgentProfile {
 pub struct Profiles {
     pub chat: AgentProfile,
     pub planner: AgentProfile,
+    pub worker: AgentProfile,
+    pub explorer: AgentProfile,
+    pub reviewer: AgentProfile,
 }
 
 struct Rules {
@@ -114,6 +148,8 @@ const CHAT_RULES: Rules = Rules {
         // 總管的工具；內建的 chat 沒有，覆寫時只能暫停自己的 project。
         ToolName::PauseAutomations,
         ToolName::ResumeAutomations,
+        ToolName::QuickFix,
+        ToolName::RunSubagent,
     ],
     kinds: &[ArtifactKind::Spec, ArtifactKind::Report],
 };
@@ -128,10 +164,48 @@ const PLANNER_RULES: Rules = Rules {
         ToolName::CompleteGoal,
         ToolName::WriteArtifact,
         ToolName::Schedule,
-        // worker 的工具（M4）；內建的 planner 沒有，覆寫時可以讓自己 Goal 的任務等待。
+        // worker 的工具；內建的 planner 沒有，覆寫時可以讓自己 Goal 的任務等待。
         ToolName::WaitFor,
+        ToolName::PostToTeam,
+        ToolName::ReadTeam,
+        ToolName::RunSubagent,
     ],
     kinds: &[ArtifactKind::Ledger, ArtifactKind::Report],
+};
+
+const WORKER_RULES: Rules = Rules {
+    name: "worker",
+    memory: MemoryMode::Stateless,
+    tools: &[
+        ToolName::EditFile,
+        ToolName::Run,
+        ToolName::OpenPr,
+        ToolName::WaitFor,
+        ToolName::PostToTeam,
+        ToolName::ReadTeam,
+        ToolName::ReportProgress,
+        ToolName::CompleteTask,
+        ToolName::FailTask,
+        ToolName::Escalate,
+        ToolName::WriteArtifact,
+        ToolName::RunSubagent,
+    ],
+    kinds: &[ArtifactKind::Report],
+};
+
+/// subagent 只有唯讀工具（不能再開 subagent）。
+const EXPLORER_RULES: Rules = Rules {
+    name: "explorer",
+    memory: MemoryMode::Stateless,
+    tools: &[],
+    kinds: &[],
+};
+
+const REVIEWER_RULES: Rules = Rules {
+    name: "reviewer",
+    memory: MemoryMode::Stateless,
+    tools: &[],
+    kinds: &[],
 };
 
 impl Profiles {
@@ -142,6 +216,12 @@ impl Profiles {
             chat: parse(BUILTIN_CHAT, &CHAT_RULES, "內建 chat.toml").expect("內建 chat.toml"),
             planner: parse(BUILTIN_PLANNER, &PLANNER_RULES, "內建 planner.toml")
                 .expect("內建 planner.toml"),
+            worker: parse(BUILTIN_WORKER, &WORKER_RULES, "內建 worker.toml")
+                .expect("內建 worker.toml"),
+            explorer: parse(BUILTIN_EXPLORER, &EXPLORER_RULES, "內建 explorer.toml")
+                .expect("內建 explorer.toml"),
+            reviewer: parse(BUILTIN_REVIEWER, &REVIEWER_RULES, "內建 reviewer.toml")
+                .expect("內建 reviewer.toml"),
         }
     }
 
@@ -165,6 +245,9 @@ impl Profiles {
         Ok(Self {
             chat: one(BUILTIN_CHAT, &CHAT_RULES)?,
             planner: one(BUILTIN_PLANNER, &PLANNER_RULES)?,
+            worker: one(BUILTIN_WORKER, &WORKER_RULES)?,
+            explorer: one(BUILTIN_EXPLORER, &EXPLORER_RULES)?,
+            reviewer: one(BUILTIN_REVIEWER, &REVIEWER_RULES)?,
         })
     }
 }
@@ -178,8 +261,8 @@ fn parse(text: &str, rules: &Rules, source: &str) -> Result<AgentProfile, Error>
     if p.memory != rules.memory {
         return Err(bad(format!("{} 的 memory 不能改", rules.name)));
     }
-    if p.max_turns == 0 || p.max_turns > 50 {
-        return Err(bad("max_turns 要在 1 到 50 之間".into()));
+    if p.max_turns == 0 || p.max_turns > 100 {
+        return Err(bad("max_turns 要在 1 到 100 之間".into()));
     }
     if let Some(t) = p.tools.iter().find(|t| !rules.tools.contains(t)) {
         return Err(bad(format!("{} 不能用 {}", rules.name, t.as_str())));

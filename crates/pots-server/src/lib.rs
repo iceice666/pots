@@ -25,8 +25,10 @@ mod runs;
 pub mod service;
 mod store;
 mod tasks;
+mod team;
 mod tools;
 mod watcher;
+mod worker;
 mod ws;
 
 use std::collections::BTreeSet;
@@ -42,7 +44,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub use config::{
-    AuthConfig, Clock, Config, ListenConfig, ManualClock, StoreConfig, WatcherConfig,
+    AuthConfig, Clock, Config, ListenConfig, ManualClock, StoreConfig, WatcherConfig, WorkerConfig,
 };
 pub use datadir::{BuildInfo, ConnectionInfo, LocalToken, read_connection_info};
 pub use memory::OmConfig;
@@ -57,6 +59,7 @@ use crate::providers::{ProviderRegistry, ProviderRouter};
 use crate::runs::Runs;
 use crate::store::{ItemStatus, Store};
 use crate::watcher::Watcher;
+use crate::worker::Worker;
 
 /// 關閉時等 agent run 收尾的時間。
 const RUN_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
@@ -123,6 +126,7 @@ pub(crate) struct App {
     pub store: Store,
     pub runs: Runs,
     pub planner: Planner,
+    pub worker: Worker,
     pub memory: Memory,
     pub watcher: Watcher,
     pub providers: Arc<ProviderRegistry>,
@@ -291,12 +295,23 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         config.memory.clone(),
     );
     let clock = config.watcher.clock.clone();
+    let worker = Worker::new(
+        hub.clone(),
+        store.clone(),
+        router.clone(),
+        profiles.clone(),
+        config.worker.clone(),
+        config.data_dir.clone(),
+        instance.id.to_string(),
+        clock.clone(),
+    );
     let planner = Planner::new(
         hub.clone(),
         store.clone(),
         router.clone(),
         profiles.planner,
         clock,
+        worker.clone(),
     );
     let runs = Runs::new(
         hub.clone(),
@@ -316,12 +331,22 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         config.watcher.clone(),
     );
     watcher.init().await?;
+    worker.bind(planner.clone(), watcher.clone());
+    {
+        let mut txn = hub.begin().await?;
+        let settings = worker::load_settings(txn.conn(), &config.worker.defaults).await?;
+        let view = worker::settings_view(&settings, &config.data_dir);
+        txn.push(|seq| ServerEvent::Worker { seq, worker: view })
+            .await?;
+        txn.commit().await?;
+    }
     let shutdown = CancellationToken::new();
     let app = Arc::new(App {
         hub: hub.clone(),
         store: store.clone(),
         runs: runs.clone(),
         planner: planner.clone(),
+        worker: worker.clone(),
         memory: memory.clone(),
         watcher: watcher.clone(),
         providers: registry,
@@ -341,6 +366,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         build: Some(BuildInfo::current()),
     };
     data_dir.write_connection_info(&info)?;
+    worker.set_port(addr.port());
     // 啟動不會再失敗了：上次關閉時可能還有沒整理完的記憶。
     match store.list_projects().await {
         Ok(projects) => projects.iter().for_each(|p| memory.wake(p.id)),
@@ -349,6 +375,9 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
     // 上次沒跑完（或排隊中）的 Planner run 接著跑。
     planner.start();
     planner.kick();
+    // 上次沒跑完（或排隊中）的 worker run 接著跑。
+    worker.start();
+    worker.kick();
     // 輪詢與 sweeper：啟動時馬上各跑一次，補上停機期間漏掉的事件與到期的等待、排程。
     watcher.start();
 
@@ -359,7 +388,10 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
             port: addr.port(),
             token: token.as_str().to_string(),
         }),
-    );
+    )
+    // Claude Code worker 的平台工具：不經 gateway 的本機 token 與 Host 檢查（另有自己的 Host 白名單），
+    // 改驗每個 run 的 capability。
+    .merge(worker::mcp::router(worker.grants(), shutdown.clone()));
 
     let task = {
         let shutdown = shutdown.clone();
@@ -373,6 +405,7 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
                 tokio::join!(
                     runs.shutdown(RUN_SHUTDOWN_GRACE),
                     planner.shutdown(RUN_SHUTDOWN_GRACE),
+                    worker.shutdown(RUN_SHUTDOWN_GRACE),
                     memory.shutdown(RUN_SHUTDOWN_GRACE)
                 );
             });
@@ -414,6 +447,8 @@ async fn recover(hub: &Hub) -> Result<(), Error> {
     let stale = Store::fail_stale_runs(txn.conn(), "服務中斷").await?;
     let (requeued, gave_up) = planner::requeue_stale(txn.conn()).await?;
     planner::note_gave_up(&mut txn, &gave_up).await?;
+    let (worker_requeued, worker_gave_up) = worker::requeue_stale(txn.conn()).await?;
+    worker::note_gave_up(&mut txn, &worker_gave_up).await?;
     let mut idle = BTreeSet::<ProjectId>::new();
     for (project, mut item) in Store::items_with_status(txn.conn(), ItemStatus::Streaming).await? {
         if let StreamItemKind::Agent(msg) = &mut item.kind {
@@ -465,6 +500,12 @@ async fn recover(hub: &Hub) -> Result<(), Error> {
     }
     if requeued > 0 {
         tracing::warn!(requeued, "上次結束時有 Planner run 還在執行，已放回佇列");
+    }
+    if worker_requeued > 0 {
+        tracing::warn!(
+            worker_requeued,
+            "上次結束時有 worker run 還在執行，已放回佇列"
+        );
     }
     Ok(())
 }

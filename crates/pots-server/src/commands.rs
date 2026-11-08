@@ -85,6 +85,7 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
         }
         ClientCommand::Decide { .. } => Err("尚未支援".into()),
         ClientCommand::Cancel { task } => cancel_task(app, task).await,
+        ClientCommand::RetryTask { task } => retry_task(app, task).await,
         ClientCommand::SaveArtifact {
             artifact,
             base_rev,
@@ -235,6 +236,7 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             })
             .await
         }
+        ClientCommand::SaveWorkerSettings { draft } => save_worker_settings(app, draft).await,
         ClientCommand::ResumeAutomations { project } => {
             automation_edit(app, |conn, _| {
                 Box::pin(async move {
@@ -497,7 +499,7 @@ async fn artifact_history(app: &App, id: ArtifactId) -> Result<ServerEvent, Stri
         .ok_or_else(|| "找不到這份 artifact".into())
 }
 
-/// 你取消一個任務。不叫醒 Planner（M2 的 Planner 只在 Goal 建立與 steer 時醒來）。
+/// 你取消一個任務：正在跑的 worker 被中斷。不叫醒 Planner（你自己決定的）。
 async fn cancel_task(app: &App, id: TaskId) -> Result<(), String> {
     let result: Result<Result<(), String>, crate::Error> = async {
         let mut txn = app.hub.begin().await?;
@@ -527,12 +529,105 @@ async fn cancel_task(app: &App, id: TaskId) -> Result<(), String> {
             },
         )
         .await?;
+        // 快速修改只有這一個任務、沒有 Planner：任務取消就是 Goal 取消。
+        let goal = tasks::goal(txn.conn(), task.goal).await?;
+        if let Some(g) = goal.filter(|g| g.state.is_active())
+            && tasks::goal_kind(txn.conn(), g.id).await? == "quick"
+        {
+            crate::tools::close_goal(
+                &mut txn,
+                &g,
+                pots_proto::GoalState::Cancelled {
+                    reason: "你取消了這個快速修改".into(),
+                },
+                &Principal::Human,
+                "快速修改已取消",
+            )
+            .await?;
+        }
         tasks::push_goal(&mut txn, task.goal).await?;
-        txn.commit().await?;
+        let worker = app.worker.clone();
+        txn.commit_then(|| worker.interrupt(id)).await?;
         Ok(Ok(()))
     }
     .await;
     result.map_err(internal)?
+}
+
+/// 你重試一個需要決定（或失敗）的任務：回到佇列，worker 從工作目錄的現況接著做。
+async fn retry_task(app: &App, id: TaskId) -> Result<(), String> {
+    let result: Result<Result<(), String>, crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        let Some(task) = tasks::task(txn.conn(), id).await? else {
+            return Ok(Err("找不到這個任務".into()));
+        };
+        let Some(goal) = tasks::goal(txn.conn(), task.goal).await? else {
+            return Ok(Err("找不到這個任務".into()));
+        };
+        if !owns(app, goal.project).await? {
+            return Ok(Err("找不到這個任務".into()));
+        }
+        let rejected = if !goal.state.is_active() {
+            Some(format!("Goal「{}」已經{}", goal.title, goal.state.label()))
+        } else if !matches!(
+            task.state,
+            TaskState::NeedsHuman { .. } | TaskState::Failed { .. }
+        ) {
+            Some("只有需要決定或失敗的任務可以重試".to_string())
+        } else if task.repo.is_none() {
+            Some("這個任務沒有 repo，不會派給 worker".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = rejected {
+            // 重送目前的 Goal，讓客戶端蓋掉它先改的狀態。
+            tasks::push_goal(&mut txn, goal.id).await?;
+            txn.commit().await?;
+            return Ok(Err(why));
+        }
+        tasks::set_task_state(
+            txn.conn(),
+            &task,
+            &TaskState::Planned,
+            &Cause {
+                by: Principal::Human,
+                reason: "你要求重試".into(),
+            },
+        )
+        .await?;
+        crate::worker::enqueue(
+            txn.conn(),
+            goal.project,
+            goal.id,
+            task.id,
+            &crate::worker::WorkerTrigger::Retry {
+                reason: "使用者要求重試".into(),
+            },
+        )
+        .await?;
+        tasks::push_goal(&mut txn, goal.id).await?;
+        let worker = app.worker.clone();
+        txn.commit_then(|| worker.kick()).await?;
+        Ok(Ok(()))
+    }
+    .await;
+    result.map_err(internal)?
+}
+
+/// 儲存 worker 設定（只影響之後開始的 run）。
+async fn save_worker_settings(
+    app: &App,
+    draft: pots_proto::WorkerSettingsDraft,
+) -> Result<(), String> {
+    let draft = crate::worker::check_settings(&draft)?;
+    let result: Result<(), crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        crate::worker::save_settings(&mut txn, &draft, app.worker.data_dir()).await?;
+        let worker = app.worker.clone();
+        txn.commit_then(|| worker.kick()).await
+    }
+    .await;
+    result.map_err(internal)
 }
 
 async fn send(

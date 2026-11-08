@@ -432,7 +432,7 @@ fn model() -> Arc<FnProvider> {
     })
 }
 
-/// 啟動服務：Planner 的 profile 多了 wait_for（內建的還沒有）。
+/// 啟動服務：Planner 的 profile 多了 wait_for（內建的沒有，那是 worker 的）。
 async fn launch(
     dir: &Path,
     model: Arc<FnProvider>,
@@ -443,12 +443,14 @@ async fn launch(
     std::fs::create_dir_all(&profiles).unwrap();
     let builtin = include_str!("../profiles/planner.toml");
     let custom = builtin.replace(
-        r#""write_artifact", "schedule"]"#,
-        r#""write_artifact", "schedule", "wait_for"]"#,
+        r#""schedule", "post_to_team""#,
+        r#""schedule", "wait_for", "post_to_team""#,
     );
     assert_ne!(builtin, custom, "planner.toml 的 tools 格式變了");
     std::fs::write(profiles.join("planner.toml"), custom).unwrap();
     let mut config = Config::desktop(dir).with_default_provider(ProviderId::CHATGPT);
+    // 這裡只測等待與喚醒：任務排著，不交給 worker（worker 在 tests/worker.rs）。
+    config.worker.run_queue = false;
     config.watcher = WatcherConfig {
         poll_interval: Duration::from_millis(100),
         sweep_interval: Duration::from_millis(100),

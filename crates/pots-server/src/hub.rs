@@ -53,6 +53,8 @@ pub struct HubState {
     pub providers: ProvidersView,
     /// 最後一筆 `Github` 事件的內容，快照用。
     github: pots_proto::GithubView,
+    /// 最後一筆 `Worker` 事件的內容，快照用。
+    worker: pots_proto::WorkerSettingsView,
     agent_states: HashMap<ProjectId, AgentState>,
 }
 
@@ -112,6 +114,7 @@ impl Hub {
                 model_auth,
                 providers,
                 github: Default::default(),
+                worker: Default::default(),
                 agent_states: HashMap::new(),
             }),
             streaming: Mutex::new(HashMap::new()),
@@ -237,6 +240,7 @@ impl Hub {
             providers: state.providers.clone(),
             automation,
             github: state.github.clone(),
+            worker: state.worker.clone(),
         })
     }
 
@@ -320,6 +324,9 @@ impl LogTxn<'_> {
                 }
                 ServerEvent::Providers { providers, .. } => {
                     self.state.providers = providers.clone();
+                }
+                ServerEvent::Worker { worker, .. } => {
+                    self.state.worker = worker.clone();
                 }
                 ServerEvent::Github { github, .. } => {
                     self.state.github = github.clone();

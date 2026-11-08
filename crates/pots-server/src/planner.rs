@@ -72,6 +72,23 @@ pub enum PlannerTrigger {
     Scheduled {
         prompt: String,
     },
+    /// 一個任務結束了（完成、失敗或需要決定）。
+    TaskEnded {
+        task: pots_proto::TaskId,
+        title: String,
+        state: String,
+        detail: String,
+    },
+    /// worker 在 team 發了問題或阻礙。
+    TeamPost {
+        post: String,
+        from: String,
+        text: String,
+    },
+    /// 快速修改超出範圍，升級成這個 Goal。
+    Escalated {
+        reason: String,
+    },
 }
 
 impl PlannerTrigger {
@@ -93,6 +110,24 @@ impl PlannerTrigger {
                     tasks::one_line(prompt, 2000)
                 )
             }
+            Self::TaskEnded {
+                task,
+                title,
+                state,
+                detail,
+            } => format!(
+                "任務「{}」（task_id：{task}）{state}：{}",
+                tasks::one_line(title, 200),
+                tasks::one_line(detail, 1500)
+            ),
+            Self::TeamPost { post, from, text } => format!(
+                "{from}在 team 發了{post}：{}（用 post_to_team 發 decision 回答）",
+                tasks::one_line(text, 1000)
+            ),
+            Self::Escalated { reason } => format!(
+                "這個 Goal 原本是快速修改，worker 發現超出範圍而升級：{}。請依 Brief 重新規劃（已做的修改在任務的分支上）。",
+                tasks::one_line(reason, 1000)
+            ),
         }
     }
 }
@@ -104,13 +139,17 @@ struct TriggerList {
 
 /// 排一個 Planner run；同一個 Goal 已經有排隊中的 run 時把觸發併進去。
 /// 要和觸發它的狀態變更放在同一個 transaction，commit 後呼叫 [`Planner::kick`]
-/// （steer 用 [`Planner::steer`]）。
+/// （steer 用 [`Planner::steer`]）。快速修改（`quick` 種類的 Goal）沒有 Planner：不排
+/// （升級成一般 Goal 時先改種類再排）。
 pub async fn enqueue(
     conn: &mut SqliteConnection,
     project: ProjectId,
     goal: GoalId,
     trigger: &PlannerTrigger,
 ) -> Result<(), Error> {
+    if tasks::goal_kind(conn, goal).await? == "quick" {
+        return Ok(());
+    }
     let queued = sqlx::query(
         "SELECT id, trigger FROM agent_runs WHERE agent = 'planner' AND goal_id = ? AND state = 'queued' \
          ORDER BY started_at, id LIMIT 1",
@@ -229,6 +268,7 @@ struct Inner {
     router: Arc<ProviderRouter>,
     profile: AgentProfile,
     clock: crate::config::Clock,
+    worker: crate::worker::Worker,
     notify: Notify,
     active: Mutex<HashMap<GoalId, Active>>,
     tracker: TaskTracker,
@@ -256,6 +296,7 @@ impl Planner {
         router: Arc<ProviderRouter>,
         profile: AgentProfile,
         clock: crate::config::Clock,
+        worker: crate::worker::Worker,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -264,12 +305,17 @@ impl Planner {
                 router,
                 profile,
                 clock,
+                worker,
                 notify: Notify::new(),
                 active: Mutex::new(HashMap::new()),
                 tracker: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
             }),
         }
+    }
+
+    pub fn worker(&self) -> &crate::worker::Worker {
+        &self.inner.worker
     }
 
     /// 排程、等待與 listener 用的時鐘（工具共用）。
@@ -532,6 +578,11 @@ impl Planner {
             goals_created: Default::default(),
             queued: None,
             clock: inner.clock.clone(),
+            worker: inner.worker.clone(),
+            work: None,
+            code: None,
+            stop: Arc::new(tokio::sync::Notify::new()),
+            cancel: job.cancel.clone(),
         });
         let gate = ctx.gate();
         let config = RunConfig {
@@ -764,6 +815,18 @@ pub async fn render_trigger(
             tasks::one_line(&t.title, 200),
             t.id
         ));
+    }
+    let posts = crate::team::unread(
+        conn,
+        goal.id,
+        &format!("planner:{}", goal.id),
+        &Principal::agent("planner"),
+        None,
+    )
+    .await?;
+    if !posts.is_empty() {
+        out.push_str("\n# Team 的新貼文\n\n");
+        out.push_str(&crate::team::render(conn, &posts).await?);
     }
     Ok(out)
 }

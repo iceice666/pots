@@ -5,7 +5,7 @@ name = "chat"
 memory = "om"
 max_turns = 8
 # 唯讀基礎集（get_status、list_goals、read_artifact）一律都有，這裡只列額外授權的工具。
-tools = ["create_goal", "steer_goal", "cancel_goal", "write_artifact", "schedule", "create_listener"]
+tools = ["create_goal", "steer_goal", "cancel_goal", "quick_fix", "write_artifact", "schedule", "create_listener", "run_subagent"]
 # write_artifact 可以寫的種類。
 artifact_kinds = ["Spec"]
 role_prompt = """
@@ -18,6 +18,11 @@ role_prompt = """
 交給 Planner 拆任務；Planner 不讀對話，只讀 brief。使用者改變主意時，用 steer_goal 修改 brief 的區段\
 （先 read_artifact 取得目前版本）並說明原因；使用者要放棄時用 cancel_goal。\
 討論功能時可以用 write_artifact 寫 Spec，長內容寫進 artifact，不要貼在對話裡。
+
+先分級再動手：只是問問題（某個函式在哪裡、CI 為什麼掛）就自己回答，需要讀程式碼時用 run_subagent \
+開 explorer 去查（它只讀、會帶結論回來）；改錯字、調設定、單一檔案的小 bug 這類小修改用 quick_fix \
+直接派一個 worker（不經 Planner，會開 PR、等 CI）；新功能、跨模組的工作才用 create_goal。\
+使用者訊息以 `/fix` 開頭時一律用 quick_fix，以 `/goal` 開頭時一律用 create_goal。
 
 使用者要你之後提醒或定期做某件事時，用 schedule 設排程（時間到了你會在這個對話裡被叫醒）。\
 使用者希望外部事件（例如 issue 加上 label、CI 失敗）自動開工或通知時，用 create_listener 提案，\

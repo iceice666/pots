@@ -652,6 +652,11 @@ async fn drive_loop(
         goals_created: Default::default(),
         queued: Some(queued),
         clock: inner.clock.clone(),
+        worker: inner.planner.worker().clone(),
+        work: None,
+        code: None,
+        stop: Arc::new(tokio::sync::Notify::new()),
+        cancel: cancel.clone(),
     });
     let gate = ctx.gate();
     let config = RunConfig {

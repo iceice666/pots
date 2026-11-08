@@ -3,9 +3,10 @@
 //! 任務樹是平台唯一的真相來源。所有變更都在 [`LogTxn`] 裡做，同一個 transaction 記一筆
 //! `GoalChanged`（整個 Goal 連同任務樹替換），客戶端不用自己拼狀態。
 //!
-//! M4 之前沒有 worker：任務建立後停在 `Planned`，只會被 Planner、你或 Goal 的結束取消。
 //! M3 加上 `Waiting`：`wait_for` 把任務掛起，外部事件或逾時時由 watcher 喚醒回 `Planned`
-//!（`crate::watcher`）。
+//!（`crate::watcher`）。M4 加上 worker（`crate::worker`）：任務建立時排一個 worker run，
+//! 執行中是 `Running`，worker 以 `complete_task`、`fail_task`、`escalate` 結束成 `Done`、
+//! `Failed` 或 `NeedsHuman`。
 
 use pots_proto::{
     ArtifactKind, GoalId, GoalState, GoalView, ProjectId, ServerEvent, TaskId, TaskStateView,
@@ -55,15 +56,28 @@ impl Principal {
     }
 }
 
-/// 任務狀態。執行與結果在 M4 加上。
+/// 任務狀態。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state")]
 pub enum TaskState {
+    /// 等 worker 取走（排隊中的 worker run）。
     Planned,
+    /// worker 正在跑。
+    Running,
     /// 等外部事件、子任務或時間；`deadline` 一到由 sweeper 以「逾時」喚醒。
     Waiting {
         on: WaitCond,
         deadline: Timestamp,
+    },
+    /// worker 卡住、需要 Planner 或你決定（`escalate`、沒有回報就結束、需要重新登入）。
+    NeedsHuman {
+        reason: String,
+    },
+    Done {
+        outcome: String,
+    },
+    Failed {
+        error: String,
     },
     Cancelled {
         by: Principal,
@@ -71,13 +85,28 @@ pub enum TaskState {
 }
 
 impl TaskState {
+    /// 還沒結束（Goal 結束時會被取消）。
     pub fn is_open(&self) -> bool {
-        matches!(self, Self::Planned | Self::Waiting { .. })
+        matches!(
+            self,
+            Self::Planned | Self::Running | Self::Waiting { .. } | Self::NeedsHuman { .. }
+        )
     }
 
     pub fn view(&self) -> TaskStateView {
         match self {
             Self::Planned => TaskStateView::Planned,
+            Self::Running => TaskStateView::Running,
+            Self::NeedsHuman { reason } => TaskStateView::NeedsHuman {
+                reason: reason.clone(),
+            },
+            Self::Done { outcome } => TaskStateView::Done {
+                outcome: outcome.clone(),
+            },
+            Self::Failed { error } => TaskStateView::Failed {
+                attempts: 1,
+                error: error.clone(),
+            },
             Self::Waiting { on, deadline } => TaskStateView::Waiting {
                 on: format!(
                     "{}（{} 逾時）",
@@ -93,7 +122,11 @@ impl TaskState {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Planned => "planned",
+            Self::Running => "running",
             Self::Waiting { .. } => "waiting",
+            Self::NeedsHuman { .. } => "needs_human",
+            Self::Done { .. } => "done",
+            Self::Failed { .. } => "failed",
             Self::Cancelled { .. } => "cancelled",
         }
     }
@@ -125,6 +158,37 @@ pub struct TaskRow {
     pub summary: String,
     pub assignee: String,
     pub state: TaskState,
+    /// `github.com/owner/repo`；建立時決定。
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    /// `github.com/owner/repo#42`。
+    pub pr: Option<String>,
+    pub pr_url: Option<String>,
+    pub progress: String,
+    pub started_at: Option<Timestamp>,
+    pub finished_at: Option<Timestamp>,
+}
+
+impl TaskRow {
+    /// 新任務（`Planned`）。
+    pub fn new(goal: GoalId, title: String, summary: String) -> Self {
+        Self {
+            id: TaskId::new(),
+            goal,
+            parent: None,
+            title,
+            summary,
+            assignee: String::new(),
+            state: TaskState::Planned,
+            repo: None,
+            branch: None,
+            pr: None,
+            pr_url: None,
+            progress: String::new(),
+            started_at: None,
+            finished_at: None,
+        }
+    }
 }
 
 fn goal_state_columns(state: &GoalState) -> (&'static str, Option<&str>) {
@@ -266,13 +330,16 @@ pub async fn add_spent(conn: &mut SqliteConnection, id: GoalId, tokens: u64) -> 
 
 macro_rules! task_columns {
     () => {
-        "id, goal_id, parent_id, title, summary, assignee, state"
+        "id, goal_id, parent_id, title, summary, assignee, state, repo, branch, pr, pr_url, \
+         progress, started_at, finished_at"
     };
 }
 
 fn task_from_row(row: &SqliteRow) -> Result<TaskRow, Error> {
     let parent: Option<String> = row.try_get("parent_id")?;
     let state: String = row.try_get("state")?;
+    let started: Option<i64> = row.try_get("started_at")?;
+    let finished: Option<i64> = row.try_get("finished_at")?;
     Ok(TaskRow {
         id: parse_id(row.try_get("id")?)?,
         goal: parse_id(row.try_get("goal_id")?)?,
@@ -281,6 +348,13 @@ fn task_from_row(row: &SqliteRow) -> Result<TaskRow, Error> {
         summary: row.try_get("summary")?,
         assignee: row.try_get("assignee")?,
         state: serde_json::from_str(&state)?,
+        repo: row.try_get("repo")?,
+        branch: row.try_get("branch")?,
+        pr: row.try_get("pr")?,
+        pr_url: row.try_get("pr_url")?,
+        progress: row.try_get("progress")?,
+        started_at: started.map(Timestamp),
+        finished_at: finished.map(Timestamp),
     })
 }
 
@@ -292,8 +366,8 @@ pub async fn insert_task(
 ) -> Result<(), Error> {
     let now = Timestamp::now().0;
     sqlx::query(
-        "INSERT INTO tasks (id, goal_id, parent_id, title, summary, assignee, state, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tasks (id, goal_id, parent_id, title, summary, assignee, state, repo, \
+         created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(task.id.to_string())
     .bind(task.goal.to_string())
@@ -302,6 +376,7 @@ pub async fn insert_task(
     .bind(&task.summary)
     .bind(&task.assignee)
     .bind(to_json(&task.state)?)
+    .bind(&task.repo)
     .bind(now)
     .bind(now)
     .execute(&mut *conn)
@@ -362,14 +437,23 @@ pub async fn set_task_state(
     to: &TaskState,
     cause: &Cause,
 ) -> Result<(), Error> {
-    sqlx::query("UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?")
-        .bind(to_json(to)?)
-        .bind(Timestamp::now().0)
-        .bind(task.id.to_string())
-        .execute(&mut *conn)
-        .await?;
-    // 取消了：被喚醒、還在等 worker 的 run 也不用跑了。
-    if matches!(to, TaskState::Cancelled { .. }) {
+    let now = Timestamp::now().0;
+    sqlx::query(
+        "UPDATE tasks SET state = ?, updated_at = ?, \
+         started_at = CASE WHEN ? THEN COALESCE(started_at, ?) ELSE started_at END, \
+         finished_at = CASE WHEN ? THEN ? ELSE NULL END WHERE id = ?",
+    )
+    .bind(to_json(to)?)
+    .bind(now)
+    .bind(matches!(to, TaskState::Running))
+    .bind(now)
+    .bind(!to.is_open())
+    .bind(now)
+    .bind(task.id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    // 結束了：被喚醒、還在等 worker 的 run 也不用跑了。
+    if !to.is_open() {
         sqlx::query(
             "UPDATE agent_runs SET state = 'cancelled', finished_at = ? \
              WHERE agent = 'worker' AND task_id = ? AND state = 'queued'",
@@ -433,7 +517,13 @@ async fn steps(conn: &mut SqliteConnection, task: TaskId) -> Result<Vec<TaskStep
             (_, TaskState::Cancelled { .. }) => "取消".to_string(),
             (_, TaskState::Waiting { on, .. }) => format!("開始等待{}", on.describe()),
             (_, TaskState::Planned) if was_waiting => "喚醒".to_string(),
-            (_, TaskState::Planned) => "回到規劃".to_string(),
+            (_, TaskState::Planned) => "回到佇列".to_string(),
+            (_, TaskState::Running) => "開始執行".to_string(),
+            (_, TaskState::NeedsHuman { reason }) => {
+                format!("需要決定：{}", one_line(reason, 200))
+            }
+            (_, TaskState::Done { .. }) => "完成".to_string(),
+            (_, TaskState::Failed { error }) => format!("失敗：{}", one_line(error, 200)),
         };
         let mut text = format!("{what}（{}）", cause.by.label());
         if !cause.reason.is_empty() {
@@ -460,12 +550,67 @@ async fn task_view(conn: &mut SqliteConnection, t: &TaskRow) -> Result<TaskView,
         },
         summary: t.summary.clone(),
         state: t.state.view(),
-        branch: None,
-        elapsed_min: 0,
+        branch: t.branch.clone(),
+        elapsed_min: t
+            .started_at
+            .map(|s| {
+                let end = t.finished_at.unwrap_or_else(Timestamp::now);
+                ((end.0 - s.0).max(0) / 60) as u32
+            })
+            .unwrap_or(0),
         cost_cents: 0,
         steps: steps(conn, t.id).await?,
         thread: Vec::new(),
+        pr: t.pr.clone(),
+        pr_url: t.pr_url.clone(),
+        progress: t.progress.clone(),
     })
+}
+
+/// 記下任務的分支、PR 與進度（`None` 表示不改）。
+pub async fn set_task_work(
+    conn: &mut SqliteConnection,
+    id: TaskId,
+    branch: Option<&str>,
+    pr: Option<(&str, &str)>,
+    progress: Option<&str>,
+) -> Result<(), Error> {
+    sqlx::query(
+        "UPDATE tasks SET branch = COALESCE(?, branch), pr = COALESCE(?, pr), \
+         pr_url = COALESCE(?, pr_url), progress = COALESCE(?, progress), updated_at = ? WHERE id = ?",
+    )
+    .bind(branch)
+    .bind(pr.map(|p| p.0))
+    .bind(pr.map(|p| p.1))
+    .bind(progress)
+    .bind(Timestamp::now().0)
+    .bind(id.to_string())
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// 改任務的指派（例如「worker · Claude Code」）。
+pub async fn set_assignee(
+    conn: &mut SqliteConnection,
+    id: TaskId,
+    assignee: &str,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE tasks SET assignee = ? WHERE id = ?")
+        .bind(assignee)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Goal 的種類：`feature` 或 `quick`。
+pub async fn goal_kind(conn: &mut SqliteConnection, id: GoalId) -> Result<String, Error> {
+    Ok(sqlx::query_scalar("SELECT kind FROM goals WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_optional(conn)
+        .await?
+        .unwrap_or_else(|| "feature".into()))
 }
 
 /// Goal 的完整檢視（任務樹與 Brief 全文）。
@@ -486,9 +631,9 @@ pub async fn goal_view(conn: &mut SqliteConnection, g: &GoalRow) -> Result<GoalV
         // 預算在 M6。
         budget_used_pct: 0,
         tasks: views,
-        // team 貼文在 M4。
-        team: Vec::new(),
+        team: crate::team::views(conn, g.id).await?,
         brief,
+        quick: goal_kind(conn, g.id).await? == "quick",
     })
 }
 

@@ -599,12 +599,12 @@ impl Store {
         Ok(())
     }
 
-    /// 上次異常結束時還在跑的 chat run 一律標成失敗。Planner 的 run 在持久化佇列裡，
-    /// 由 [`crate::planner::requeue_stale`] 放回佇列。
+    /// 上次異常結束時還在跑的 chat（與 subagent）run 一律標成失敗。Planner 與 worker 的 run 在
+    /// 持久化佇列裡，由 [`crate::planner::requeue_stale`]、[`crate::worker::requeue_stale`] 放回佇列。
     pub async fn fail_stale_runs(conn: &mut SqliteConnection, error: &str) -> Result<u64, Error> {
         let done = sqlx::query(
             "UPDATE agent_runs SET state = 'failed', error = ?, finished_at = ? \
-             WHERE state = 'running' AND agent <> 'planner'",
+             WHERE state = 'running' AND agent NOT IN ('planner', 'worker')",
         )
         .bind(error)
         .bind(Timestamp::now().0)

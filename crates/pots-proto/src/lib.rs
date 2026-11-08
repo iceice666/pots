@@ -19,7 +19,9 @@ use uuid::Uuid;
 ///   `SaveArtifact`、`RestoreArtifact`、`Card::Milestone`、快照帶 Goal 與 artifact）。
 /// - 5：外部事件與自動化（`Automation`、`Github`、`ProjectRepos`、`GithubTest`、GitHub 設定、
 ///   project 的 repo、listener 與排程的指令、`Card::Triggered`、快照帶自動化與 GitHub 設定）。
-pub const PROTOCOL_VERSION: u32 = 5;
+/// - 6：coding worker（`Worker`、`SaveWorkerSettings`、`RetryTask`、`TaskView` 的 PR 與進度、
+///   `TeamPost::to`、`GoalView::quick`、快照帶 worker 設定）。
+pub const PROTOCOL_VERSION: u32 = 6;
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -162,6 +164,9 @@ pub struct InstanceView {
     pub sources: Vec<SourceView>,
     #[serde(default)]
     pub github: GithubView,
+    /// worker 設定（設定的「Worker」類別）。
+    #[serde(default)]
+    pub worker: WorkerSettingsView,
     /// 模型 provider 設定與使用中的 provider。
     pub providers: ProvidersView,
     /// 內建 ChatGPT provider 的登入狀態。
@@ -650,6 +655,14 @@ pub struct TaskView {
     pub cost_cents: u32,
     pub steps: Vec<TaskStep>,
     pub thread: Vec<StreamItemView>,
+    /// worker 開的 PR，例如 `github.com/owner/repo#42`。
+    #[serde(default)]
+    pub pr: Option<String>,
+    #[serde(default)]
+    pub pr_url: Option<String>,
+    /// worker 最後一句進度。
+    #[serde(default)]
+    pub progress: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -679,6 +692,9 @@ pub struct TeamPost {
     pub from: String,
     pub at: Timestamp,
     pub body: String,
+    /// 問題或交接的對象（任務標題）；沒有就是給整個 Goal（問題是問 Planner）。
+    #[serde(default)]
+    pub to: Option<String>,
 }
 
 /// Goal 的狀態。
@@ -719,6 +735,9 @@ pub struct GoalView {
     pub tasks: Vec<TaskView>,
     pub team: Vec<TeamPost>,
     pub brief: String,
+    /// 快速修改（`quick_fix`）：不經 Planner、只有一個任務。
+    #[serde(default)]
+    pub quick: bool,
 }
 
 impl GoalView {
@@ -1183,6 +1202,77 @@ pub struct InstanceSnapshot {
     pub automation: AutomationView,
     #[serde(default)]
     pub github: GithubView,
+    #[serde(default)]
+    pub worker: WorkerSettingsView,
+}
+
+// ---------------------------------------------------------------------------
+// Coding worker 設定（proposal/agent-runtime.md#worker-adapter內建-worker-與外部-coding-cli）
+
+/// worker 的後端。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerBackendKind {
+    /// 內建 worker：Pots 自己的 loop，用對話 agent 使用中的模型 provider。
+    #[default]
+    Builtin,
+    /// 未修改的官方 Claude Code CLI，由你自己官方登入。
+    ClaudeCode,
+}
+
+impl WorkerBackendKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Builtin => "內建 worker",
+            Self::ClaudeCode => "Claude Code",
+        }
+    }
+}
+
+/// worker 在哪裡執行。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecKind {
+    /// 每次 run 一個 Docker／Podman 容器，只掛任務的工作目錄與 Claude Code 的專屬 home。
+    #[default]
+    Container,
+    /// 直接在這台電腦上執行（沒有沙箱）。
+    Local,
+}
+
+impl ExecKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Container => "容器",
+            Self::Local => "本機（沒有沙箱）",
+        }
+    }
+}
+
+/// worker 設定。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerSettingsView {
+    pub backend: WorkerBackendKind,
+    pub exec: ExecKind,
+    /// 容器執行檔，例如 `docker` 或 `podman`。
+    pub runtime: String,
+    /// 容器 image（repo 附的 `docker/worker/Dockerfile`）。
+    pub image: String,
+    /// Claude Code 用的模型；空字串是 CLI 的預設。
+    pub claude_model: String,
+    /// 登入 Claude Code 要在終端機跑的指令（依目前的設定產生）。
+    pub login_command: String,
+    /// 同時最多幾個 worker。
+    pub max_parallel: u8,
+}
+
+/// 修改 worker 設定時客戶端送出的內容。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerSettingsDraft {
+    pub backend: WorkerBackendKind,
+    pub exec: ExecKind,
+    pub runtime: String,
+    pub image: String,
+    pub claude_model: String,
+    pub max_parallel: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -1464,6 +1554,11 @@ pub enum ServerEvent {
         project: ProjectId,
         repos: Vec<String>,
     },
+    /// worker 設定有變。
+    Worker {
+        seq: u64,
+        worker: WorkerSettingsView,
+    },
     /// 回給送出 `TestGithub` 的那條連線：成功時是帳號名稱。不寫入事件日誌。
     GithubTest {
         request: u64,
@@ -1498,7 +1593,8 @@ impl ServerEvent {
             | Self::ArtifactChanged { seq, .. }
             | Self::Automation { seq, .. }
             | Self::Github { seq, .. }
-            | Self::ProjectRepos { seq, .. } => Some(*seq),
+            | Self::ProjectRepos { seq, .. }
+            | Self::Worker { seq, .. } => Some(*seq),
             Self::GithubTest { .. }
             | Self::Delta { .. }
             | Self::StreamingText { .. }
@@ -1537,6 +1633,10 @@ pub enum ClientCommand {
         note: Option<String>,
     },
     Cancel {
+        task: TaskId,
+    },
+    /// 重試一個需要決定（或失敗）的任務：回到佇列，worker 從工作目錄的現況接著做。
+    RetryTask {
         task: TaskId,
     },
     /// 開始 ChatGPT（SIWC）登入；伺服器回 `ModelAuth { Pending { url } }`。
@@ -1653,6 +1753,10 @@ pub enum ClientCommand {
     },
     ResumeAutomations {
         project: Option<ProjectId>,
+    },
+    /// 儲存 worker 設定；伺服器回 `Worker`。只影響之後開始的 run。
+    SaveWorkerSettings {
+        draft: WorkerSettingsDraft,
     },
 }
 

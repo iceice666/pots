@@ -305,6 +305,22 @@ impl WaitCond {
         })
     }
 
+    /// 等的資源屬於哪個 repo（整理過的 `github.com/o/r`）；子任務與時間是 `None`。
+    pub fn repo(&self) -> Option<String> {
+        match self {
+            Self::CiFinished { repo, .. } => Some(repo.clone()),
+            Self::ChangeReviewed { change } | Self::ChangeMerged { change } => {
+                change.rsplit_once('#').map(|(r, _)| r.to_string())
+            }
+            Self::Resource { key, .. } => {
+                let rest = key.split_once(':').map(|(_, r)| r).unwrap_or(key);
+                let end = rest.find(['#', '@']).unwrap_or(rest.len());
+                Some(rest[..end].to_string())
+            }
+            Self::Subtasks { .. } | Self::At { .. } => None,
+        }
+    }
+
     /// 等的是「狀態」（CI 結束、已 merge）：開始等待前就成立的也算。其他等的是「下一個事件」。
     pub fn is_state(&self) -> bool {
         matches!(self, Self::CiFinished { .. } | Self::ChangeMerged { .. })
