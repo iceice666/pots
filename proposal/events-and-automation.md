@@ -132,6 +132,19 @@ pub fn wakes(cond: &WaitCond, ev: &ExternalEvent) -> bool {
 
 5. 服務啟動時重新檢查所有 `Waiting` 任務，補上停機期間漏掉的事件（輪詢一次對應資源的現況）。
 
+### M3 的實作
+
+M3 依上面的設計實作在 `crates/pots-server/src/watcher/`（管線與 GitHub connector）與 `src/automation.rs`（排程、listener、暫停），和你確認過的範圍與實作時的取捨：
+
+- **GitHub 授權與接收。** 設定視窗的「GitHub」類別存 fine-grained personal access token（資料目錄的 `auth/sources/github.json`，`0600`，客戶端只看得到末四碼）；token 只送給存它時的 API base URL，改 base URL 一定要重新輸入。每個 project 設定監看的 repo。桌面版每分鐘輪詢 repo 的 Events API（帶 ETag）；Events API 的 payload 自 2025 年起精簡了（PR 沒有 `merged`、各事件沒有 `author_association`），所以每個事件再用 REST 補上完整內容，和 webhook 正規化成同樣的事件與 `dedupe_key`。有公開網址時可以設 repo webhook 打 `POST /webhooks/github`：不經本機 token 與 `Host` 檢查，改以 webhook secret 驗 `X-Hub-Signature-256`，沒有 `X-GitHub-Delivery` 或沒有設定 secret 時拒絕。第一次輪詢一個 repo 只記下進度。輪詢進度在事件處理完之後才存。
+- **CI。** 同一個 sha 的 check suite 全部結束才發 `ci.finished`（沒有 check run 的 suite 不算）。webhook 與補漏的 CI 事件只喚醒在等那個 sha 的任務；listener 只看輪詢確認過「是這個分支的 head」的 CI（check suite 回報的分支可能來自 fork）。沒指定分支的 listener 看 repo 的預設分支。
+- **等待。** `wait_for` 與 `Waiting { on, deadline }`、`subscriptions`、喚醒與 sweeper 都做好了，但內建 profile 還沒有 `wait_for`：M4 交給 worker（測試以覆寫的 Planner profile 驅動）。CI 要給完整的 sha。喚醒時任務回到 `Planned`，並排一個 `worker` 的 `agent_runs`（M4 之前沒有 worker，留在佇列；Goal 結束或任務取消時一起取消）。等「狀態」（CI 結束、已 merge）時，開始等待前就成立的也會喚醒；等「下一個事件」（review、留言）時只算之後的。每一輪輪詢都查一次等待中資源的現況，重啟或漏掉事件時補上；補漏推出來的事件只用來喚醒，不給 Goal 或 listener。
+- **排程。** 對話 agent 與 Planner 有 `schedule`。cron 用本機時區、五個欄位。全域排程（總管）存得起來，但 M6 之前觸發時只記一筆失敗。排程送給對話 agent 的觸發在對話流是一則事件，給 agent 的文字存在 `stream_items.trigger_text`，run 開始時（或當機重啟時）才寫進 `om_raw`，以「排程觸發，不是使用者說的話」開頭。
+- **Listener。** 你在自動化頁建立的直接生效；對話 agent 用 `create_listener` 提案的要等你按「啟用」（M5 之前以啟用代替核准）。快速修正在 M4 之前開一個 `quick` 種類的 Goal。可能來自任何人的事件要自動開工，白名單必須限定作者（`author`）：repo、state 這類誰都符合的欄位不算。通知對話只送平台產生的摘要與連結，不送他人寫的內容（會進對話記憶）；開 Goal 時，成員寫的或通過作者白名單的內容放進 Brief 的不可信引用區塊。同一個資源的後續事件送回 listener 開的 Goal，但暫停中不送、每小時最多 10 次，任何人都能寫的只給摘要。超過每小時上限就暫停 listener 並在對話裡通知；重新啟用後重新計算。每次觸發的預算在 M6。
+- **暫停。** 可以暫停一個 project 或全部，可以指定自動恢復時間。暫停期間（以排程原本的時間判斷）錯過的觸發不補跑。`pause_automations`／`resume_automations` 工具做好了，留給 M6 的總管；agent 不能蓋掉或恢復別人設的暫停。
+- **來源健康狀態。** token 無效、額度用完時馬上標成異常，其他錯誤連續 3 次才標；變成異常時在監看 repo 的 project 對話裡貼一張通知。打錯的 repo 只記日誌。
+- **保留期限。** `external_events` 保留 30 天，webhook 的 delivery ID 保留 7 天。
+
 ### CI 修復迴圈上限
 
 CI 失敗時喚醒對應 worker 去修，但同一個任務最多試 `max_ci_fix` 次（預設 3）。超過就轉成 `NeedsHuman(RepeatedCiFailure)` ，推播給人類。

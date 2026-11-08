@@ -20,6 +20,8 @@ M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種�
 
 4. M3 Watcher 與等待：connector 介面與事件管線，GitHub 為第一個 connector （webhook 與輪詢備援）、`subscriptions` 、`wait_for` 、喚醒與 sweeper；自我排程與 listener（桌面版以輪詢實作）。
 
+   狀態：已實作於 `crates/pots-server` 的 `watcher/`（管線、GitHub connector、sweeper）與 `automation.rs`（加上 `0005_watcher.sql`）、協定 v5，以及桌面版的「GitHub」設定、頻道「自動化」分頁的監看 repo 與暫停、live 的自動化頁（排程、listener、來源狀態、新增 listener）。和你確認過的範圍：`wait_for` 只做管線、內建 profile 還沒有（M4 給 worker）；GitHub 用 fine-grained token、每個 project 設定 repo，桌面版輪詢，也接受驗簽的 webhook；全域排程與 `pause_automations`／`resume_automations` 工具等 M6 的總管；agent 提案的 listener 以「啟用」代替核准（M5 改接 approvals）；快速修正在 M4 之前開 quick Goal。實作細節見[外部事件與自動化](events-and-automation.md#m3-的實作)。以假的 GitHub API 與手動時鐘的整合測試驗證（`tests/watcher.rs`：webhook 驗簽與去重、輪詢與 webhook 去重、精簡的 Events API 以 REST 補上、同一個 sha 的 CI 彙總、等待被事件喚醒與逾時、等待開始前就成立的狀態、重啟後補漏、排程只補一次與暫停期間不補跑、listener 開 Goal 與同一個資源回到同一個 Goal、每小時上限、作者白名單、來源健康狀態、token 綁定 API）與桌面版的 live 截圖流程；對真的 GitHub 待使用者手動驗證。
+
 5. M4 Coding worker：接 Claude Code adapter（內建 worker 為備援），原版 CLI 由使用者官方登入，在容器與 worktree 裡改 code、跑測試、開 PR；MCP 回報與平台端授權、串流事件、中斷、重建容器後續接為驗收項目。session ID 與官方 session 資料一併持久化；不做 Codex adapter。CI 失敗自動修，最多 3 次；quick_fix 快速通道、subagent、team 貼文。
 
 6. M5 核准與通知：`approvals` 、平台執行 merge、Inbox、桌面通知、靜音時段。

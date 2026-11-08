@@ -158,7 +158,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | LLM 與 agent | workspace crate `pots-llm` ＋ `reqwest` | `ModelProvider` trait、Responses provider、SIWC 授權與共用的多輪工具迴圈；HTTP、OAuth 與 SSE 直接用 `reqwest` |
 | ID token 驗證 | `jsonwebtoken` | SIWC 的 ID token（RS256，JWKS） |
 | JSON Schema | `schemars` | 工具參數定義 |
-| GitHub API | `octocrab` | GitHub App 認證與 REST |
+| GitHub API | `reqwest` | 直接呼叫 REST（M3 用 fine-grained token；M8 的 GitHub App 認證也走它），端點少、假伺服器好測，base URL 可以指向 GitHub Enterprise |
 | Webhook 驗簽 | `hmac` + `sha2` |  |
 | 手機推播 | `web-push` | VAPID 與 RFC 8291 加密，送到 UnifiedPush（ntfy）的 endpoint |
 | 登入 | `webauthn-rs` | passkey |
