@@ -117,7 +117,8 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `goals` | 人類意圖的根節點；Brief 是掛在 Goal 上的 artifact | `id` , `project_id` , `title` , `kind` , `state` （`active` ｜ `done` ｜ `cancelled`）, `outcome` , `planner_note` , `budget_tokens` , `spent_tokens` |
 | `tasks` | 任務樹節點 | `id` , `goal_id` , `parent_id` , `assignee` , `state jsonb` , `attempts` , `spent_tokens` |
 | `task_events` | 任務狀態變化的只增日誌（稽核與重播） | `task_id` , `seq` , `from` , `to` , `cause` |
-| `agent_runs` | agent 執行佇列（Postgres 用 `FOR UPDATE SKIP LOCKED`；SQLite 由單一 runner 在寫入 transaction 裡挑選） | `id` , `agent` , `goal_id?` , `task_id?` , `trigger` , `state` （`queued` ｜ `running` ｜ `done` ｜ `failed` ｜ `cancelled`）, `lease_until` , `attempts` |
+| `agent_runs` | agent 執行佇列（Postgres 用 `FOR UPDATE SKIP LOCKED`；SQLite 由單一 runner 在寫入 transaction 裡挑選） | `id` , `agent` , `goal_id?` , `task_id?` , `trigger` , `state` （`queued` ｜ `running` ｜ `done` ｜ `failed` ｜ `cancelled`）, `lease_until` , `attempts` , `input_tokens` , `output_tokens` , `stop_reason` , `model` , `memory_revision` |
+| `run_trace` | 每次模型與工具呼叫的 trace（M6a；遮蔽與截短，只增不改） | `run_id` , `seq` , `kind` （`model` ｜ `tool`）, `name` , `detail` , `ok` , `at` |
 | `model_connections` | 設定視窗新增的 API provider（OpenAI／Anthropic 相容）的非秘密設定；內建的 ChatGPT 不是一列 | `id, user_id, kind, name, base_url, model, secret_ref, created_at, updated_at` |
 | `instance_settings` | 實例層級的設定（使用中的 provider、ChatGPT 的模型） | `key, value` |
 | `worker_sessions` | 外部 runtime 的續接與 run 對應 | `id, user_id, task_id, run_id, backend, external_session_id, state_ref, worktree_ref` |

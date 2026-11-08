@@ -32,9 +32,13 @@ M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種�
 
 7. M6 預算與觀測：階層預算、熔斷、trace、「為什麼」面板、「你不在期間」摘要卡片、總管 agent；其他 connector：GitLab、郵件、狀態頁、HTTP 探測、通用 webhook、 RSS。
 
-8. M7 託管電腦：`pots-node` daemon、配對、Node Hub 與心跳、Node connector、桌面版的 node 專用 listener；先做 coding（Container 與主機模式），再做 operator profile、display lease、`screen_observe`／`ui_act`、截圖 trace、人類接手與緊急停止，最後做 `gui_checkpoint`。macOS 佈建腳本與權限檢查一起完成。驗收：在一台重灌過的 Mac 上照 setup 完成佈建；agent 操作一個桌面 app 完成任務，中途卡住時推播並由你接手後交還；node 斷線、重開機、權限被撤銷時都能正確回報。依賴 M4（worker）與 M5（核准）。詳見[託管電腦](computer-nodes.md)。
+   狀態：M6 拆成兩次交付。**M6a（預算、觀測與總管）已完成**：實作在 `crates/pots-server/src/budget.rs`、`profiles/global.toml`、新 migration `0008_budget_trace.sql`，協定 v8，桌面版的總管改成 live、「為什麼」面板、真實的 Goal 預算百分比與 Inbox 的預算核准。階層預算用 provider 回報的 token：`Hook::after_turn` 同步記帳（`agent_runs.input_tokens`／`output_tokens`、`goals.spent_tokens`、`tasks.spent_tokens`），Goal 預設 40 萬、建立時可指定（夾在 2 萬到 400 萬）；用完時下一輪乾淨停下並申請一筆 `IncreaseBudget` 核准，核准後追加一半（至少 10 萬）並叫醒 Planner，拒絕或逾時記下 `budget_denied` 不再自動申請。熔斷看 project 過去一小時的用量（預設 200 萬，`projects.hourly_budget_tokens` 可覆寫但目前沒有 UI），超過就暫停這個 project 的 run、建一筆 `ResumeProject` 核准並在對話貼一張通知；排隊中的 run 留在佇列、正在跑的在下一輪前停下（用量以每輪 trace 的時間算滾動一小時）。trace 寫進 `run_trace`（模型與工具參數／結果都遮蔽與截短）、`agent_runs` 記下模型與 run 開始時的記憶版本；桌面版每一則 agent 訊息可以問「為什麼這樣回答」。離開超過兩小時回來時，`MarkRead` 會依 `last_read_at` 與期間的里程碑插一張 `CatchUp` 卡片（平台產生，不進 OM）。總管是一個 `kind = 'overseer'` 的內部 project，共用對話流、OM 與 run 儲存但不出現在 project 列表；它可以跨 project `get_status`／`list_goals`、用 `create_goal` 指定 project 派工、取消任一 Goal、暫停／恢復排程與 listener，以及建立 owner 為 `Global` 的排程（觸發時在同一條總管對話醒來）。**還沒做**：`archive_goal`、成本報表、OpenTelemetry 匯出、熔斷上限的設定 UI、金錢計價與 worker／CLI 用量的換算；這些和下面六個 connector 一起留給 M6b。以假模型與手動時鐘的整合測試驗證（`tests/budget.rs`：預算停下並申請核准→核准後繼續、`Why` 的觸發／記憶版本／用量、兩小時後的 catch-up 卡片、總管派工到指定 project），加上既有測試全部通過；真的 provider 的 usage 格式與桌面版的即時畫面待使用者手動驗證。
 
-9. M8 多設備版與並存：分三部分，可以依序拆成三次交付。詳見[部署形態與多實例並存](deployment.md)。
+8. M6b 其他 connector：GitLab、郵件（只收信）、狀態頁、HTTP 探測、通用 webhook、 RSS；以及 M6a 留下的 archive_goal、成本報表與 OpenTelemetry。
+
+9. M7 託管電腦：`pots-node` daemon、配對、Node Hub 與心跳、Node connector、桌面版的 node 專用 listener；先做 coding（Container 與主機模式），再做 operator profile、display lease、`screen_observe`／`ui_act`、截圖 trace、人類接手與緊急停止，最後做 `gui_checkpoint`。macOS 佈建腳本與權限檢查一起完成。驗收：在一台重灌過的 Mac 上照 setup 完成佈建；agent 操作一個桌面 app 完成任務，中途卡住時推播並由你接手後交還；node 斷線、重開機、權限被撤銷時都能正確回報。依賴 M4（worker）與 M5（核准）。詳見[託管電腦](computer-nodes.md)。
+
+10. M8 多設備版與並存：分三部分，可以依序拆成三次交付。詳見[部署形態與多實例並存](deployment.md)。
    - **多設備版本體**：後端設定拆成各自獨立的選項，加上三組預設組合與[設定驗證](deployment.md#設定驗證)；Postgres 後端與 `PgQueue`；passkey 或 forward-auth；GitHub App webhook；Android 客戶端接上服務與 ntfy 推播（UnifiedPush）；單一 binary 與 docker compose 兩種部署方式。
    - **客戶端多連線**：連線清單、瀏覽器登入換裝置 token（可撤銷）、側欄依實例分組、合併 Inbox、每條連線獨立重連。
    - **Project 移交**：凍結、打包、匯入、封存、取回；整個實例的 `export`／`import` 改用同一種移交包（不含秘密）。
