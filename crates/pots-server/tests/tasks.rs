@@ -249,9 +249,22 @@ async fn create_goal_hands_off_to_planner() {
     let p = snapshot_project(&srv).await;
     assert_eq!(p.goals.len(), 1);
     assert_eq!(p.goals[0].tasks.len(), 2);
+    // 每個 project 一份 Project Notes（M5），其他都掛在 Goal 上。
     let kinds: Vec<_> = p.artifacts.iter().map(|a| a.kind).collect();
-    assert_eq!(kinds, [ArtifactKind::Brief, ArtifactKind::Ledger]);
-    assert!(p.artifacts.iter().all(|a| a.goal == Some(goal_id)));
+    assert_eq!(
+        kinds,
+        [
+            ArtifactKind::ProjectNotes,
+            ArtifactKind::Brief,
+            ArtifactKind::Ledger
+        ]
+    );
+    assert!(
+        p.artifacts
+            .iter()
+            .filter(|a| a.kind != ArtifactKind::ProjectNotes)
+            .all(|a| a.goal == Some(goal_id))
+    );
     assert!(
         brief_of(&p, goal_id)
             .body
@@ -664,9 +677,14 @@ async fn write_artifact_conflicts_with_human_edits() {
     assert!(!outputs[n - 1].contains("使用者在你上次讀取之後改了"));
 
     let p = snapshot_project(&srv).await;
-    assert_eq!(p.artifacts.len(), 1);
-    assert_eq!(p.artifacts[0].rev, 3);
-    assert!(p.artifacts[0].body.contains("## 風險"));
+    let specs: Vec<_> = p
+        .artifacts
+        .iter()
+        .filter(|a| a.kind != ArtifactKind::ProjectNotes)
+        .collect();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].rev, 3);
+    assert!(specs[0].body.contains("## 風險"));
     srv.stop().await;
 }
 

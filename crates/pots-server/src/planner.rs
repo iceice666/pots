@@ -556,12 +556,17 @@ impl Planner {
             Ok(r) => r,
             Err(e) => return Ok(RunEnd::Llm(e)),
         };
-        let mut instructions = inner.profile.role_prompt().to_string();
+        let (head, tail) = {
+            let mut conn = inner.store.acquire().await?;
+            crate::user_md::compose(&mut conn, project.id).await?
+        };
+        let mut instructions = format!("{head}{}", inner.profile.role_prompt());
         instructions.push_str(&format!("\n\n這個 Goal 屬於 project「{}」。", project.name));
         if !project.instructions.trim().is_empty() {
             instructions.push_str("\n\n# Project 指示\n\n");
             instructions.push_str(project.instructions.trim());
         }
+        instructions.push_str(&tail);
         let ctx = Arc::new(ToolCtx {
             hub: inner.hub.clone(),
             store: inner.store.clone(),

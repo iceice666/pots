@@ -10,7 +10,7 @@ use chrono::TimeZone as _;
 use croner::Cron;
 use croner::parser::{CronParser, Seconds};
 use pots_proto::{
-    AutomationView, FieldMatch, GoalId, ListenerActionSpec, ListenerId, ListenerSpec,
+    ApprovalId, AutomationView, FieldMatch, GoalId, ListenerActionSpec, ListenerId, ListenerSpec,
     ListenerState, ListenerView, PauseView, ProjectId, ScheduleCreator, ScheduleId, ScheduleView,
     ServerEvent, Timestamp, TriggerRecord, TriggerStatus, TrustLevel,
 };
@@ -484,7 +484,7 @@ pub async fn finish_goal_schedules(
 pub enum ListenerDbState {
     Active,
     Disabled,
-    /// agent 提案，等你啟用。
+    /// agent 提案，等你核准（M5 之前的提案等你啟用）。
     Proposed,
     /// 超過每小時上限而暫停。
     Throttled,
@@ -510,12 +510,14 @@ impl ListenerDbState {
         })
     }
 
-    fn view(self) -> ListenerState {
-        match self {
-            Self::Active => ListenerState::Active,
-            Self::Disabled => ListenerState::Disabled,
-            Self::Proposed => ListenerState::Proposed,
-            Self::Throttled => ListenerState::Throttled,
+    /// `approval` 是等待中的核准（agent 的提案）；M5 之前的提案沒有，以「啟用」代替核准。
+    fn view(self, approval: Option<ApprovalId>) -> ListenerState {
+        match (self, approval) {
+            (Self::Active, _) => ListenerState::Active,
+            (Self::Disabled, _) => ListenerState::Disabled,
+            (Self::Proposed, Some(a)) => ListenerState::PendingApproval(a),
+            (Self::Proposed, None) => ListenerState::Proposed,
+            (Self::Throttled, _) => ListenerState::Throttled,
         }
     }
 }
@@ -532,6 +534,8 @@ pub struct ListenerRow {
     pub id: ListenerId,
     pub spec: ListenerSpec,
     pub state: ListenerDbState,
+    /// agent 提案時等的核准。
+    pub approval: Option<ApprovalId>,
     /// 最後一次修改或改狀態（重新啟用後每小時上限從這裡重新算）。
     pub updated_at: Timestamp,
 }
@@ -660,13 +664,17 @@ fn listener_from_row(row: &SqliteRow) -> Result<ListenerRow, Error> {
             budget_per_trigger_cents: budget.map(|b| b as u32),
         },
         state: ListenerDbState::parse(&state)?,
+        approval: row
+            .try_get::<Option<String>, _>("approval_id")?
+            .map(parse_id)
+            .transpose()?,
         updated_at: Timestamp(row.try_get("updated_at")?),
     })
 }
 
 macro_rules! listener_columns {
     () => {
-        "id, project_id, filter, action, budget_per_trigger, max_per_hour, state, updated_at"
+        "id, project_id, filter, action, budget_per_trigger, max_per_hour, state, approval_id, updated_at"
     };
 }
 
@@ -769,6 +777,20 @@ pub async fn set_listener_state(
     sqlx::query("UPDATE listeners SET state = ?, updated_at = ? WHERE id = ?")
         .bind(state.as_str())
         .bind(now.0)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// 記下（或清掉）agent 提案的 listener 在等哪一筆核准。
+pub async fn set_listener_approval(
+    conn: &mut SqliteConnection,
+    id: ListenerId,
+    approval: Option<ApprovalId>,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE listeners SET approval_id = ? WHERE id = ?")
+        .bind(approval.map(|a| a.to_string()))
         .bind(id.to_string())
         .execute(conn)
         .await?;
@@ -1151,7 +1173,7 @@ async fn listener_view(
         budget_per_trigger_cents: spec.budget_per_trigger_cents,
         max_per_hour: Some(spec.max_per_hour),
         triggers_this_week: week as u32,
-        state: l.state.view(),
+        state: l.state.view(l.approval),
         history: history(conn, HistoryOf::Listener(l.id)).await?,
         spec: Some(spec.clone()),
     })

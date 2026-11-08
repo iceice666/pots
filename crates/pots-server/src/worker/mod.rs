@@ -72,7 +72,8 @@ pub const MAX_ATTEMPTS: i64 = 3;
 pub const SETTING_KEY: &str = "worker";
 /// Claude Code 的提醒：一輪結束卻沒有呼叫結束工具時送一次。
 const NUDGE: &str = "你還沒有用平台工具結束這一輪。請依情況呼叫 mcp__pots__complete_task、\
-mcp__pots__fail_task、mcp__pots__escalate 或 mcp__pots__wait_for（開了 PR 的話先等 CI）。";
+mcp__pots__fail_task、mcp__pots__escalate、mcp__pots__wait_for（開了 PR 的話先等 CI）或 \
+mcp__pots__request_approval（CI 通過後申請 merge）。";
 /// Claude Code 一律禁止的原生工具：背景常駐、排程類（等待一律走平台的 wait_for）。名稱依 OpenClaw
 /// 的預設；背景執行的 Bash 由 [`claude_policy`] 擋（權限規則比對的是指令，不是 `run_in_background`）。
 const CLAUDE_DISALLOWED: &[&str] = &["ScheduleWakeup", "CronCreate", "Monitor"];
@@ -81,7 +82,8 @@ const CLAUDE_NOTE: &str = "\n\n# 在 Claude Code 裡\n\n\
 上面的規則寫給所有 worker。你在 Claude Code 裡：讀檔、改檔、執行指令與開 subagent 用 Claude Code \
 自己的工具（Read、Edit、Write、Bash、Task），規則裡的 read_file、edit_file、run、run_subagent 都換成它們。\
 平台工具的名稱前面有 `mcp__pots__`，例如 mcp__pots__open_pr、mcp__pots__wait_for、mcp__pots__complete_task、\
-mcp__pots__fail_task、mcp__pots__escalate、mcp__pots__post_to_team、mcp__pots__report_progress。\
+mcp__pots__fail_task、mcp__pots__escalate、mcp__pots__request_approval、mcp__pots__post_to_team、\
+mcp__pots__report_progress。\
 不要用背景執行（run_in_background），也不要自己排程或等待：要等 CI 或其他事件一律用 mcp__pots__wait_for。";
 /// worker 用 escalate 交回時任務原因的開頭（Planner 的決定只叫醒這種需要決定的任務）。
 pub const ESCALATED: &str = "worker 需要決定：";
@@ -1041,11 +1043,13 @@ impl Worker {
             let mut triggers = triggers;
             // 原本在等的東西被交接打斷了（訂閱會清掉）：告訴 worker。
             if let TaskState::Waiting { on, .. } = &task.state {
+                let again = if matches!(on, WaitCond::Approval { .. }) {
+                    "那筆核准已經撤回；需要的話處理完再用 request_approval 申請一次。"
+                } else {
+                    "需要的話處理完再用 wait_for 等一次。"
+                };
                 triggers.push(WorkerTrigger::Note {
-                    text: format!(
-                        "你原本在{}，被上面的訊息叫醒；需要的話處理完再用 wait_for 等一次。",
-                        on.describe()
-                    ),
+                    text: format!("你原本在{}，被上面的訊息叫醒；{again}", on.describe()),
                 });
             }
             sqlx::query(
@@ -1274,7 +1278,13 @@ impl Worker {
             Err(e) => return Ok(RunEnd::Stuck(e)),
         };
 
-        let mut instructions = inner.profiles.worker.role_prompt().to_string();
+        // USER.md 在最前面，Project Notes 接在 project 指示後面（Claude Code 一樣經 append-system-prompt
+        // 帶入：本機模式的設定目錄是你自己的，容器的設定目錄由所有任務共用，都不適合寫 CLAUDE.md）。
+        let (head, tail) = {
+            let mut conn = inner.store.acquire().await?;
+            crate::user_md::compose(&mut conn, project.id).await?
+        };
+        let mut instructions = format!("{head}{}", inner.profiles.worker.role_prompt());
         instructions.push_str(&format!(
             "\n\n這個任務屬於 project「{}」。",
             tasks::one_line(&project.name, 200)
@@ -1283,6 +1293,7 @@ impl Worker {
             instructions.push_str("\n\n# Project 指示\n\n");
             instructions.push_str(project.instructions.trim());
         }
+        instructions.push_str(&tail);
 
         let work = Arc::new(WorkCtx {
             env: env.clone(),

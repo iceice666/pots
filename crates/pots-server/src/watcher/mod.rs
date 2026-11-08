@@ -132,6 +132,8 @@ struct Fetched {
 #[derive(Default)]
 struct After {
     kick_planner: bool,
+    /// 結束了的 Goal（快速修改的任務結束）：中斷它其他正在跑的 run。
+    closed: Option<pots_proto::GoalId>,
     /// 送給對話 agent 的系統觸發：(project, 對話流裡的項目, 給 agent 的文字)。
     chat: Vec<(ProjectId, ItemId, String)>,
 }
@@ -627,7 +629,9 @@ impl Watcher {
                     && (on.is_state() || ev.occurred_at.0 >= since.0 - WAIT_SLACK_SECS)
                 {
                     let on = on.clone();
-                    wake_task(&mut txn, &t, &on, &ev.summary).await?;
+                    if ci_result(&mut txn, &t, &on, &ev).await? {
+                        after.kick_planner = true;
+                    }
                     matched.tasks.push(t.id.to_string());
                     routed.insert(project);
                 }
@@ -702,6 +706,9 @@ impl Watcher {
         txn.commit_then(|| {
             if after.kick_planner {
                 planner.kick();
+            }
+            if let Some(g) = after.closed {
+                planner.worker().close_goal(g);
             }
             // 可能有任務被喚醒或快速修改排了 worker。
             planner.worker().kick();
@@ -956,6 +963,11 @@ impl Watcher {
         let mut changed = automation::expire_pauses(txn.conn(), now).await? > 0;
         prune(txn.conn(), now).await?;
 
+        // 逾時的核准：在等它的任務轉 `NeedsHuman`（不是「逾時」喚醒）。
+        let ends = crate::approvals::expire_due(&mut txn, now).await?;
+        after.kick_planner |= ends.planner;
+        after.closed = after.closed.or(ends.closed);
+
         // 等待中的任務：時間、子任務與逾時。
         let waiting: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM tasks WHERE state LIKE '{\"state\":\"Waiting\"%' ORDER BY created_at",
@@ -969,6 +981,10 @@ impl Watcher {
             let TaskState::Waiting { on, deadline } = t.state.clone() else {
                 continue;
             };
+            // 等核准的由上面的 `expire_due` 處理。
+            if matches!(on, WaitCond::Approval { .. }) {
+                continue;
+            }
             let result = match &on {
                 WaitCond::At { at } if at.0 <= now.0 => Some("時間到了".to_string()),
                 WaitCond::Subtasks { tasks: ids } => {
@@ -1069,6 +1085,73 @@ impl Watcher {
             automation::push(&mut txn, now).await?;
         }
         self.finish(txn, after).await
+    }
+}
+
+/// 一次 CI 失敗最多自動修幾次：連續失敗到第這一次就轉 `NeedsHuman`。
+pub const MAX_CI_FAILURES: u32 = 3;
+
+/// 事件滿足了任務的等待。CI 失敗時叫醒 worker 自己修（帶著第幾次），連續失敗到
+/// [`MAX_CI_FAILURES`] 次時任務轉 `NeedsHuman`；CI 通過時歸零。回傳要不要叫醒 Planner。
+async fn ci_result(
+    txn: &mut LogTxn<'_>,
+    task: &TaskRow,
+    on: &WaitCond,
+    ev: &ExternalEvent,
+) -> Result<bool, Error> {
+    // 只有 worker 等 CI（`ci_finished`）才算自動修；用 `resource` 等到 CI 事件的照常喚醒。
+    let (WaitCond::CiFinished { .. }, event::EventKind::CiFinished { conclusion, .. }) =
+        (on, &ev.kind)
+    else {
+        wake_task(txn, task, on, &ev.summary).await?;
+        return Ok(false);
+    };
+    if conclusion == "success" {
+        tasks::reset_ci_failures(txn.conn(), task.id).await?;
+        wake_task(
+            txn,
+            task,
+            on,
+            &format!(
+                "{}。沒有其他要改的話，用 request_approval 申請 merge",
+                ev.summary
+            ),
+        )
+        .await?;
+        return Ok(false);
+    }
+    let n = tasks::bump_ci_failures(txn.conn(), task.id).await?;
+    let link = ev
+        .links
+        .first()
+        .map(|l| format!("（{l}）"))
+        .unwrap_or_default();
+    if n >= MAX_CI_FAILURES {
+        crate::worker::end_task(
+            txn,
+            task,
+            crate::worker::TaskEnd::NeedsHuman(format!(
+                "CI 連續失敗 {n} 次，自動修復停止：{}{link}",
+                ev.summary
+            )),
+            &Principal::System,
+            None,
+        )
+        .await
+        .map(|e| e.planner)
+    } else {
+        wake_task(
+            txn,
+            task,
+            on,
+            &format!(
+                "{}{link}。這是第 {n} 次 CI 失敗（連續 {MAX_CI_FAILURES} 次就交給使用者）：找出原因（在工作目錄跑測試）、修好、commit，\
+                 再 open_pr 與 wait_for 等 CI",
+                ev.summary
+            ),
+        )
+        .await?;
+        Ok(false)
     }
 }
 

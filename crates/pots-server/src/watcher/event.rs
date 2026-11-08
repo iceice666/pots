@@ -234,7 +234,7 @@ pub fn commit_key(repo: &str, sha: &str) -> String {
     format!("commit:{repo}@{}", sha.to_ascii_lowercase())
 }
 
-/// 任務在等什麼（`proposal/architecture.md#型別`）。核准（`Approval`）在 M5 加上。
+/// 任務在等什麼（`proposal/architecture.md#型別`）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WaitCond {
@@ -263,6 +263,12 @@ pub enum WaitCond {
     /// 單次喚醒。
     At {
         at: Timestamp,
+    },
+    /// 等你核准（`request_approval`）。不是模型能用 `wait_for` 等的條件；決定、逾時都由
+    /// `crate::approvals` 處理。`what` 是顯示用的說明，例如「merge PR #42」。
+    Approval {
+        id: pots_proto::ApprovalId,
+        what: String,
     },
 }
 
@@ -301,7 +307,7 @@ impl WaitCond {
                 }
                 Self::Subtasks { tasks }
             }
-            c @ Self::At { .. } => c,
+            c @ (Self::At { .. } | Self::Approval { .. }) => c,
         })
     }
 
@@ -317,7 +323,7 @@ impl WaitCond {
                 let end = rest.find(['#', '@']).unwrap_or(rest.len());
                 Some(rest[..end].to_string())
             }
-            Self::Subtasks { .. } | Self::At { .. } => None,
+            Self::Subtasks { .. } | Self::At { .. } | Self::Approval { .. } => None,
         }
     }
 
@@ -334,7 +340,7 @@ impl WaitCond {
                 Some(format!("change:{change}"))
             }
             Self::Resource { key, .. } => Some(key.clone()),
-            Self::Subtasks { .. } | Self::At { .. } => None,
+            Self::Subtasks { .. } | Self::At { .. } | Self::Approval { .. } => None,
         }
     }
 
@@ -350,6 +356,7 @@ impl WaitCond {
             Self::Resource { key, kinds } => format!("等事件：{key}（{}）", kinds.join("、")),
             Self::Subtasks { tasks } => format!("等 {} 個子任務結束", tasks.len()),
             Self::At { at } => format!("等到 {}", crate::runs::format_utc(*at)),
+            Self::Approval { what, .. } => format!("等你核准：{what}"),
         }
     }
 }

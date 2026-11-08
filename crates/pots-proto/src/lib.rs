@@ -21,7 +21,9 @@ use uuid::Uuid;
 ///   project 的 repo、listener 與排程的指令、`Card::Triggered`、快照帶自動化與 GitHub 設定）。
 /// - 6：coding worker（`Worker`、`SaveWorkerSettings`、`RetryTask`、`TaskView` 的 PR 與進度、
 ///   `TeamPost::to`、`GoalView::quick`、快照帶 worker 設定）。
-pub const PROTOCOL_VERSION: u32 = 6;
+/// - 7：核准與通知（`ApprovalChanged` 取代 `Inbox`、`Decide` 生效、`Notifications`、`UserMd`、
+///   `ProjectMergeMethod` 與對應的指令，快照帶核准、通知設定、USER.md 與 project 的 merge 方式）。
+pub const PROTOCOL_VERSION: u32 = 7;
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -167,6 +169,12 @@ pub struct InstanceView {
     /// worker 設定（設定的「Worker」類別）。
     #[serde(default)]
     pub worker: WorkerSettingsView,
+    /// 桌面通知與靜音時段（設定的「通知」類別）。
+    #[serde(default)]
+    pub notifications: NotificationSettings,
+    /// 跨 project 的使用者偏好（設定的「USER.md」類別）。
+    #[serde(default)]
+    pub user_md: UserMdView,
     /// 模型 provider 設定與使用中的 provider。
     pub providers: ProvidersView,
     /// 內建 ChatGPT provider 的登入狀態。
@@ -268,6 +276,9 @@ pub struct ProjectView {
     /// 監看的 repo，例如 `github.com/owner/repo`。
     #[serde(default)]
     pub repos: Vec<String>,
+    /// 平台 merge PR 時預設的方式（agent 申請時可以另外指定）。
+    #[serde(default)]
+    pub merge_method: MergeMethod,
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,6 +1136,12 @@ pub struct InboxItem {
     /// 核准卡片在對話中的有效期限說明，例如「72 小時內有效」。
     pub expiry: Option<String>,
     pub decision: Decision,
+    /// 「需要你處理」的任務（重試、取消用）。
+    #[serde(default)]
+    pub task: Option<TaskId>,
+    /// 服務的核准（live 模式）；假資料沒有。
+    #[serde(default)]
+    pub approval: Option<ApprovalView>,
 }
 
 impl InboxItem {
@@ -1132,6 +1149,205 @@ impl InboxItem {
         self.decision == Decision::Pending
     }
 }
+
+/// 平台 merge PR 的方式（GitHub 的 `merge_method`）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    Merge,
+    #[default]
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub const ALL: [Self; 3] = [Self::Squash, Self::Merge, Self::Rebase];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "merge commit",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.as_str() == s)
+    }
+}
+
+/// 一筆核准現在怎樣了。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalState {
+    /// 等你決定。
+    Pending,
+    /// 你核准了，平台正在執行（例如正在 merge）。
+    Executing,
+    /// 已核准並執行完成。
+    Executed,
+    Rejected,
+    /// 逾時沒有決定。
+    Expired,
+    /// 核准了，但執行失敗（`ApprovalView::result` 是原因）。
+    Failed,
+    /// 不再需要：任務被取消、listener 被刪掉等。
+    Cancelled,
+}
+
+impl ApprovalState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "等你核准",
+            Self::Executing => "已核准 · 執行中",
+            Self::Executed => "已核准",
+            Self::Rejected => "已拒絕",
+            Self::Expired => "已逾時",
+            Self::Failed => "執行失敗",
+            Self::Cancelled => "已撤回",
+        }
+    }
+}
+
+/// 要核准的具體動作（顯示用）。平台只執行 `action_hash` 和核准時一致的動作。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalActionView {
+    MergePr {
+        /// `github.com/owner/repo#42`
+        pr: String,
+        url: Option<String>,
+        /// 核准的 head commit；PR 之後有新的 commit 就不會 merge。
+        sha: String,
+        method: MergeMethod,
+        branch: String,
+        base: String,
+    },
+    DeleteBranch {
+        repo: String,
+        branch: String,
+    },
+    CreateListener {
+        listener: ListenerId,
+        /// 例如「issue 加上 label（label：agent）→ 開 Goal」。
+        summary: String,
+    },
+    EditUserMd {
+        base_rev: u32,
+        /// 和提案時的內容比較的 unified diff。
+        diff: String,
+    },
+    EditProjectNotes {
+        /// 還沒有 Project Notes 時是 `None`（核准後建立）。
+        artifact: Option<ArtifactId>,
+        base_rev: u32,
+        diff: String,
+    },
+}
+
+/// 一筆核准（`proposal/approvals-and-notifications.md`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalView {
+    pub id: ApprovalId,
+    pub project: ProjectId,
+    pub goal: Option<GoalId>,
+    /// 等這筆核准的任務（merge PR）。
+    pub task: Option<TaskId>,
+    /// 例如「merge PR #42：Add hello」。
+    pub title: String,
+    /// agent 給的理由。
+    pub reason: String,
+    /// 誰申請的，例如「worker · 內建」「Planner」「對話 agent」。
+    pub requested_by: String,
+    pub action: ApprovalActionView,
+    /// 動作內容的 SHA-256（前 12 碼）。
+    pub action_hash: String,
+    pub state: ApprovalState,
+    /// 你決定時附的理由。
+    pub note: Option<String>,
+    /// 執行結果或失敗原因。
+    pub result: Option<String>,
+    /// 這筆核准要不要推播（merge 後自動開的「刪除分支」不推）。
+    pub notify: bool,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub decided_at: Option<Timestamp>,
+}
+
+impl ApprovalView {
+    pub fn is_pending(&self) -> bool {
+        self.state == ApprovalState::Pending
+    }
+}
+
+/// 桌面通知（設定的「通知」類別）。存在實例裡，由客戶端發出。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationSettings {
+    pub enabled: bool,
+    /// 靜音時段：期間不彈通知，結束時合併成一則。
+    pub quiet: bool,
+    /// 本機時間 `HH:MM`；開始比結束晚表示跨午夜。
+    pub quiet_start: String,
+    pub quiet_end: String,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            quiet: false,
+            quiet_start: "22:00".into(),
+            quiet_end: "08:00".into(),
+        }
+    }
+}
+
+/// `HH:MM` → 一天裡的第幾分鐘。
+pub fn parse_hh_mm(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    if h.is_empty() || h.len() > 2 || m.len() != 2 {
+        return None;
+    }
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+impl NotificationSettings {
+    /// 一天裡的第 `minute` 分鐘是不是靜音時段（開始含、結束不含）。
+    pub fn is_quiet_at(&self, minute: u32) -> bool {
+        if !self.quiet {
+            return false;
+        }
+        let (Some(start), Some(end)) =
+            (parse_hh_mm(&self.quiet_start), parse_hh_mm(&self.quiet_end))
+        else {
+            return false;
+        };
+        match start.cmp(&end) {
+            std::cmp::Ordering::Equal => false,
+            std::cmp::Ordering::Less => (start..end).contains(&minute),
+            std::cmp::Ordering::Greater => minute >= start || minute < end,
+        }
+    }
+}
+
+/// 跨 project 的使用者偏好（`proposal/memory.md#usermd跨-project-的使用者偏好`）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMdView {
+    /// 還沒有內容時是 0。
+    pub rev: u32,
+    pub body: String,
+}
+
+/// USER.md 最多幾個字；超過 [`USER_MD_HINT_CHARS`] 時在畫面上提示整理。
+pub const MAX_USER_MD_CHARS: usize = 20_000;
+pub const USER_MD_HINT_CHARS: usize = 4_000;
 
 // ---------------------------------------------------------------------------
 // 總管
@@ -1204,6 +1420,13 @@ pub struct InstanceSnapshot {
     pub github: GithubView,
     #[serde(default)]
     pub worker: WorkerSettingsView,
+    /// 等你決定的核准，加上最近決定過的（新的在後）。
+    #[serde(default)]
+    pub approvals: Vec<ApprovalView>,
+    #[serde(default)]
+    pub notifications: NotificationSettings,
+    #[serde(default)]
+    pub user_md: UserMdView,
 }
 
 // ---------------------------------------------------------------------------
@@ -1409,6 +1632,8 @@ pub struct ProjectSnapshot {
     /// 監看的 repo，例如 `github.com/owner/repo`。
     #[serde(default)]
     pub repos: Vec<String>,
+    #[serde(default)]
+    pub merge_method: MergeMethod,
 }
 
 /// 模型 provider（ChatGPT Plan，經 SIWC 授權）的狀態。不含任何 token；`Debug` 不印出
@@ -1452,7 +1677,7 @@ impl std::fmt::Debug for ModelAuthView {
 pub enum ServerEvent {
     Snapshot {
         seq: u64,
-        instance: InstanceSnapshot,
+        instance: Box<InstanceSnapshot>,
     },
     ProjectAdded {
         seq: u64,
@@ -1496,9 +1721,26 @@ pub enum ServerEvent {
         seq: u64,
         task: TaskView,
     },
-    Inbox {
+    /// 核准新增或有變（決定、執行結果、逾時、撤回），整筆替換。
+    ApprovalChanged {
         seq: u64,
-        pending: u32,
+        approval: Box<ApprovalView>,
+    },
+    /// 通知設定有變。
+    Notifications {
+        seq: u64,
+        settings: NotificationSettings,
+    },
+    /// USER.md 有變（你的編輯或核准了 agent 的提案）。
+    UserMd {
+        seq: u64,
+        user_md: UserMdView,
+    },
+    /// project 的預設 merge 方式有變。
+    ProjectMergeMethod {
+        seq: u64,
+        project: ProjectId,
+        method: MergeMethod,
     },
     ModelAuth {
         seq: u64,
@@ -1585,7 +1827,10 @@ impl ServerEvent {
             | Self::ItemDone { seq, .. }
             | Self::AgentState { seq, .. }
             | Self::TaskChanged { seq, .. }
-            | Self::Inbox { seq, .. }
+            | Self::ApprovalChanged { seq, .. }
+            | Self::Notifications { seq, .. }
+            | Self::UserMd { seq, .. }
+            | Self::ProjectMergeMethod { seq, .. }
             | Self::ModelAuth { seq, .. }
             | Self::Providers { seq, .. }
             | Self::Memory { seq, .. }
@@ -1627,6 +1872,8 @@ pub enum ClientCommand {
     Stop {
         project: ProjectId,
     },
+    /// 核准或拒絕（可以附一句理由，拒絕的理由會帶給 agent）。伺服器回 `ApprovalChanged`；
+    /// 已經決定過、逾時時回 `Error`。
     Decide {
         approval: ApprovalId,
         approve: bool,
@@ -1758,6 +2005,21 @@ pub enum ClientCommand {
     SaveWorkerSettings {
         draft: WorkerSettingsDraft,
     },
+    /// 儲存通知設定；伺服器回 `Notifications`。
+    SaveNotifications {
+        settings: NotificationSettings,
+    },
+    /// 儲存 USER.md。`base_rev` 是開始編輯時的版本；期間被改過（例如核准了 agent 的提案）時
+    /// 回 `Error`。成功時回 `UserMd`。
+    SaveUserMd {
+        base_rev: u32,
+        body: String,
+    },
+    /// 設定 project 的預設 merge 方式；伺服器回 `ProjectMergeMethod`。
+    SetMergeMethod {
+        project: ProjectId,
+        method: MergeMethod,
+    },
 }
 
 #[cfg(test)]
@@ -1787,6 +2049,29 @@ mod tests {
         );
         assert_eq!(section_heading("## 範圍\n\n- 一"), Some("範圍".into()));
         assert_eq!(section_heading("# 標題"), None);
+    }
+
+    #[test]
+    fn quiet_hours() {
+        assert_eq!(parse_hh_mm("08:05"), Some(485));
+        assert_eq!(parse_hh_mm("8:05"), Some(485));
+        for bad in ["24:00", "12:60", "1200", "12:5", "", "a:bc"] {
+            assert_eq!(parse_hh_mm(bad), None, "{bad}");
+        }
+        let mut s = NotificationSettings::default();
+        assert!(!s.is_quiet_at(23 * 60), "預設沒開");
+        s.quiet = true;
+        // 22:00–08:00 跨午夜。
+        assert!(s.is_quiet_at(22 * 60));
+        assert!(s.is_quiet_at(3 * 60));
+        assert!(!s.is_quiet_at(8 * 60));
+        assert!(!s.is_quiet_at(12 * 60));
+        s.quiet_start = "13:00".into();
+        s.quiet_end = "14:00".into();
+        assert!(s.is_quiet_at(13 * 60 + 30));
+        assert!(!s.is_quiet_at(14 * 60));
+        s.quiet_end = "13:00".into();
+        assert!(!s.is_quiet_at(13 * 60), "開始等於結束視為沒有靜音");
     }
 
     #[test]

@@ -1143,9 +1143,9 @@ async fn listeners_open_goals_and_throttle() {
     srv.stop().await;
 }
 
-/// 對話 agent 提案的 listener 要等你啟用才生效；main 的 CI 失敗時通知對話。
+/// 對話 agent 提案的 listener 要等你核准才生效（M5 之前是「啟用」）；main 的 CI 失敗時通知對話。
 #[tokio::test]
-async fn proposed_listener_needs_enabling() {
+async fn proposed_listener_needs_approval() {
     let tmp = tempfile::tempdir().unwrap();
     let gh = FakeGithub::start().await;
     let clock = ManualClock::new(Timestamp::now());
@@ -1173,8 +1173,9 @@ async fn proposed_listener_needs_enabling() {
         })
         .expect("提案時記一筆 Automation");
     assert_eq!(a.listeners.len(), 1);
-    assert_eq!(a.listeners[0].state, ListenerState::Proposed);
-    let id = a.listeners[0].id;
+    let ListenerState::PendingApproval(approval) = a.listeners[0].state else {
+        panic!("{:?}", a.listeners[0].state)
+    };
 
     // 還沒啟用：main 的 CI 不會被輪詢。
     gh.set_suites(
@@ -1185,8 +1186,12 @@ async fn proposed_listener_needs_enabling() {
     wait_for(|| gh.calls("events me/app") >= polls + 2).await;
     assert_eq!(gh.calls("suites me/app@main"), 0);
 
-    c.send(&ClientCommand::SetListenerEnabled { id, enabled: true })
-        .await;
+    c.send(&ClientCommand::Decide {
+        approval,
+        approve: true,
+        note: None,
+    })
+    .await;
     until_automation(&mut c, |a| a.listeners[0].state == ListenerState::Active).await;
     // 第一次看到 main 只記下目前的 sha，不把舊的結果當新事件。
     wait_for(|| gh.calls("suites me/app@main") >= 2).await;

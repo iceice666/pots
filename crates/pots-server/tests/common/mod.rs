@@ -257,21 +257,28 @@ impl Client {
 
     pub async fn snapshot(&mut self) -> (u64, pots_proto::InstanceSnapshot) {
         match self.next().await {
-            ServerEvent::Snapshot { seq, instance } => (seq, instance),
+            ServerEvent::Snapshot { seq, instance } => (seq, *instance),
             other => panic!("預期 Snapshot，收到 {other:?}"),
         }
     }
 
+    /// 建立 project，收到 `ProjectAdded` 與同一筆寫入的 Project Notes（`ArtifactChanged`）為止。
     pub async fn create_project(&mut self, name: &str) -> ProjectId {
         self.send(&ClientCommand::CreateProject { name: name.into() })
             .await;
         let evs = self
             .until(|e| matches!(e, ServerEvent::ProjectAdded { .. }))
             .await;
-        match evs.last() {
+        let id = match evs.last() {
             Some(ServerEvent::ProjectAdded { project, .. }) => project.id,
             _ => unreachable!(),
-        }
+        };
+        self.until(|e| {
+            matches!(e, ServerEvent::ArtifactChanged { project, artifact, .. }
+            if *project == id && artifact.kind == pots_proto::ArtifactKind::ProjectNotes)
+        })
+        .await;
+        id
     }
 
     pub async fn say(&mut self, project: ProjectId, text: &str, mode: SendMode) -> ItemId {

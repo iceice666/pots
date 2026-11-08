@@ -618,12 +618,19 @@ async fn drive_loop(
     let history = close_dangling_calls(history);
 
     let profile = &inner.profile;
-    let mut instructions = profile.role_prompt().to_string();
+    let (head, tail) = {
+        let mut conn = inner.store.acquire().await.map_err(RunError::Server)?;
+        crate::user_md::compose(&mut conn, project.id)
+            .await
+            .map_err(RunError::Server)?
+    };
+    let mut instructions = format!("{head}{}", profile.role_prompt());
     instructions.push_str(&format!("\n\n這個 project 叫「{}」。", project.name));
     if !project.instructions.trim().is_empty() {
         instructions.push_str("\n\n# Project 指示\n\n");
         instructions.push_str(project.instructions.trim());
     }
+    instructions.push_str(&tail);
     let goals = goal_overview(inner, project.id)
         .await
         .map_err(RunError::Server)?;
@@ -835,6 +842,16 @@ async fn goal_overview(inner: &Inner, project: ProjectId) -> Result<String, Erro
         }
         out.push_str("# Planner 最近的里程碑（新的在前；使用者在對話流裡也看得到）\n\n");
         out.push_str(&milestones.join("\n"));
+        out.push('\n');
+    }
+    // 核准卡片不進記憶，只以一句結果讓對話 agent 知道（proposal/memory.md）。
+    let approvals = crate::approvals::recent_outcomes(&mut tx, project, 5).await?;
+    if !approvals.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("# 最近的核准（新的在前；使用者在對話流與 Inbox 決定）\n\n");
+        out.push_str(&approvals.join("\n"));
         out.push('\n');
     }
     Ok(out)

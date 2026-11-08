@@ -496,7 +496,7 @@ impl Tool for PlatformTool {
             Kind::Granted(ToolName::CreateListener) => (
                 "create_listener",
                 "提案一個 listener：符合條件的外部事件（例如 issue 加上 agent label、main 的 CI 失敗）自動開 Goal 或通知對話。\
-                提案要等使用者在自動化頁啟用後才生效。可能來自任何人的事件（issue 開啟、留言、review）要自動開工，\
+                使用者會看到一張核准卡片，核准後才生效。可能來自任何人的事件（issue 開啟、留言、review）要自動開工，\
                 必須加上白名單條件（label 或 author）。",
                 object(
                     json!({
@@ -549,6 +549,50 @@ impl Tool for PlatformTool {
                     &["summary"],
                 ),
             ),
+            Kind::Granted(ToolName::RequestApproval) => (
+                "request_approval",
+                match self.ctx.scope {
+                    Scope::Task { .. } => {
+                        "CI 通過後申請 merge 你的任務的 PR：使用者在核准卡片決定，核准後由平台 merge（只 merge \
+                        現在的 head；之後再 push 就要重新申請），任務自動完成；拒絕時你會被叫醒並看到理由。\
+                        呼叫成功後這一輪就結束。"
+                    }
+                    _ => {
+                        "替你負責的 Goal 裡已經結束或需要決定、有 PR 的任務申請 merge：使用者在核准卡片決定，\
+                        核准後由平台 merge，任務標成完成；拒絕時那個任務的 worker 會被叫醒並看到理由。"
+                    }
+                },
+                object(
+                    json!({
+                        "action": {"type": "string", "enum": ["merge_pr"], "description": "要核准的動作；目前只有 merge_pr"},
+                        "task_id": {"type": "string", "description": "要 merge 的任務；worker 不用給（就是自己的任務）"},
+                        "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "不給就用 project 的設定（預設 squash）"},
+                        "reason": {"type": "string", "description": "給使用者看的說明：改了什麼、怎麼驗證的"},
+                    }),
+                    match self.ctx.scope {
+                        Scope::Task { .. } => &["action", "reason"][..],
+                        _ => &["action", "task_id", "reason"][..],
+                    },
+                ),
+            ),
+            Kind::Granted(ToolName::ProposeUserMdEdit) => (
+                "propose_user_md_edit",
+                "提案修改 USER.md（跨 project 的使用者偏好：commit 風格、語言、程式碼習慣、溝通方式）。\
+                使用者會看到一張 diff 卡片，核准後才寫入。edits 以 `## ` 區段為單位套用在目前的 USER.md 上。",
+                object(
+                    json!({"edits": edits_schema(), "reason": {"type": "string", "description": "為什麼值得記住"}}),
+                    &["edits", "reason"],
+                ),
+            ),
+            Kind::Granted(ToolName::ProposeProjectNote) => (
+                "propose_project_note",
+                "提案修改這個 project 的 Project Notes（跨 Goal 的專案知識：怎麼跑測試、踩過的坑、慣例）。\
+                使用者會看到一張 diff 卡片，核准後才寫入。edits 以 `## ` 區段為單位套用在目前的 Project Notes 上。",
+                object(
+                    json!({"edits": edits_schema(), "reason": {"type": "string", "description": "為什麼值得記住"}}),
+                    &["edits", "reason"],
+                ),
+            ),
             Kind::Granted(t) => unreachable!("{} 由 worker::tools 提供", t.as_str()),
         };
         ToolSpec {
@@ -596,9 +640,50 @@ impl PlatformTool {
             }
             Kind::Granted(ToolName::PauseAutomations) => self.pause(parse(arguments)?).await,
             Kind::Granted(ToolName::ResumeAutomations) => self.resume(parse(arguments)?).await,
+            Kind::Granted(ToolName::RequestApproval) => {
+                let args: RequestApprovalArgs = parse(arguments)?;
+                if args.action != "merge_pr" {
+                    return Err(bad("action 目前只能是 merge_pr"));
+                }
+                crate::approvals::request_merge(
+                    &self.ctx,
+                    args.task_id.as_deref(),
+                    args.method.as_deref(),
+                    &args.reason,
+                )
+                .await
+            }
+            Kind::Granted(t @ (ToolName::ProposeUserMdEdit | ToolName::ProposeProjectNote)) => {
+                let args: ProposeArgs = parse(arguments)?;
+                crate::approvals::propose_edit(
+                    &self.ctx,
+                    t == ToolName::ProposeUserMdEdit,
+                    &args.edits,
+                    &args.reason,
+                )
+                .await
+            }
             Kind::Granted(t) => Err(bad(format!("{} 由 worker::tools 提供", t.as_str()))),
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestApprovalArgs {
+    action: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposeArgs {
+    edits: Vec<Edit>,
+    reason: String,
 }
 
 #[derive(Deserialize)]
@@ -1781,7 +1866,10 @@ impl PlatformTool {
         })
         .map_err(bad)?;
         let now = ctx.clock.now();
-        let result: Result<Result<pots_proto::ListenerId, String>, Error> = async {
+        let result: Result<
+            Result<(pots_proto::ListenerId, pots_proto::ApprovalId), String>,
+            Error,
+        > = async {
             let mut txn = ctx.hub.begin().await?;
             let id = match automation::save_listener(
                 txn.conn(),
@@ -1796,23 +1884,23 @@ impl PlatformTool {
                 Ok(id) => id,
                 Err(e) => return Ok(Err(e)),
             };
+            let approval =
+                crate::approvals::propose_listener(&mut txn, ctx, id, &spec, now).await?;
             automation::push(&mut txn, now).await?;
             txn.commit().await?;
-            Ok(Ok(id))
+            Ok(Ok((id, approval)))
         }
         .await;
-        let id = result.map_err(internal)?.map_err(bad)?;
-        ctx.cards.lock().unwrap().push(notice(
-            "提案新的 listener",
-            format!(
-                "{}。到自動化頁啟用後才會生效。",
-                automation::listener_title(&spec)
-            ),
-        ));
+        let (id, approval) = result.map_err(internal)?.map_err(bad)?;
+        ctx.cards
+            .lock()
+            .unwrap()
+            .push(Card::Approval { id: approval });
         Ok(json!({
             "listener_id": id.to_string(),
-            "state": "proposed",
-            "note": "已提案，等使用者在自動化頁啟用後生效。",
+            "approval_id": approval.to_string(),
+            "state": "pending_approval",
+            "note": "已提案，使用者會看到一張核准卡片，核准後才生效。",
         })
         .to_string())
     }

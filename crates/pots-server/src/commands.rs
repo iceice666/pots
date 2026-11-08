@@ -83,7 +83,11 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             app.runs.stop(project);
             Ok(())
         }
-        ClientCommand::Decide { .. } => Err("尚未支援".into()),
+        ClientCommand::Decide {
+            approval,
+            approve,
+            note,
+        } => crate::approvals::decide(app, approval, approve, note).await,
         ClientCommand::Cancel { task } => cancel_task(app, task).await,
         ClientCommand::RetryTask { task } => retry_task(app, task).await,
         ClientCommand::SaveArtifact {
@@ -147,7 +151,13 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
                     let Some(l) = automation::listener(conn, id).await? else {
                         return Ok(Err("找不到這個 listener".to_string()));
                     };
-                    // 啟用 agent 提案的 listener 就是核准它（M5 之前）。
+                    // agent 的提案在等核准：在核准卡片決定（停用就是撤回提案）。M5 之前的提案沒有
+                    // 核准，啟用就是核准它。
+                    if enabled && l.state == ListenerDbState::Proposed && l.approval.is_some() {
+                        return Ok(Err(
+                            "這個 listener 在等你核准：請在 Inbox 或核准卡片決定".to_string()
+                        ));
+                    }
                     let state = if enabled {
                         ListenerDbState::Active
                     } else {
@@ -237,6 +247,48 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             .await
         }
         ClientCommand::SaveWorkerSettings { draft } => save_worker_settings(app, draft).await,
+        ClientCommand::SaveNotifications { settings } => {
+            let settings = crate::notifications::check(&settings)?;
+            let result: Result<(), crate::Error> = async {
+                let mut txn = app.hub.begin().await?;
+                crate::notifications::save(&mut txn, &settings).await?;
+                txn.commit().await
+            }
+            .await;
+            result.map_err(internal)
+        }
+        ClientCommand::SaveUserMd { base_rev, body } => {
+            let result: Result<Result<(), String>, crate::Error> = async {
+                let mut txn = app.hub.begin().await?;
+                match crate::user_md::save(&mut txn, base_rev, &body, &Principal::Human).await? {
+                    Ok(_) => {
+                        txn.commit().await?;
+                        Ok(Ok(()))
+                    }
+                    Err(e) => Ok(Err(e)),
+                }
+            }
+            .await;
+            result.map_err(internal)?
+        }
+        ClientCommand::SetMergeMethod { project, method } => {
+            if !owns(app, project).await.map_err(internal)? {
+                return Err("找不到這個 project".into());
+            }
+            let result: Result<(), crate::Error> = async {
+                let mut txn = app.hub.begin().await?;
+                crate::approvals::set_project_merge_method(txn.conn(), project, method).await?;
+                txn.push(|seq| ServerEvent::ProjectMergeMethod {
+                    seq,
+                    project,
+                    method,
+                })
+                .await?;
+                txn.commit().await
+            }
+            .await;
+            result.map_err(internal)
+        }
         ClientCommand::ResumeAutomations { project } => {
             automation_edit(app, |conn, _| {
                 Box::pin(async move {
@@ -268,6 +320,10 @@ async fn automation_edit(
         Ok(()) => {}
         Err(e) => return Err(e),
     }
+    // 被刪掉、被你直接改掉或停用的提案：它的核准撤回。
+    crate::approvals::sync_listeners(&mut txn)
+        .await
+        .map_err(internal)?;
     automation::push(&mut txn, now).await.map_err(internal)?;
     txn.commit().await.map_err(internal)?;
     app.watcher.sweep_now();
@@ -404,9 +460,11 @@ async fn create_project(app: &App, name: String) -> Result<(), String> {
             goals: Vec::new(),
             artifacts: Vec::new(),
             repos: Vec::new(),
+            merge_method: Default::default(),
         };
         txn.push(|seq| ServerEvent::ProjectAdded { seq, project })
             .await?;
+        crate::user_md::ensure_project_notes(&mut txn, row.id).await?;
         txn.commit().await
     }
     .await;
@@ -595,14 +653,19 @@ async fn retry_task(app: &App, id: TaskId) -> Result<(), String> {
             },
         )
         .await?;
+        // 帶上之前停在哪裡（例如核准逾時：重新申請就好，不用重做）。
+        let was = match &task.state {
+            TaskState::NeedsHuman { reason } | TaskState::Failed { error: reason } => {
+                format!("使用者要求重試；之前停在：{}", tasks::one_line(reason, 500))
+            }
+            _ => "使用者要求重試".into(),
+        };
         crate::worker::enqueue(
             txn.conn(),
             goal.project,
             goal.id,
             task.id,
-            &crate::worker::WorkerTrigger::Retry {
-                reason: "使用者要求重試".into(),
-            },
+            &crate::worker::WorkerTrigger::Retry { reason: was },
         )
         .await?;
         tasks::push_goal(&mut txn, goal.id).await?;

@@ -153,14 +153,16 @@ async fn resume_zero_gets_snapshot() {
     assert!(matches!(raw.next().await, ServerEvent::Error { .. }));
     assert!(raw.try_next(Duration::from_secs(2)).await.is_none());
 
-    // 不支援與無法解析的指令回 Error。
+    // 找不到的核准與無法解析的指令回 Error。
     c.send(&ClientCommand::Decide {
         approval: pots_proto::ApprovalId::new(),
         approve: true,
         note: None,
     })
     .await;
-    assert!(matches!(c.next().await, ServerEvent::Error { message } if message == "尚未支援"));
+    assert!(
+        matches!(c.next().await, ServerEvent::Error { message } if message == "找不到這筆核准")
+    );
     c.send_raw("not json").await;
     assert!(matches!(c.next().await, ServerEvent::Error { .. }));
     srv.stop().await;

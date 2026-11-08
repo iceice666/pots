@@ -5,7 +5,7 @@ name = "chat"
 memory = "om"
 max_turns = 8
 # 唯讀基礎集（get_status、list_goals、read_artifact）一律都有，這裡只列額外授權的工具。
-tools = ["create_goal", "steer_goal", "cancel_goal", "quick_fix", "write_artifact", "schedule", "create_listener", "run_subagent"]
+tools = ["create_goal", "steer_goal", "cancel_goal", "quick_fix", "write_artifact", "schedule", "create_listener", "run_subagent", "propose_user_md_edit", "propose_project_note"]
 # write_artifact 可以寫的種類。
 artifact_kinds = ["Spec"]
 role_prompt = """
@@ -26,5 +26,10 @@ role_prompt = """
 
 使用者要你之後提醒或定期做某件事時，用 schedule 設排程（時間到了你會在這個對話裡被叫醒）。\
 使用者希望外部事件（例如 issue 加上 label、CI 失敗）自動開工或通知時，用 create_listener 提案，\
-提案要等使用者在自動化頁啟用才生效。以「系統通知」或「排程觸發」開頭的訊息不是使用者說的話。\
+提案要等使用者核准才生效。以「系統通知」或「排程觸發」開頭的訊息不是使用者說的話。
+
+發現值得長期記住的使用者偏好（commit 風格、語言、溝通方式，跨 project 都適用）時，用 propose_user_md_edit \
+提案修改 USER.md；這個 project 的長期知識（怎麼跑測試、踩過的坑、慣例）用 propose_project_note 提案修改 \
+Project Notes。兩者都要使用者核准才寫入，內容已經在你的指示裡；只提案真正有長期價值的，不要重複。\
+merge PR、刪分支這類動作由 worker 申請、使用者核准後平台執行，你不能自己做。\
 """

@@ -40,7 +40,7 @@ cargo run -p pots-server -- [--data-dir <路徑>] [--port <port>]
 - **路由**（`src/watcher/mod.rs`）：先喚醒訂閱這個資源、處於 `Waiting` 的任務，再送給訂閱它的 Goal（listener 開的 Goal：同一個資源回到同一個 Goal），都沒有才比對 listener；全部沒對上只留在 `external_events`。
 - **等待**：`wait_for` 把任務改成 `Waiting { on, deadline }` 並寫入訂閱；事件來了、`At` 的時間到了、`Subtasks` 都結束了或逾時，任務回到 `Planned`，並排一個 `worker` 的 `agent_runs`。每一輪輪詢都查一次等待中資源的現況，所以重啟或漏掉事件時也會補上。worker 的 profile 有 `wait_for`（只能等 project 監看的 repo）；Planner 的覆寫 profile 可以加上。
 - **排程**（`src/automation.rs`）：對話 agent 與 Planner 用 `schedule` 設單次或週期（五個欄位的 cron，本機時區）喚醒：週期最短 10 分鐘、每個 project 最多 10 個、預設 30 天過期。sweeper 每分鐘觸發到期的排程；錯過幾次都只補一次。全域排程（總管）在 M6 之前觸發時只記一筆失敗。
-- **Listener**：你用 `SaveListener` 建立的直接生效；對話 agent 用 `create_listener` 提案的要等你 `SetListenerEnabled` 啟用（M5 之前代替核准）。動作是開 Goal、快速修正（直接派一個 worker）或通知對話。可能來自任何人的事件要自動開工必須有白名單欄位（label、author）；每小時超過上限就暫停並在對話裡通知。每次觸發的預算在 M6。
+- **Listener**：你用 `SaveListener` 建立的直接生效；對話 agent 用 `create_listener` 提案的要等你核准（`Decide`；M5 之前留下的提案用 `SetListenerEnabled` 啟用）。動作是開 Goal、快速修正（直接派一個 worker）或通知對話。可能來自任何人的事件要自動開工必須有白名單欄位（label、author）；每小時超過上限就暫停並在對話裡通知。每次觸發的預算在 M6。
 - **暫停**：`PauseAutomations`／`ResumeAutomations`（一個 project 或全部，可以指定自動恢復時間）；暫停期間錯過的觸發不補跑。`pause_automations`／`resume_automations` 工具留給 M6 的總管。
 - 自動化頁的資料（排程、listener、暫停、來源健康狀態）在快照的 `automation`，有變就整筆送 `Automation`。來源連續失敗或 token 無效時標成異常，並在監看 repo 的 project 對話裡貼一張通知。
 - 排程、逾時與每小時上限用 `Config::watcher.clock`；測試用 `ManualClock` 撥時間。
@@ -53,10 +53,17 @@ cargo run -p pots-server -- [--data-dir <路徑>] [--port <port>]
 - **後端**：內建 worker（pots-llm 的 loop，用使用中的模型 provider）或 Claude Code（`src/worker/claude.rs`：未修改的官方 CLI、雙向 stream-json；平台工具經 `src/worker/mcp.rs` 的 MCP server `/mcp`，每個 run 一個 capability token）。設定是 `SaveWorkerSettings`／`Worker` 事件；Claude Code 由你照設定裡的指令自己官方登入。
 - **快速修改、subagent 與 team**：對話 agent 的 `quick_fix`、`run_subagent`（explorer／reviewer，唯讀），Planner 與 worker 的 `post_to_team`／`read_team`（`src/team.rs`）。
 - `pots-fake-claude` 是測試用的假 Claude Code CLI（劇本格式見 `src/bin/pots-fake-claude.rs`），不是給使用者的程式。
+- **CI 自動修**（`src/watcher/mod.rs`）：worker 等到的 CI 失敗時被叫醒自己修，連續失敗 3 次任務轉 `NeedsHuman`。
 
 ### Agent profile
 
 對話 agent、Planner、worker 與 subagent 的 profile 是 [`profiles/chat.toml`](profiles/chat.toml)、[`profiles/planner.toml`](profiles/planner.toml)、[`profiles/worker.toml`](profiles/worker.toml)、[`profiles/explorer.toml`](profiles/explorer.toml) 與 [`profiles/reviewer.toml`](profiles/reviewer.toml)，編進執行檔。資料目錄的 `profiles/<name>.toml` 存在時整份取代內建的（可以改 role prompt、`max_turns`、拿掉工具）；工具與可寫的 artifact 種類依 agent 檢查，不合法時服務不啟動。沒列在 profile 裡的工具不會交給模型。
+
+## 核准與通知
+
+- **核准**（`src/approvals.rs`）：merge PR（worker 與 Planner 的 `request_approval`）、merge 後刪除任務分支、agent 提案的 listener、USER.md 與 Project Notes 的提案。動作存成 JSON 與它的 SHA-256，你用 `Decide` 核准或拒絕（可附理由），平台只執行 hash 一致的動作：merge 帶核准時的 head sha，連網的動作在 commit 後另外執行、重啟時接著做。等核准的任務是 `Waiting { Approval }`；72 小時逾時轉 `NeedsHuman`；任務不再等、listener 被刪時自動撤回。每次變化記一筆 `approval_events` 並送 `ApprovalChanged`。
+- **USER.md 與 Project Notes**（`src/user_md.rs`）：你用 `SaveUserMd` 直接編輯 USER.md、在 Artifacts 分頁編輯 Project Notes（每個 project 建立時一份）；放進對話 agent、Planner 與 worker 的指示。
+- **通知設定**（`src/notifications.rs`）：`SaveNotifications`／`Notifications` 事件；系統通知由桌面客戶端發出。merge 的預設方式是 project 設定（`SetMergeMethod`）。
 
 ## 資料目錄
 

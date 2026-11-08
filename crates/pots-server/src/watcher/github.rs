@@ -334,6 +334,96 @@ impl Github {
         pull_ref(&created.json).map(|(n, u)| (n, u, true))
     }
 
+    /// PR 的現況（申請與執行 merge 前查）。
+    pub async fn pull(
+        &self,
+        config: &GithubConfig,
+        repo: &str,
+        number: u64,
+    ) -> Result<PullInfo, GhError> {
+        let resp = self
+            .get(
+                config,
+                &format!("/repos/{}/pulls/{number}", repo_path(repo)),
+                None,
+            )
+            .await?;
+        let v = &resp.json;
+        let head_sha = str_at(v, &["head", "sha"]).to_ascii_lowercase();
+        if head_sha.is_empty() {
+            return Err(GhError::Http("PR 回應格式不對".into()));
+        }
+        Ok(PullInfo {
+            number,
+            open: str_at(v, &["state"]) == "open",
+            merged: v.get("merged").and_then(Value::as_bool) == Some(true),
+            head_sha,
+            head_ref: str_at(v, &["head", "ref"]).to_string(),
+            base_ref: str_at(v, &["base", "ref"]).to_string(),
+            url: str_at(v, &["html_url"]).to_string(),
+            title: str_at(v, &["title"]).to_string(),
+        })
+    }
+
+    /// merge PR：只在 head 還是 `sha` 時 merge（GitHub 的 `sha` 參數）。回傳 merge 後的 commit。
+    pub async fn merge_pull(
+        &self,
+        config: &GithubConfig,
+        repo: &str,
+        number: u64,
+        sha: &str,
+        method: pots_proto::MergeMethod,
+    ) -> Result<String, GhError> {
+        let token = self.token().ok_or(GhError::NoToken)?;
+        let resp = self
+            .request(
+                &self.api_base(config),
+                &token,
+                reqwest::Method::PUT,
+                &format!("/repos/{}/pulls/{number}/merge", repo_path(repo)),
+                None,
+                Some(&serde_json::json!({"sha": sha, "merge_method": method.as_str()})),
+            )
+            .await?;
+        Ok(str_at(&resp.json, &["sha"]).to_string())
+    }
+
+    /// 刪除分支；已經不在也算成功（回傳 `false`）。
+    pub async fn delete_branch(
+        &self,
+        config: &GithubConfig,
+        repo: &str,
+        branch: &str,
+    ) -> Result<bool, GhError> {
+        let token = self.token().ok_or(GhError::NoToken)?;
+        let r = self
+            .request(
+                &self.api_base(config),
+                &token,
+                reqwest::Method::DELETE,
+                &format!(
+                    "/repos/{}/git/refs/heads/{}",
+                    repo_path(repo),
+                    branch
+                        .split('/')
+                        .map(|s| url::form_urlencoded::byte_serialize(s.as_bytes())
+                            .collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                ),
+                None,
+                None,
+            )
+            .await;
+        match r {
+            Ok(_) => Ok(true),
+            // 分支已經不在（GitHub 回 422 「Reference does not exist」或 404）。
+            Err(GhError::NotFound(_)) => Ok(false),
+            Err(GhError::Http(m)) if m.contains("Reference does not exist") => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn request(
         &self,
         base: &str,
@@ -394,6 +484,12 @@ impl Github {
             return Err(GhError::RateLimited(when));
         }
         match status {
+            // 204（例如刪除分支）沒有內容。
+            s if s.is_success() && text.trim().is_empty() => Ok(Resp {
+                status,
+                etag,
+                json: Value::Null,
+            }),
             s if s.is_success() => Ok(Resp {
                 status,
                 etag,
@@ -605,6 +701,28 @@ impl Github {
             )
             .await?;
         Ok(aggregate_ci(&resp.json))
+    }
+
+    /// 一個 commit 的 CI 是不是還在跑（有 check run 的 suite 還沒結束）。沒有任何 CI 時是 `false`。
+    /// 申請與執行 merge 前檢查，不 merge CI 還沒跑完的 commit。
+    pub async fn ci_running(
+        &self,
+        config: &GithubConfig,
+        repo: &str,
+        sha: &str,
+    ) -> Result<bool, GhError> {
+        let resp = self
+            .get(
+                config,
+                &format!(
+                    "/repos/{}/commits/{}/check-suites?per_page=100",
+                    repo_path(repo),
+                    url::form_urlencoded::byte_serialize(sha.as_bytes()).collect::<String>()
+                ),
+                None,
+            )
+            .await?;
+        Ok(ci_running(&resp.json))
     }
 
     /// 任務在等的資源的現況：重啟或漏掉 webhook 時靠它補上。`since` 之前的 review 不算。
@@ -984,6 +1102,19 @@ fn titled(title: &str, body: &str) -> String {
     }
 }
 
+/// PR 的現況。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullInfo {
+    pub number: u64,
+    pub open: bool,
+    pub merged: bool,
+    pub head_sha: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub url: String,
+    pub title: String,
+}
+
 /// 一個 sha 的 CI 彙總。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CiStatus {
@@ -1028,6 +1159,20 @@ pub fn aggregate_ci(json: &Value) -> Option<CiStatus> {
         conclusion: if failed { "failure" } else { "success" }.into(),
         finished_at,
     })
+}
+
+/// check-suites API 的回應裡有沒有還沒結束、有 check run 的 suite。
+pub fn ci_running(json: &Value) -> bool {
+    json.get("check_suites")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|s| {
+            s.get("latest_check_runs_count")
+                .and_then(Value::as_u64)
+                .is_none_or(|n| n > 0)
+        })
+        .any(|s| str_at(s, &["status"]) != "completed")
 }
 
 /// `branch` 只在「輪詢到這個分支的 head 就是這個 sha」時給（listener 只比對這種事件）；
@@ -1174,6 +1319,17 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(ok.conclusion, "success");
+
+        // 還在跑：有 check run、還沒結束的 suite；沒有 check run 的不算。
+        assert!(!ci_running(&all(vec![])));
+        assert!(ci_running(&all(vec![
+            suite("completed", json!("success"), 3),
+            suite("in_progress", Value::Null, 1)
+        ])));
+        assert!(!ci_running(&all(vec![
+            suite("completed", json!("success"), 3),
+            suite("queued", Value::Null, 0)
+        ])));
     }
 
     #[test]

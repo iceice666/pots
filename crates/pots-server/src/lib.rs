@@ -9,6 +9,7 @@
 //! API provider。伺服器不知道背後是不是 SIWC。使用中的 provider 由伺服器保存與路由
 //! （見 `providers` 模組）。
 
+mod approvals;
 mod artifacts;
 mod automation;
 mod commands;
@@ -18,6 +19,7 @@ mod gateway;
 mod hub;
 mod memory;
 pub mod model_auth;
+mod notifications;
 mod planner;
 mod profiles;
 mod providers;
@@ -27,6 +29,7 @@ mod store;
 mod tasks;
 mod team;
 mod tools;
+mod user_md;
 mod watcher;
 mod worker;
 mod ws;
@@ -355,6 +358,15 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         agent_name: config.agent_name.clone(),
     });
 
+    // 每個 project 一份 Project Notes（你可以直接編輯；agent 只能提案）。
+    {
+        let mut txn = hub.begin().await?;
+        for p in store.list_projects().await? {
+            user_md::ensure_project_notes(&mut txn, p.id).await?;
+        }
+        txn.commit().await?;
+    }
+
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     let addr = listener.local_addr()?;
     let token = LocalToken::generate();
@@ -380,6 +392,16 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
     worker.kick();
     // 輪詢與 sweeper：啟動時馬上各跑一次，補上停機期間漏掉的事件與到期的等待、排程。
     watcher.start();
+    // 上次核准了、還沒執行完的動作（merge、刪分支）接著執行。
+    let exec = approvals::Exec {
+        hub: hub.clone(),
+        store: store.clone(),
+        watcher: watcher.clone(),
+        worker: worker.clone(),
+    };
+    if let Err(e) = exec.resume().await {
+        tracing::error!(error = %e, "無法接著執行已核准的動作");
+    }
 
     let forwarder = tokio::spawn(forward_model_auth(hub.clone(), auth_rx, shutdown.clone()));
     let router = gateway::router(

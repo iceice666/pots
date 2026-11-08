@@ -46,6 +46,12 @@ pub enum ToolName {
     RunSubagent,
     PostToTeam,
     ReadTeam,
+    /// 申請 merge 任務的 PR（worker、Planner；你核准後由平台 merge）。
+    RequestApproval,
+    /// 提案修改 USER.md（對話 agent；你核准後寫入）。
+    ProposeUserMdEdit,
+    /// 提案修改 Project Notes（對話 agent、Planner；你核准後寫入）。
+    ProposeProjectNote,
     // worker 的工具
     EditFile,
     Run,
@@ -76,6 +82,9 @@ impl ToolName {
             Self::RunSubagent => "run_subagent",
             Self::PostToTeam => "post_to_team",
             Self::ReadTeam => "read_team",
+            Self::RequestApproval => "request_approval",
+            Self::ProposeUserMdEdit => "propose_user_md_edit",
+            Self::ProposeProjectNote => "propose_project_note",
             Self::EditFile => "edit_file",
             Self::Run => "run",
             Self::OpenPr => "open_pr",
@@ -150,6 +159,8 @@ const CHAT_RULES: Rules = Rules {
         ToolName::ResumeAutomations,
         ToolName::QuickFix,
         ToolName::RunSubagent,
+        ToolName::ProposeUserMdEdit,
+        ToolName::ProposeProjectNote,
     ],
     kinds: &[ArtifactKind::Spec, ArtifactKind::Report],
 };
@@ -169,6 +180,8 @@ const PLANNER_RULES: Rules = Rules {
         ToolName::PostToTeam,
         ToolName::ReadTeam,
         ToolName::RunSubagent,
+        ToolName::RequestApproval,
+        ToolName::ProposeProjectNote,
     ],
     kinds: &[ArtifactKind::Ledger, ArtifactKind::Report],
 };
@@ -189,6 +202,7 @@ const WORKER_RULES: Rules = Rules {
         ToolName::Escalate,
         ToolName::WriteArtifact,
         ToolName::RunSubagent,
+        ToolName::RequestApproval,
     ],
     kinds: &[ArtifactKind::Report],
 };
@@ -294,6 +308,10 @@ mod tests {
         assert!(p.chat.has(ToolName::CreateGoal));
         assert_eq!(p.chat.artifact_kinds, [ArtifactKind::Spec]);
         assert!(p.planner.has(ToolName::CompleteGoal));
+        assert!(p.planner.has(ToolName::RequestApproval));
+        assert!(p.worker.has(ToolName::RequestApproval));
+        assert!(p.chat.has(ToolName::ProposeUserMdEdit));
+        assert!(p.chat.has(ToolName::ProposeProjectNote));
         assert_eq!(p.planner.artifact_kinds, [ArtifactKind::Ledger]);
         assert!(!p.planner.role_prompt().ends_with('\n'));
     }

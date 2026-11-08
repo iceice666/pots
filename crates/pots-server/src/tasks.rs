@@ -6,7 +6,8 @@
 //! M3 加上 `Waiting`：`wait_for` 把任務掛起，外部事件或逾時時由 watcher 喚醒回 `Planned`
 //!（`crate::watcher`）。M4 加上 worker（`crate::worker`）：任務建立時排一個 worker run，
 //! 執行中是 `Running`，worker 以 `complete_task`、`fail_task`、`escalate` 結束成 `Done`、
-//! `Failed` 或 `NeedsHuman`。
+//! `Failed` 或 `NeedsHuman`。M5 加上「等你核准」（`Waiting { Approval }`，`crate::approvals`）：
+//! 核准後平台 merge、任務 `Done`；拒絕時叫醒 worker；逾時轉 `NeedsHuman`。
 
 use pots_proto::{
     ArtifactKind, GoalId, GoalState, GoalView, ProjectId, ServerEvent, TaskId, TaskStateView,
@@ -649,8 +650,30 @@ pub async fn project_goals(
     Ok(out)
 }
 
-/// 記一筆 `GoalChanged`（Goal 不存在就不記）。
+/// CI 又失敗了一次：回傳連續失敗的次數。
+pub async fn bump_ci_failures(conn: &mut SqliteConnection, id: TaskId) -> Result<u32, Error> {
+    let n: i64 = sqlx::query_scalar(
+        "UPDATE tasks SET ci_failures = ci_failures + 1 WHERE id = ? RETURNING ci_failures",
+    )
+    .bind(id.to_string())
+    .fetch_one(conn)
+    .await?;
+    Ok(n as u32)
+}
+
+/// CI 通過：連續失敗的次數歸零。
+pub async fn reset_ci_failures(conn: &mut SqliteConnection, id: TaskId) -> Result<(), Error> {
+    sqlx::query("UPDATE tasks SET ci_failures = 0 WHERE id = ?")
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// 記一筆 `GoalChanged`（Goal 不存在就不記）。任務已經不在等的核准在這裡撤回
+///（任務狀態改了之後一定會記一筆 `GoalChanged`）。
 pub async fn push_goal(txn: &mut LogTxn<'_>, id: GoalId) -> Result<(), Error> {
+    crate::approvals::sync_goal(txn, id).await?;
     let Some(g) = goal(txn.conn(), id).await? else {
         return Ok(());
     };

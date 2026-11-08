@@ -585,6 +585,23 @@ pub async fn human_save(
     Ok(Ok(Some(new)))
 }
 
+/// 寫入你核准的提案（Project Notes）：整份換成 `body`，作者是提案的 agent。內容沒變時回 `None`。
+pub async fn write_approved(
+    conn: &mut SqliteConnection,
+    row: &ArtifactRow,
+    body: &str,
+    author: &Principal,
+) -> Result<Option<ArtifactRow>, Error> {
+    let body = normalize(body);
+    if body == row.body {
+        return Ok(None);
+    }
+    let human_edits = prune_edits(&row.human_edits, &body);
+    Ok(Some(
+        commit_revision(conn, row, body, human_edits, author).await?,
+    ))
+}
+
 /// 還原成某一版的內容（新增一個版本）。
 pub async fn restore(
     conn: &mut SqliteConnection,

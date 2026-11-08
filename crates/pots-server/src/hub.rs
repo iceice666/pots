@@ -177,7 +177,7 @@ impl Hub {
         if last_seq == 0 || last_seq > head || !retained {
             let snapshot = ServerEvent::Snapshot {
                 seq: head,
-                instance: self.snapshot(&state).await?,
+                instance: Box::new(self.snapshot(&state).await?),
             };
             frames.push(event_json(&snapshot)?);
         } else {
@@ -203,7 +203,7 @@ impl Hub {
     async fn snapshot(&self, state: &HubState) -> Result<InstanceSnapshot, Error> {
         let mut projects = Vec::new();
         for p in self.store.list_projects().await? {
-            let (memory, goals, artifacts, repos) = {
+            let (memory, goals, artifacts, repos, merge_method) = {
                 let mut conn = self.store.acquire().await?;
                 let memory = crate::memory::view(&mut conn, p.id).await?;
                 let goals = crate::tasks::project_goals(&mut conn, p.id).await?;
@@ -213,7 +213,8 @@ impl Hub {
                     .map(|a| a.view())
                     .collect();
                 let repos = crate::automation::project_repos(&mut conn, p.id).await?;
-                (memory, goals, artifacts, repos)
+                let merge = crate::approvals::project_merge_method(&mut conn, p.id).await?;
+                (memory, goals, artifacts, repos, merge)
             };
             projects.push(ProjectSnapshot {
                 id: p.id,
@@ -225,11 +226,17 @@ impl Hub {
                 goals,
                 artifacts,
                 repos,
+                merge_method,
             });
         }
-        let automation = {
+        let (automation, approvals, notifications, user_md) = {
             let mut conn = self.store.acquire().await?;
-            crate::automation::view(&mut conn, Timestamp::now()).await?
+            (
+                crate::automation::view(&mut conn, Timestamp::now()).await?,
+                crate::approvals::recent(&mut conn, Timestamp::now()).await?,
+                crate::notifications::load(&mut conn).await?,
+                crate::user_md::current(&mut conn).await?,
+            )
         };
         Ok(InstanceSnapshot {
             id: self.instance.id,
@@ -241,6 +248,9 @@ impl Hub {
             automation,
             github: state.github.clone(),
             worker: state.worker.clone(),
+            approvals,
+            notifications,
+            user_md,
         })
     }
 
