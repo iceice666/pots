@@ -13,3 +13,4 @@ mod panel;
 mod settings;
 mod stream;
 mod widgets;
+mod worker_settings;

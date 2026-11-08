@@ -355,6 +355,7 @@ mod tests {
                 providers: ProvidersView::default(),
                 automation: Default::default(),
                 github: Default::default(),
+                worker: Default::default(),
             },
         });
         assert!(state.unacked.is_empty());

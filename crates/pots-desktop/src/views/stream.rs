@@ -123,6 +123,11 @@ pub fn goal_counts(goal: &GoalView) -> Div {
     let ci = goal.waiting_ci();
     let waiting = goal.count(TaskBucket::Waiting) - ci;
     let done = goal.count(TaskBucket::Done);
+    let failed = goal
+        .tasks
+        .iter()
+        .filter(|t| matches!(t.state, TaskStateView::Failed { .. }))
+        .count();
     div()
         .flex()
         .flex_wrap()
@@ -150,6 +155,13 @@ pub fn goal_counts(goal: &GoalView) -> Div {
         })
         .when(done > 0, |d| {
             d.child(pill(format!("{done} 完成"), theme::ok(), theme::ok_soft()))
+        })
+        .when(failed > 0, |d| {
+            d.child(pill(
+                format!("{failed} 失敗"),
+                theme::danger(),
+                theme::danger_soft(),
+            ))
         })
 }
 
@@ -608,6 +620,9 @@ impl PotsApp {
                             .font_weight(FontWeight::BOLD)
                             .child(goal.title.clone()),
                     )
+                    .when(goal.quick, |d| {
+                        d.child(tag("快速修改", theme::violet(), theme::violet_soft()))
+                    })
                     .when(!goal.state.is_active(), |d| {
                         d.child(tag(goal.state.label(), theme::text_muted(), theme::track()))
                     })

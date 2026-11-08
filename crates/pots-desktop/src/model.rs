@@ -6,6 +6,14 @@
 pub use pots_proto::*;
 use serde::{Deserialize, Serialize};
 
+/// 可以「重試」的任務：需要你決定或失敗的（`RetryTask`）。
+pub fn retryable(state: &TaskStateView) -> bool {
+    matches!(
+        state,
+        TaskStateView::NeedsHuman { .. } | TaskStateView::Failed { .. }
+    )
+}
+
 // ---------------------------------------------------------------------------
 // 客戶端整體狀態
 
@@ -444,15 +452,14 @@ impl Store {
                 .flat_map(|p| p.goals.iter_mut())
                 .find(|g| g.id == goal)
         }) {
-            g.team.insert(
-                0,
-                TeamPost {
-                    kind: TeamPostKind::Question,
-                    from: "你 → Planner".into(),
-                    at,
-                    body: text,
-                },
-            );
+            // 和服務一樣由舊到新。
+            g.team.push(TeamPost {
+                kind: TeamPostKind::Question,
+                from: "你".into(),
+                at,
+                body: text,
+                to: None,
+            });
         }
     }
 
@@ -506,6 +513,18 @@ impl Store {
             ));
         }
         true
+    }
+
+    /// 重試需要你決定或失敗的任務：先改成「已規劃」，服務接受後由 `GoalChanged` 整筆替換
+    /// （被拒絕時回 `Error`，下一次 `GoalChanged` 蓋回去）。
+    pub fn retry_task(&mut self, instance: InstanceId, task: TaskId) {
+        if let Some(t) = self.task_mut(instance, task)
+            && retryable(&t.state)
+        {
+            t.state = TaskStateView::Planned;
+            self.outbox
+                .push((instance, ClientCommand::RetryTask { task }));
+        }
     }
 
     pub fn cancel_task(&mut self, instance: InstanceId, task: TaskId) {

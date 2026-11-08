@@ -1,8 +1,9 @@
 //! M3 的表單：設定視窗的「GitHub」類別、右欄的「新增 listener」、頻道「自動化」分頁的監看
-//! repo，以及暫停與來源狀態。
+//! repo，以及暫停與來源狀態。[`Forms`] 也管 M4 設定視窗「Worker」類別的表單
+//! （畫面在 `worker_settings.rs`）。
 //!
-//! 送出的指令都經 `Store::outbox`；服務接受後以 `Github`、`Automation`、`ProjectRepos` 事件
-//! 回來時收起表單，被拒絕時（`Error`）把原因留在表單裡。
+//! 送出的指令都經 `Store::outbox`；服務接受後以 `Github`、`Worker`、`Automation`、
+//! `ProjectRepos` 事件回來時收起表單，被拒絕時（`Error`）把原因留在表單裡。
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -17,12 +18,13 @@ use super::settings::{card, detail_row, field};
 use super::widgets::*;
 use crate::app::{
     GithubEditor, GithubTest, ListenerActionKind, ListenerForm, Panel, PotsApp, RepoEditor,
+    WorkerEditor,
 };
 use crate::model::*;
 use crate::sync::{Applied, month_day_time};
 use crate::theme;
 
-fn input(
+pub(super) fn input(
     value: String,
     placeholder: &str,
     masked: bool,
@@ -39,7 +41,7 @@ fn input(
     })
 }
 
-fn value(input: &Entity<InputState>, cx: &App) -> String {
+pub(super) fn value(input: &Entity<InputState>, cx: &App) -> String {
     input.read(cx).value().trim().to_string()
 }
 
@@ -71,7 +73,7 @@ fn kinds_have_field(kinds: &[&str], field: &str) -> bool {
     })
 }
 
-fn error_note(text: &str) -> Div {
+pub(super) fn error_note(text: &str) -> Div {
     div()
         .px(px(12.))
         .py(px(8.))
@@ -82,7 +84,7 @@ fn error_note(text: &str) -> Div {
         .child(text.to_string())
 }
 
-fn chip(id: SharedString, label: &str, selected: bool) -> gpui_kit::Stateful<Div> {
+pub(super) fn chip(id: SharedString, label: &str, selected: bool) -> gpui_kit::Stateful<Div> {
     div()
         .id(id)
         .px(px(10.))
@@ -110,6 +112,7 @@ fn chip(id: SharedString, label: &str, selected: bool) -> gpui_kit::Stateful<Div
 /// 表單狀態的借用，讓 app 在持有連線（`live`）時也能更新它們。
 pub(crate) struct Forms<'a> {
     pub github: &'a mut Option<GithubEditor>,
+    pub worker: &'a mut Option<WorkerEditor>,
     pub listener: &'a mut Option<ListenerForm>,
     pub repo: &'a mut Option<RepoEditor>,
     pub panel: &'a mut Option<Panel>,
@@ -126,6 +129,12 @@ impl Forms<'_> {
                 e.saving = false;
                 e.error = Some("連線中斷，請再儲存一次".into());
             }
+        }
+        if let Some(w) = self.worker
+            && w.saving
+        {
+            w.saving = false;
+            w.error = Some("連線中斷，請再儲存一次".into());
         }
         if let Some(f) = self.listener
             && f.saving
@@ -150,6 +159,13 @@ impl Forms<'_> {
             e.error = Some(toast);
             return None;
         }
+        if let Some(w) = self.worker
+            && w.saving
+        {
+            w.saving = false;
+            w.error = Some(toast);
+            return None;
+        }
         if let Some(f) = self.listener
             && f.saving
         {
@@ -167,8 +183,11 @@ impl Forms<'_> {
         Some(toast)
     }
 
-    /// 服務回了 GitHub 設定、自動化或 repo：收起儲存中的表單、填上測試結果。
+    /// 服務回了 GitHub 設定、worker 設定、自動化或 repo：收起儲存中的表單、填上測試結果。
     pub(crate) fn applied(&mut self, applied: &Applied) {
+        if applied.worker_changed && self.worker.as_ref().is_some_and(|e| e.saving) {
+            *self.worker = None;
+        }
         if applied.github_changed && self.github.as_ref().is_some_and(|e| e.saving) {
             *self.github = None;
         }

@@ -6,6 +6,8 @@
 //! 實例的資料目錄，畫面上只看得到末四碼。
 //!
 //! 「記憶」類別：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。
+//!
+//! 「GitHub」在 `automation_forms.rs`，「Worker」在 `worker_settings.rs`。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
@@ -128,6 +130,7 @@ impl PotsApp {
                 SettingsTab::Providers => IconName::Sparkles,
                 SettingsTab::Memory => IconName::Brain,
                 SettingsTab::Github => IconName::GitPullRequest,
+                SettingsTab::Worker => IconName::Bot,
                 SettingsTab::About => IconName::Info,
             };
             nav = nav.child(
@@ -167,6 +170,7 @@ impl PotsApp {
             SettingsTab::Providers => self.render_providers_section(cx).into_any_element(),
             SettingsTab::Memory => self.render_memory_section(cx).into_any_element(),
             SettingsTab::Github => self.render_github_section(cx).into_any_element(),
+            SettingsTab::Worker => self.render_worker_section(cx).into_any_element(),
             SettingsTab::About => self.render_about_section().into_any_element(),
         };
         let content = div()

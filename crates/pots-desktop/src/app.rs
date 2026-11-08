@@ -62,18 +62,27 @@ pub enum SettingsTab {
     Memory,
     /// GitHub 連線：token、API base URL、webhook secret。
     Github,
+    /// Coding worker：後端、執行環境、同時執行數，Claude Code 的登入指令。
+    Worker,
     /// 版本與目前實例的資訊。
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [Self; 4] = [Self::Providers, Self::Memory, Self::Github, Self::About];
+    pub const ALL: [Self; 5] = [
+        Self::Providers,
+        Self::Memory,
+        Self::Github,
+        Self::Worker,
+        Self::About,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Providers => "模型 Provider",
             Self::Memory => "記憶",
             Self::Github => "GitHub",
+            Self::Worker => "Worker",
             Self::About => "關於",
         }
     }
@@ -95,6 +104,20 @@ pub enum GithubTest {
     Running(u64),
     Ok(String),
     Err(String),
+}
+
+/// 設定視窗「Worker」類別正在改的設定。
+pub struct WorkerEditor {
+    pub backend: WorkerBackendKind,
+    pub exec: ExecKind,
+    pub runtime: Entity<InputState>,
+    pub image: Entity<InputState>,
+    /// 留空用 Claude Code CLI 的預設模型。
+    pub claude_model: Entity<InputState>,
+    pub max_parallel: u8,
+    /// 已送出 `SaveWorkerSettings`、等服務回 `Worker`。
+    pub saving: bool,
+    pub error: Option<String>,
 }
 
 /// 右欄「新增 listener」表單。
@@ -334,6 +357,9 @@ pub struct PotsApp {
     pub memory_model_editor: Option<MemoryModelEditor>,
     pub observation_editor: Option<ObservationEditor>,
     pub github_editor: Option<GithubEditor>,
+    pub worker_editor: Option<WorkerEditor>,
+    /// 設定視窗「Worker」類別剛複製了哪一段指令（按鈕顯示「已複製」）。
+    pub copied: Option<&'static str>,
     pub listener_form: Option<ListenerForm>,
     pub repo_editor: Option<RepoEditor>,
     pub(crate) next_test_request: u64,
@@ -437,6 +463,8 @@ impl PotsApp {
             memory_model_editor: None,
             observation_editor: None,
             github_editor: None,
+            worker_editor: None,
+            copied: None,
             listener_form: None,
             repo_editor: None,
             next_test_request: 0,
@@ -555,6 +583,7 @@ impl PotsApp {
                 let applied = live.sync.apply(&mut self.store, instance, *event);
                 crate::views::automation_forms::Forms {
                     github: &mut self.github_editor,
+                    worker: &mut self.worker_editor,
                     listener: &mut self.listener_form,
                     repo: &mut self.repo_editor,
                     panel: &mut self.panel,
@@ -578,6 +607,7 @@ impl PotsApp {
                 let toast = applied.toast.clone().and_then(|t| {
                     crate::views::automation_forms::Forms {
                         github: &mut self.github_editor,
+                        worker: &mut self.worker_editor,
                         listener: &mut self.listener_form,
                         repo: &mut self.repo_editor,
                         panel: &mut self.panel,
@@ -700,6 +730,7 @@ impl PotsApp {
     fn forms(&mut self) -> crate::views::automation_forms::Forms<'_> {
         crate::views::automation_forms::Forms {
             github: &mut self.github_editor,
+            worker: &mut self.worker_editor,
             listener: &mut self.listener_form,
             repo: &mut self.repo_editor,
             panel: &mut self.panel,
@@ -772,6 +803,8 @@ impl PotsApp {
         self.provider_editor = None;
         self.memory_model_editor = None;
         self.github_editor = None;
+        self.worker_editor = None;
+        self.copied = None;
         cx.notify();
     }
 
@@ -1120,6 +1153,8 @@ impl PotsApp {
         if id != self.instance {
             self.provider_editor = None;
             self.memory_model_editor = None;
+            self.github_editor = None;
+            self.worker_editor = None;
         }
         self.instance = id;
         // 在總管或自動化畫面切換實例時，留在新實例的同一個畫面。
@@ -1656,6 +1691,11 @@ impl PotsApp {
         cx.notify();
     }
 
+    pub fn retry_task(&mut self, task: TaskId, cx: &mut Context<Self>) {
+        self.store.retry_task(self.instance, task);
+        cx.notify();
+    }
+
     pub fn cancel_task(&mut self, task: TaskId, cx: &mut Context<Self>) {
         self.store.cancel_task(self.instance, task);
         cx.notify();
@@ -1697,7 +1737,7 @@ impl PotsApp {
             return;
         }
         if self.live.is_some() {
-            // team 貼文在 M4；要改方向請在對話裡說，或直接改 Brief。
+            // 協定還沒有「留言給 Planner」的指令；要改方向請在對話裡說，或直接改 Brief。
             self.notify_unimplemented("留言給 Planner", cx);
             return;
         }
@@ -1716,7 +1756,7 @@ impl PotsApp {
             return;
         }
         if self.live.is_some() {
-            // 還沒有 worker（M4）。
+            // 協定還沒有直接對 worker 說話的指令（任務 thread 之後再做）。
             self.notify_unimplemented("對 worker 說話", cx);
             return;
         }

@@ -24,9 +24,9 @@ mod shots {
         WindowOptions, px, size,
     };
     use markdown_editor::{EditorCommand, MarkKind};
-    use pots_desktop::app::{AutomationSection, ChannelTab, Panel, PotsApp, SettingsTab};
+    use pots_desktop::app::{AutomationSection, ChannelTab, GoalTab, Panel, PotsApp, SettingsTab};
     use pots_desktop::mock;
-    use pots_desktop::model::{ArtifactKind, InboxAction, TaskId};
+    use pots_desktop::model::{ArtifactKind, ExecKind, InboxAction, TaskId, WorkerBackendKind};
 
     struct Shooter {
         cx: HeadlessAppContext,
@@ -135,8 +135,8 @@ mod shots {
 
     /// 連到真正的服務（腳本化的模型）：還沒設定 provider → 在設定頁新增 OpenAI 相容 API
     /// → 測試連線 → 儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開 Goal、Planner
-    /// 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄 → 設定 GitHub token → project 監看 repo、
-    /// agent 建立排程 → 自動化頁新增 listener。
+    /// 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄 → 設定 GitHub token → Worker 設定（被拒絕、
+    /// 改好後儲存）→ project 監看 repo、agent 建立排程 → 自動化頁新增 listener。
     fn live_screens() {
         use pots_desktop::connection::{Endpoint, Target};
         use pots_desktop::model::*;
@@ -419,6 +419,41 @@ mod shots {
         });
         s.shot("18-live-github");
 
+        // 「Worker」：不合法的容器執行檔被服務拒絕，原因留在表單；改好後儲存。
+        s.update(|app, window, cx| {
+            app.open_settings(pots_desktop::app::SettingsTab::Worker, cx);
+            app.edit_worker(window, cx);
+            app.set_worker_backend(WorkerBackendKind::ClaudeCode, cx);
+            let editor = app.worker_editor.as_ref().expect("表單已開啟");
+            editor
+                .runtime
+                .update(cx, |state, cx| state.set_value("docker run", window, cx));
+            app.save_worker(cx);
+        });
+        s.wait_until("worker 設定被拒絕", |app| {
+            app.worker_editor
+                .as_ref()
+                .is_some_and(|e| !e.saving && e.error.is_some())
+        });
+        s.shot("18a-live-worker-rejected");
+        s.update(|app, window, cx| {
+            let editor = app.worker_editor.as_ref().expect("表單還在");
+            editor
+                .runtime
+                .update(cx, |state, cx| state.set_value("podman", window, cx));
+            app.set_worker_parallel(4, cx);
+            app.save_worker(cx);
+        });
+        s.wait_until("worker 設定已儲存", |app| {
+            let w = &app.current_instance().worker;
+            w.backend == WorkerBackendKind::ClaudeCode
+                && w.runtime == "podman"
+                && w.max_parallel == 4
+                && w.login_command.contains("podman run")
+                && app.worker_editor.is_none()
+        });
+        s.shot("18b-live-worker");
+
         // 頻道「自動化」分頁：監看 repo；agent 建立排程，對話裡出現卡片。
         s.update(|app, window, cx| {
             app.close_settings(cx);
@@ -469,6 +504,49 @@ mod shots {
     fn mock_screens() {
         let mut s = Shooter::new();
         s.shot("01-channel-goal");
+
+        // Goal 面板：任務依狀態分組（進度、需要你、失敗的原因、PR），Team 分頁新的在上面。
+        s.update(|app, _, cx| {
+            let goal = app
+                .current_project()
+                .and_then(|p| p.goals.first())
+                .map(|g| g.id)
+                .expect("auth-service 有 Goal");
+            app.open_panel(Some(Panel::Goal(goal, GoalTab::Tasks)), cx);
+        });
+        s.shot("01a-goal-tasks");
+        s.update(|app, _, cx| {
+            let Some(Panel::Goal(goal, _)) = app.panel else {
+                panic!("右欄應該是 Goal");
+            };
+            app.open_panel(Some(Panel::Goal(goal, GoalTab::Team)), cx);
+        });
+        s.shot("01b-goal-team");
+
+        // web-app：需要你決定的任務（原因）與阻礙貼文。之後回到 auth-service。
+        s.update(|app, window, cx| {
+            let home = app.store.instances[1].id;
+            let web = app.store.instances[1].projects[1].id;
+            app.open_project(home, web, window, cx);
+            let goal = app.current_project().unwrap().goals[0].id;
+            app.open_panel(Some(Panel::Goal(goal, GoalTab::Tasks)), cx);
+        });
+        s.shot("01c-goal-needs-human");
+        // 「重試」：任務回到「已規劃」，指令留在 outbox（假資料模式不送）。
+        s.update(|app, _, cx| {
+            let task = app.current_project().unwrap().goals[0].tasks[0].id;
+            app.retry_task(task, cx);
+            assert!(app.store.outbox.iter().any(|(_, c)| matches!(
+                c,
+                pots_desktop::model::ClientCommand::RetryTask { task: t } if *t == task
+            )));
+        });
+        s.shot("01d-goal-retried");
+        s.update(|app, window, cx| {
+            let home = app.store.instances[1].id;
+            let auth = app.store.instances[1].projects[0].id;
+            app.open_project(home, auth, window, cx);
+        });
 
         s.update(|app, _, cx| {
             let task = app
@@ -630,6 +708,30 @@ mod shots {
             app.edit_memory_model(window, cx);
         });
         s.shot("10d-settings-memory");
+
+        // 「Worker」：家用伺服器是內建 worker；改成 Claude Code、本機執行時出現登入指令與警告。
+        s.update(|app, _, cx| app.open_settings(SettingsTab::Worker, cx));
+        s.shot("10e-settings-worker");
+        s.update(|app, window, cx| {
+            app.edit_worker(window, cx);
+            app.set_worker_backend(WorkerBackendKind::ClaudeCode, cx);
+            app.set_worker_exec(ExecKind::Local, cx);
+        });
+        s.shot("10f-settings-worker-edit");
+        s.update(|app, _, cx| {
+            app.set_worker_exec(ExecKind::Container, cx);
+            app.save_worker(cx);
+        });
+        s.update(|app, _, _| {
+            assert!(
+                app.store.outbox.iter().all(|(_, c)| !matches!(
+                    c,
+                    pots_desktop::model::ClientCommand::SaveWorkerSettings { .. }
+                )),
+                "假資料模式不送出"
+            );
+            assert!(!app.worker_editor.as_ref().unwrap().saving);
+        });
 
         s.update(|app, _, cx| app.close_settings(cx));
         assert!(s.view_settings_closed(), "關閉後沒有設定視窗");

@@ -36,6 +36,8 @@ pub struct Applied {
     pub automation_changed: bool,
     /// 套用後這個實例有幾個 listener。
     pub listener_count: usize,
+    /// worker 設定有變（`Worker` 事件或快照）。
+    pub worker_changed: bool,
     /// 這個 project 監看的 repo 換了（`ProjectRepos`）。
     pub repos_changed: Option<ProjectId>,
 }
@@ -75,6 +77,7 @@ pub fn placeholder_instance(id: InstanceId, name: &str) -> InstanceView {
         pauses: vec![],
         sources: vec![],
         github: GithubView::default(),
+        worker: WorkerSettingsView::default(),
         providers: ProvidersView::default(),
         model_auth: ModelAuthView::SignedOut,
     }
@@ -219,9 +222,11 @@ impl Sync {
                 view.providers = snap.providers;
                 view.model_auth = snap.model_auth;
                 view.github = snap.github;
+                view.worker = snap.worker;
                 self.apply_automation(view, snap.automation);
                 out.providers_changed = true;
                 out.github_changed = true;
+                out.worker_changed = true;
                 out.automation_changed = true;
                 out.artifacts_reset = true;
                 if new_id != instance {
@@ -374,6 +379,12 @@ impl Sync {
                     view.github = github;
                 }
                 out.github_changed = true;
+            }
+            ServerEvent::Worker { worker, .. } => {
+                if let Some(view) = store.instance_mut(instance) {
+                    view.worker = worker;
+                }
+                out.worker_changed = true;
             }
             ServerEvent::ProjectRepos { project, repos, .. } => {
                 if let Some(p) = store.project_mut(instance, project) {
@@ -569,6 +580,7 @@ mod tests {
                 providers: chatgpt_active(),
                 automation: Default::default(),
                 github: Default::default(),
+                worker: Default::default(),
             },
         }
     }
@@ -625,6 +637,43 @@ mod tests {
         assert_eq!(out.memory_changed, Some(project));
         assert_eq!(store.project(inst, project).unwrap().memory, memory);
         assert_eq!(store.instance(inst).unwrap().last_seq, 4);
+    }
+
+    #[test]
+    fn worker_settings_follow_snapshot_and_events() {
+        let inst = InstanceId::from_u64(1);
+        let project = ProjectId::from_u64(2);
+        let mut store = empty_store(inst);
+        let sync = Sync::new(0);
+        let mut snap = snapshot(inst, project, ModelAuthView::SignedOut);
+        let ServerEvent::Snapshot { instance, .. } = &mut snap else {
+            unreachable!()
+        };
+        instance.worker.runtime = "docker".into();
+        let out = sync.apply(&mut store, inst, snap);
+        assert!(out.worker_changed);
+        assert_eq!(store.instance(inst).unwrap().worker.runtime, "docker");
+
+        let worker = WorkerSettingsView {
+            backend: WorkerBackendKind::ClaudeCode,
+            exec: ExecKind::Local,
+            runtime: "podman".into(),
+            image: "pots-worker:latest".into(),
+            claude_model: String::new(),
+            login_command: "claude".into(),
+            max_parallel: 4,
+        };
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::Worker {
+                seq: 5,
+                worker: worker.clone(),
+            },
+        );
+        assert!(out.worker_changed);
+        assert_eq!(store.instance(inst).unwrap().worker, worker);
+        assert_eq!(store.instance(inst).unwrap().last_seq, 5);
     }
 
     #[test]

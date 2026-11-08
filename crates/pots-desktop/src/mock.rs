@@ -24,6 +24,23 @@ fn mock_providers(extra: Option<ProviderView>) -> ProvidersView {
     }
 }
 
+/// worker 設定：容器裡跑 Claude Code（筆電）或內建 worker（家用伺服器）。
+fn mock_worker(backend: WorkerBackendKind, data_dir: &str) -> WorkerSettingsView {
+    let home = format!("'{data_dir}/claude-home'");
+    WorkerSettingsView {
+        backend,
+        exec: ExecKind::Container,
+        runtime: "docker".into(),
+        image: "pots-worker:latest".into(),
+        claude_model: String::new(),
+        login_command: format!(
+            "mkdir -p {home} && docker run -it --rm --user 501:20 -v {home}:/home/pots \
+             -e HOME=/home/pots pots-worker:latest claude"
+        ),
+        max_parallel: 3,
+    }
+}
+
 /// auth-service 對話 agent 的記憶。
 fn auth_memory(ids: &mut Ids) -> MemoryView {
     let mut obs =
@@ -342,12 +359,15 @@ pub fn store() -> Store {
                 )),
             ),
         ],
+        pr: None,
+        pr_url: None,
+        progress: "補 callback 的錯誤處理與測試".into(),
     };
     let button_task = TaskView {
         id: TaskId::from_u64(ids.next()),
         goal: oauth_goal,
         title: "前端登入按鈕".into(),
-        assignee: "worker · rig".into(),
+        assignee: "worker · 內建".into(),
         summary: "修改登入頁".into(),
         state: TaskStateView::Running,
         branch: Some("agent/t32-login-button".into()),
@@ -364,6 +384,9 @@ pub fn store() -> Store {
             },
         ],
         thread: vec![],
+        pr: None,
+        pr_url: None,
+        progress: "在登入頁加上「用 Google 登入」按鈕，正在跑元件測試".into(),
     };
     let integration_task = TaskView {
         id: TaskId::from_u64(ids.next()),
@@ -388,6 +411,9 @@ pub fn store() -> Store {
             },
         ],
         thread: vec![],
+        pr: Some("github.com/acme/auth-service#44".into()),
+        pr_url: Some("https://github.com/acme/auth-service/pull/44".into()),
+        progress: "開了 PR #44，等待 CI".into(),
     };
     let review_task = TaskView {
         id: TaskId::from_u64(ids.next()),
@@ -406,39 +432,82 @@ pub fn store() -> Store {
             at: Some(at(10, 23)),
         }],
         thread: vec![],
+        pr: None,
+        pr_url: None,
+        progress: String::new(),
+    };
+    let docs_task = TaskView {
+        id: TaskId::from_u64(ids.next()),
+        goal: oauth_goal,
+        title: "更新登入 API 文件".into(),
+        assignee: "worker · 內建".into(),
+        summary: "在 docs/auth.md 補上 OAuth 的流程".into(),
+        state: TaskStateView::Failed {
+            attempts: 2,
+            error: "docs 建置失敗：找不到 docs/SUMMARY.md".into(),
+        },
+        branch: Some("agent/t34-auth-docs".into()),
+        elapsed_min: 6,
+        cost_cents: 14,
+        steps: vec![TaskStep {
+            text: "第 2 次建置仍失敗，停止".into(),
+            at: Some(at(10, 47)),
+        }],
+        thread: vec![],
+        pr: None,
+        pr_url: None,
+        progress: "第 2 次建置仍失敗".into(),
     };
 
     let oauth = GoalView {
         id: oauth_goal,
         title: "OAuth 登入遷移".into(),
         state: GoalState::Active,
-        planner_note: "Planner · 4 個任務".into(),
+        planner_note: "Planner · 5 個任務".into(),
         budget_used_pct: 38,
-        tasks: vec![callback_task, button_task, integration_task, review_task],
+        tasks: vec![
+            callback_task,
+            button_task,
+            integration_task,
+            review_task,
+            docs_task,
+        ],
+        // 和服務一樣由舊到新。
         team: vec![
+            TeamPost {
+                kind: TeamPostKind::Finding,
+                from: "worker · 後端 OAuth callback".into(),
+                at: at(10, 41),
+                body: "auth 的測試要先啟動 redis。".into(),
+                to: None,
+            },
+            TeamPost {
+                kind: TeamPostKind::Handoff,
+                from: "worker · 後端 OAuth callback".into(),
+                at: at(10, 44),
+                body: "callback 的路徑是 /auth/google/callback，整合測試可以直接打這個。".into(),
+                to: Some("整合測試".into()),
+            },
+            TeamPost {
+                kind: TeamPostKind::Question,
+                from: "worker · 前端登入按鈕".into(),
+                at: at(10, 55),
+                body: "Google client id 要放哪個環境變數？".into(),
+                to: None,
+            },
             TeamPost {
                 kind: TeamPostKind::Decision,
                 from: "Planner".into(),
                 at: at(10, 58),
                 body: "client id 用 GOOGLE_CLIENT_ID，並寫進 .env.example。".into(),
-            },
-            TeamPost {
-                kind: TeamPostKind::Question,
-                from: "前端登入按鈕 → Planner".into(),
-                at: at(10, 55),
-                body: "Google client id 要放哪個環境變數？".into(),
-            },
-            TeamPost {
-                kind: TeamPostKind::Finding,
-                from: "後端 OAuth callback".into(),
-                at: at(10, 41),
-                body: "auth 的測試要先啟動 redis。".into(),
+                to: None,
             },
         ],
         brief: "把登入改成 OAuth，先支援 Google。舊的密碼登入保留三個月，期間兩種方式並存；\
                 session 過期時間改為 14 天（見 Spec「Session 處理」）。完成條件：\
                 後端 callback、前端按鈕、整合測試都合併到 main。"
             .into(),
+        quick: false,
     };
 
     let mut tool_reply = agent(
@@ -633,9 +702,20 @@ pub fn store() -> Store {
                     },
                 ],
                 thread: vec![],
+                pr: Some("github.com/acme/web-app#57".into()),
+                pr_url: Some("https://github.com/acme/web-app/pull/57".into()),
+                progress: "第 3 次修復後 CI 仍失敗".into(),
             }],
-            team: vec![],
+            team: vec![TeamPost {
+                kind: TeamPostKind::Blocker,
+                from: "worker · 修正 e2e/checkout.spec.ts".into(),
+                at: at(8, 7),
+                body: "付款步驟的動畫在 CI 上時間不固定，試了 3 種等法都不穩，需要決定要不要改測試策略。"
+                    .into(),
+                to: None,
+            }],
             brief: "結帳頁改版：新版地址表單與付款步驟。".into(),
+            quick: false,
         }],
         artifacts: vec![
             doc(
@@ -887,7 +967,7 @@ pub fn store() -> Store {
             id: shell_goal,
             title: "整理 shell 設定".into(),
             state: GoalState::Active,
-            planner_note: "Planner · 1 個任務".into(),
+            planner_note: "直接交給 worker · 1 個任務".into(),
             budget_used_pct: 12,
             tasks: vec![TaskView {
                 id: TaskId::from_u64(ids.next()),
@@ -906,9 +986,13 @@ pub fn store() -> Store {
                     at: Some(at(10, 40)),
                 }],
                 thread: vec![],
+                pr: Some("github.com/me/dotfiles#9".into()),
+                pr_url: Some("https://github.com/me/dotfiles/pull/9".into()),
+                progress: "開了 PR #9，CI 都過了".into(),
             }],
             team: vec![],
             brief: "合併重複的 alias，移除過期的 PATH 設定。".into(),
+            quick: true,
         }],
         artifacts: vec![doc(
             ArtifactId::from_u64(ids.next()),
@@ -1133,6 +1217,10 @@ pub fn store() -> Store {
             pauses: vec![],
             sources: vec![],
             github: GithubView::default(),
+            worker: mock_worker(
+                WorkerBackendKind::ClaudeCode,
+                "/Users/you/Library/Application Support/pots",
+            ),
         },
         InstanceView {
             id: home,
@@ -1165,6 +1253,7 @@ pub fn store() -> Store {
             pauses: vec![],
             sources: vec![],
             github: GithubView::default(),
+            worker: mock_worker(WorkerBackendKind::Builtin, "/var/lib/pots"),
         },
     ];
 
@@ -1297,6 +1386,47 @@ pub fn store() -> Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_only_needs_human_or_failed_tasks() {
+        let mut store = store();
+        let tasks: Vec<_> = store
+            .instances
+            .iter()
+            .flat_map(|i| {
+                i.projects
+                    .iter()
+                    .flat_map(|p| p.goals.iter())
+                    .flat_map(|g| g.tasks.iter())
+                    .map(move |t| (i.id, t.id, t.state.clone()))
+            })
+            .collect();
+        store.outbox.clear();
+        for (inst, task, _) in &tasks {
+            store.retry_task(*inst, *task);
+        }
+        let retried: Vec<_> = tasks
+            .iter()
+            .filter(|(_, _, state)| retryable(state))
+            .map(|(_, t, _)| *t)
+            .collect();
+        assert_eq!(retried.len(), 2, "假資料有一個需要你、一個失敗");
+        let sent: Vec<_> = store
+            .outbox
+            .iter()
+            .map(|(_, c)| match c {
+                ClientCommand::RetryTask { task } => *task,
+                other => panic!("不該送 {other:?}"),
+            })
+            .collect();
+        assert_eq!(sent, retried);
+        for (inst, task, _) in tasks.iter().filter(|(_, t, _)| retried.contains(t)) {
+            assert_eq!(
+                store.task(*inst, *task).unwrap().1.state,
+                TaskStateView::Planned
+            );
+        }
+    }
 
     #[test]
     fn observation_edits_update_locally_and_queue_commands() {
