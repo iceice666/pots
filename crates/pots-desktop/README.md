@@ -37,8 +37,9 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | 記憶 | 頻道的「記憶」分頁：Observer 整理出的觀察與「目前在做什麼」，可以釘選、修正（Enter 儲存）、刪除；整理失敗時顯示原因 |
 | Goal 與任務 | agent 開 Goal 時回覆下面附 Goal 卡片（狀態、任務數、Planner 的最後一句話），Planner 的里程碑是對話裡的卡片。右欄 Goal 面板：任務依狀態分組、Brief 全文、Ledger；任務 thread 的「取消任務」會送到服務。M2 還沒有 worker，任務停在「等待中」；Team 貼文與「留言給 Planner」在 M4 |
 | Artifacts | 頻道「Artifacts」分頁與右欄編輯器：修改先是草稿（「未儲存」），按「儲存」帶著編輯開始時的版本送出；期間 agent 改過時服務以 `##` 區段合併，同一段兩邊都改過會拒絕並保留草稿。沒有草稿時，agent 的修改直接顯示。「版本紀錄」列出每一版的作者、時間與 diff，可以還原。改 Goal 的 Brief 會叫醒 Planner |
-| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；「記憶」：整理記憶用的 provider 與模型（預設跟對話相同）；「關於」：版本與實例資訊 |
-| 其他 | 自動化、總管在 live 模式是空的，等之後的里程碑 |
+| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；「記憶」：整理記憶用的 provider 與模型（預設跟對話相同）；「GitHub」：fine-grained token（只顯示末四碼）、API base URL（改了要重新輸入 token）、webhook secret、測試連線、來源狀態；「關於」：版本與實例資訊 |
+| 自動化 | 頻道「自動化」分頁：監看的 repo（編輯後 Enter 儲存）、暫停／恢復這個 project 的自動化、這個 project 的排程與 listener。左欄「排程」「Listener」進實例的自動化頁：「全部暫停」與暫停橫幅的「立即恢復」、排程的啟用開關與刪除、listener 的啟用／停用／刪除、agent 提案的 listener 按「啟用」才生效（核准流程在 M5）、「新增 listener」表單（事件種類、label／author／branch／conclusion 條件、開 Goal／快速修正／通知對話、每小時上限）、外部來源的健康狀態。listener 開的 Goal 在對話裡是 Goal 卡片；排程與 listener 送給對話 agent 的通知是對話裡的一則事件。等待中的任務在 Goal 面板顯示在等什麼與逾時時間 |
+| 其他 | 總管在 live 模式是空的（M6）；「改時間」「編輯條件」還沒接上 |
 
 ## 已有的畫面（`--mock` 假資料）
 
@@ -55,18 +56,18 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | 記憶 | auth-service 有一份假的記憶（含釘選與修正過的觀察）；釘選、修正、刪除只改本地狀態 |
 | 總管 | 左欄「總管」或 ⌘⇧O（其他平台 Ctrl+Shift+O）切換過去，和頻道一樣佔中欄；右欄是專案概況（點了進該 project）與總管記得的事。在總管畫面切換實例會留在新實例的總管 |
 
-「看 diff」「看 trace」「看提案」「新增 listener」「編輯條件」「改時間」「加入實例」、實例選單等按鈕還沒實作，點了會在底部提示。
+「看 diff」「看 trace」「看提案」「編輯條件」「改時間」「加入實例」、實例選單等按鈕還沒實作，點了會在底部提示。
 
-自動化的開關、刪除、恢復只改本地狀態：這些走 HTTP API，提案裡還沒定義，所以不會記進 `Store::outbox`。
+自動化的開關、刪除、暫停與恢復先改本地狀態，同時記進 `Store::outbox`；連著服務時由 `Automation` 事件整份替換。
 
 ## 結構
 
 - `src/model.rs`：客戶端的整體狀態 `Store`；view model 與即時協定在 [`pots-proto`](../pots-proto/)。使用者動作把要送出的指令記在 `Store::outbox`，live 模式下每次重繪前送給服務。
 - `src/connection.rs`：一個實例的 WebSocket 連線，跑在自己的執行緒與 tokio runtime；斷線自動重連並帶 `Resume { last_seq }`。
-- `src/sync.rs`：把 `ServerEvent` 套用到 `Store`（快照換掉暫用的實例 ID、串流文字、provider 與登入狀態轉成 Inbox 提示、`Memory` 整份替換 project 的記憶、`GoalChanged`／`ArtifactChanged` 整筆替換 Goal 與 artifact、UTC 轉本地時間）。
+- `src/sync.rs`：把 `ServerEvent` 套用到 `Store`（快照換掉暫用的實例 ID、串流文字、provider 與登入狀態轉成 Inbox 提示、`Memory` 整份替換 project 的記憶、`GoalChanged`／`ArtifactChanged` 整筆替換 Goal 與 artifact、`Automation` 整份替換排程／listener／暫停／來源、`Github` 與 `ProjectRepos`、UTC 轉本地時間）。
 - `src/mock.rs`：假資料。
 - `src/app.rs`：根視圖 `PotsApp`，持有 `Store` 與 UI 狀態（目前畫面、右欄、篩選、輸入框）。
-- `src/views/`：各區塊的 render；`memory.rs` 是「記憶」分頁，`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`widgets.rs` 是手刻的小元件，`theme.rs` 是色票。
+- `src/views/`：各區塊的 render；`memory.rs` 是「記憶」分頁，`artifact.rs` 是 artifact 列表與編輯器，`automation.rs` 是自動化頁與詳細面板，`automation_forms.rs` 是 GitHub 設定、新增 listener、監看 repo 與暫停的表單，`widgets.rs` 是手刻的小元件，`theme.rs` 是色票。
 
 ## 驗證
 
@@ -76,7 +77,7 @@ cargo test -p pots-desktop --test screenshots    # 用離屏 renderer 輸出主�
 cargo run -p pots-desktop --example probe -- <資料目錄> project 名稱 send 你好   # 不開視窗直接和服務說話
 ```
 
-截圖裡的 `11-live-*` 到 `17-live-*` 會在背景起一個真的服務（模型換成腳本），走一次「還沒設定 provider → 設定視窗新增 OpenAI 相容 API、測試連線、儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開 Goal、Planner 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄」。
+截圖裡的 `11-live-*` 到 `21-live-*` 會在背景起一個真的服務（模型換成腳本，GitHub API 指到沒有服務的本機 port），走一次「還沒設定 provider → 設定視窗新增 OpenAI 相容 API、測試連線、儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開 Goal、Planner 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄 → 設定 GitHub token → 監看 repo、agent 建立排程 → 新增 listener」。
 
 截圖寫到 `target/tmp/screenshots/`，需要 Metal（macOS）或 WGPU（Linux）。這只是產生圖檔方便檢查版面，不是 golden-image 比對。
 

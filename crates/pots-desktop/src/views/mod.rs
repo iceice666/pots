@@ -2,6 +2,7 @@
 
 mod artifact;
 mod automation;
+pub(crate) mod automation_forms;
 mod channel;
 mod inbox;
 mod memory;

@@ -349,9 +349,12 @@ mod tests {
                     memory: MemoryView::default(),
                     goals: vec![],
                     artifacts: vec![],
+                    repos: vec![],
                 }],
                 model_auth: ModelAuthView::SignedOut,
                 providers: ProvidersView::default(),
+                automation: Default::default(),
+                github: Default::default(),
             },
         });
         assert!(state.unacked.is_empty());

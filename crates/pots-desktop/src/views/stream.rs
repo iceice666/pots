@@ -349,6 +349,17 @@ impl PotsApp {
                 Some(g) => self.render_goal_card(g, cx).into_any_element(),
                 None => muted("Goal 已不存在").into_any_element(),
             },
+            // listener 依外部事件開的 Goal：上面註明是哪個事件觸發的。
+            Card::Triggered { goal, event, .. } => div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(muted(format!("listener 觸發：{event}")))
+                .child(match self.store.goal(self.instance, *goal) {
+                    Some(g) => self.render_goal_card(g, cx).into_any_element(),
+                    None => muted("Goal 已不存在").into_any_element(),
+                })
+                .into_any_element(),
             Card::Approval { id } => match self.store.approval(*id) {
                 Some(a) => self.render_approval_card(a, cx).into_any_element(),
                 None => muted("核准請求已不存在").into_any_element(),

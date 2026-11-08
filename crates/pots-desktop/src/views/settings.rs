@@ -23,7 +23,7 @@ use crate::theme;
 /// 「測試連線」最多列出幾個模型，太多時只顯示前面的。
 const MAX_MODEL_CHIPS: usize = 40;
 
-fn field(label: &str, hint: Option<&str>, input: AnyElement) -> Div {
+pub(super) fn field(label: &str, hint: Option<&str>, input: AnyElement) -> Div {
     div()
         .flex()
         .flex_col()
@@ -43,7 +43,7 @@ fn field(label: &str, hint: Option<&str>, input: AnyElement) -> Div {
         }))
 }
 
-fn detail_row(label: &str, value: impl Into<SharedString>) -> Div {
+pub(super) fn detail_row(label: &str, value: impl Into<SharedString>) -> Div {
     div()
         .flex()
         .gap(px(12.))
@@ -58,7 +58,7 @@ fn detail_row(label: &str, value: impl Into<SharedString>) -> Div {
         .child(div().child(value.into()))
 }
 
-fn card() -> Div {
+pub(super) fn card() -> Div {
     div()
         .flex()
         .flex_col()
@@ -127,6 +127,7 @@ impl PotsApp {
             let glyph = match t {
                 SettingsTab::Providers => IconName::Sparkles,
                 SettingsTab::Memory => IconName::Brain,
+                SettingsTab::Github => IconName::GitPullRequest,
                 SettingsTab::About => IconName::Info,
             };
             nav = nav.child(
@@ -165,6 +166,7 @@ impl PotsApp {
         let body = match tab {
             SettingsTab::Providers => self.render_providers_section(cx).into_any_element(),
             SettingsTab::Memory => self.render_memory_section(cx).into_any_element(),
+            SettingsTab::Github => self.render_github_section(cx).into_any_element(),
             SettingsTab::About => self.render_about_section().into_any_element(),
         };
         let content = div()

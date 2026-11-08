@@ -28,6 +28,23 @@ pub struct Applied {
     pub artifacts_reset: bool,
     /// `ArtifactHistory` 的結果（時間已換成本地）。
     pub artifact_history: Option<(ArtifactId, Vec<ArtifactRevisionView>)>,
+    /// GitHub 設定有變（`Github` 事件或快照）。
+    pub github_changed: bool,
+    /// `TestGithub` 的結果：請求編號與帳號或錯誤。
+    pub github_test: Option<(u64, Result<String, String>)>,
+    /// 排程、listener 或暫停有變（`Automation` 事件或快照）。
+    pub automation_changed: bool,
+    /// 套用後這個實例有幾個 listener。
+    pub listener_count: usize,
+    /// 這個 project 監看的 repo 換了（`ProjectRepos`）。
+    pub repos_changed: Option<ProjectId>,
+}
+
+/// 已經換成本地時間的 `Timestamp` 顯示成 `11/08 09:00`。
+pub fn month_day_time(at: Timestamp) -> String {
+    chrono::DateTime::from_timestamp(at.0, 0)
+        .map(|t| t.format("%m/%d %H:%M").to_string())
+        .unwrap_or_default()
 }
 
 /// 本地時區相對 UTC 的秒數。
@@ -55,6 +72,9 @@ pub fn placeholder_instance(id: InstanceId, name: &str) -> InstanceView {
         schedules: vec![],
         listeners: vec![],
         automation_pause: None,
+        pauses: vec![],
+        sources: vec![],
+        github: GithubView::default(),
         providers: ProvidersView::default(),
         model_auth: ModelAuthView::SignedOut,
     }
@@ -126,7 +146,48 @@ impl Sync {
                 .map(|a| self.localize_artifact(a))
                 .collect(),
             memory: p.memory,
+            repos: p.repos,
         }
+    }
+
+    /// 自動化頁的資料整份換掉。排程與 listener 的顯示文字服務已經用本地時間排好；
+    /// `next_at`、`expires_at` 留著 UTC，只拿來送指令。暫停與來源的時間換成本地。
+    fn apply_automation(&self, view: &mut InstanceView, automation: AutomationView) {
+        view.schedules = automation.schedules;
+        view.listeners = automation.listeners;
+        view.pauses = automation
+            .pauses
+            .into_iter()
+            .map(|mut p| {
+                p.until = p.until.map(|u| self.local(u));
+                p.at = self.local(p.at);
+                p
+            })
+            .collect();
+        view.sources = automation
+            .sources
+            .into_iter()
+            .map(|mut s| {
+                s.last_ok = s.last_ok.map(|t| self.local(t));
+                if let SourceHealth::Error { since, .. } = &mut s.health {
+                    *since = self.local(*since);
+                }
+                s
+            })
+            .collect();
+        view.automation_pause =
+            view.pauses
+                .iter()
+                .find(|p| p.project.is_none())
+                .map(|p| AutomationPause {
+                    until: p
+                        .until
+                        .map_or_else(|| "手動恢復為止".to_string(), month_day_time),
+                    until_short: p
+                        .until
+                        .map_or_else(|| "手動恢復".to_string(), |u| u.hh_mm()),
+                    by: format!("由{}在 {} 暫停", p.by, month_day_time(p.at)),
+                });
     }
 
     /// 套用一個事件。`instance` 是這條連線在 `Store` 裡目前的實例 ID。
@@ -157,7 +218,11 @@ impl Sync {
                 view.projects = projects;
                 view.providers = snap.providers;
                 view.model_auth = snap.model_auth;
+                view.github = snap.github;
+                self.apply_automation(view, snap.automation);
                 out.providers_changed = true;
+                out.github_changed = true;
+                out.automation_changed = true;
                 out.artifacts_reset = true;
                 if new_id != instance {
                     for item in store.inbox.iter_mut().filter(|i| i.instance == instance) {
@@ -296,6 +361,28 @@ impl Sync {
                     r.at = self.local(r.at);
                 }
                 out.artifact_history = Some((artifact, revisions));
+            }
+            ServerEvent::Automation { automation, .. } => {
+                if let Some(view) = store.instance_mut(instance) {
+                    self.apply_automation(view, automation);
+                    out.listener_count = view.listeners.len();
+                }
+                out.automation_changed = true;
+            }
+            ServerEvent::Github { github, .. } => {
+                if let Some(view) = store.instance_mut(instance) {
+                    view.github = github;
+                }
+                out.github_changed = true;
+            }
+            ServerEvent::ProjectRepos { project, repos, .. } => {
+                if let Some(p) = store.project_mut(instance, project) {
+                    p.repos = repos;
+                }
+                out.repos_changed = Some(project);
+            }
+            ServerEvent::GithubTest { request, result } => {
+                out.github_test = Some((request, result));
             }
             ServerEvent::Error { message } => out.toast = Some(message),
             // 任務的變化隨 `GoalChanged` 整個 Goal 送來；核准在 M5。
@@ -476,9 +563,12 @@ mod tests {
                     memory: MemoryView::default(),
                     goals: vec![],
                     artifacts: vec![],
+                    repos: vec![],
                 }],
                 model_auth: auth,
                 providers: chatgpt_active(),
+                automation: Default::default(),
+                github: Default::default(),
             },
         }
     }

@@ -60,20 +60,75 @@ pub enum SettingsTab {
     Providers,
     /// Observational Memory：整理記憶用的模型。
     Memory,
+    /// GitHub 連線：token、API base URL、webhook secret。
+    Github,
     /// 版本與目前實例的資訊。
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [Self; 3] = [Self::Providers, Self::Memory, Self::About];
+    pub const ALL: [Self; 4] = [Self::Providers, Self::Memory, Self::Github, Self::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Providers => "模型 Provider",
             Self::Memory => "記憶",
+            Self::Github => "GitHub",
             Self::About => "關於",
         }
     }
+}
+
+/// 設定視窗「GitHub」類別正在改的連線設定。秘密欄位留空表示沿用已存的。
+pub struct GithubEditor {
+    pub token: Entity<InputState>,
+    pub api_base: Entity<InputState>,
+    pub webhook_secret: Entity<InputState>,
+    pub test: GithubTest,
+    pub saving: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GithubTest {
+    Idle,
+    Running(u64),
+    Ok(String),
+    Err(String),
+}
+
+/// 右欄「新增 listener」表單。
+pub struct ListenerForm {
+    pub project: Option<ProjectId>,
+    /// 選了哪些事件種類（`EVENT_KINDS` 的名稱）。
+    pub kinds: Vec<&'static str>,
+    pub action: ListenerActionKind,
+    pub label: Entity<InputState>,
+    pub author: Entity<InputState>,
+    pub branch: Entity<InputState>,
+    pub conclusion: Entity<InputState>,
+    pub template: Entity<InputState>,
+    pub max_per_hour: Entity<InputState>,
+    pub saving: bool,
+    /// 送出時已有幾個 listener；多出一個才算建立成功。
+    pub listeners_before: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenerActionKind {
+    CreateGoal,
+    QuickFix,
+    NotifyChat,
+}
+
+/// 頻道「自動化」分頁正在改的監看 repo。
+pub struct RepoEditor {
+    pub project: ProjectId,
+    pub input: Entity<InputState>,
+    pub saving: bool,
+    pub error: Option<String>,
+    _subscription: Subscription,
 }
 
 /// 設定視窗「記憶」類別正在改的整理記憶模型。
@@ -93,6 +148,22 @@ pub struct ObservationEditor {
     pub id: ObservationId,
     pub input: Entity<InputState>,
     _subscription: Subscription,
+}
+
+impl RepoEditor {
+    pub(crate) fn new(
+        project: ProjectId,
+        input: Entity<InputState>,
+        subscription: Subscription,
+    ) -> Self {
+        Self {
+            project,
+            input,
+            saving: false,
+            error: None,
+            _subscription: subscription,
+        }
+    }
 }
 
 /// 設定頁正在新增或修改的 provider。
@@ -155,6 +226,8 @@ pub enum Panel {
     Artifact(ArtifactId),
     Schedule(ScheduleId),
     Listener(ListenerId),
+    /// 新增 listener 的表單（[`PotsApp::listener_form`]）。
+    NewListener,
 }
 
 /// 右欄正在編輯的 artifact：每個 `##` 區段一個編輯器。
@@ -260,7 +333,10 @@ pub struct PotsApp {
     pub provider_editor: Option<ProviderEditor>,
     pub memory_model_editor: Option<MemoryModelEditor>,
     pub observation_editor: Option<ObservationEditor>,
-    next_test_request: u64,
+    pub github_editor: Option<GithubEditor>,
+    pub listener_form: Option<ListenerForm>,
+    pub repo_editor: Option<RepoEditor>,
+    pub(crate) next_test_request: u64,
     /// 左欄「新增專案」的輸入框；`None` 時顯示按鈕。
     pub new_project: Option<(Entity<InputState>, Subscription)>,
     pub stream_scroll: ScrollHandle,
@@ -360,6 +436,9 @@ impl PotsApp {
             provider_editor: None,
             memory_model_editor: None,
             observation_editor: None,
+            github_editor: None,
+            listener_form: None,
+            repo_editor: None,
             next_test_request: 0,
             stream_scroll: ScrollHandle::new(),
             overseer_scroll: ScrollHandle::new(),
@@ -459,6 +538,9 @@ impl PotsApp {
                     editor.saving = false;
                     editor.error = Some("連線中斷，請再儲存一次".into());
                 }
+                if state != ConnectionState::Connected {
+                    self.forms().on_disconnected();
+                }
                 if let Some(i) = self.store.instance_mut(instance) {
                     i.connection = state;
                     i.host = match state {
@@ -471,6 +553,13 @@ impl PotsApp {
             ConnEvent::Problem(problem) => self.toast = Some(problem),
             ConnEvent::Server(event) => {
                 let applied = live.sync.apply(&mut self.store, instance, *event);
+                crate::views::automation_forms::Forms {
+                    github: &mut self.github_editor,
+                    listener: &mut self.listener_form,
+                    repo: &mut self.repo_editor,
+                    panel: &mut self.panel,
+                }
+                .applied(&applied);
                 if let Some((old, new)) = applied.rekeyed {
                     live.instance = new;
                     if self.instance == old {
@@ -485,7 +574,17 @@ impl PotsApp {
                 {
                     cx.open_url(&url);
                 }
-                if let Some(toast) = applied.toast {
+                // 自動化與 GitHub 的表單被拒絕時，原因顯示在表單裡。
+                let toast = applied.toast.clone().and_then(|t| {
+                    crate::views::automation_forms::Forms {
+                        github: &mut self.github_editor,
+                        listener: &mut self.listener_form,
+                        repo: &mut self.repo_editor,
+                        panel: &mut self.panel,
+                    }
+                    .route_error(t)
+                });
+                if let Some(toast) = toast {
                     // 儲存 provider 或 artifact 被拒絕：原因顯示在表單或編輯器裡。
                     match (
                         &mut self.provider_editor,
@@ -598,6 +697,15 @@ impl PotsApp {
         cx.notify();
     }
 
+    fn forms(&mut self) -> crate::views::automation_forms::Forms<'_> {
+        crate::views::automation_forms::Forms {
+            github: &mut self.github_editor,
+            listener: &mut self.listener_form,
+            repo: &mut self.repo_editor,
+            panel: &mut self.panel,
+        }
+    }
+
     /// 把使用者動作累積的指令送給服務。假資料模式不送，留在 outbox 方便測試。
     fn flush_outbox(&mut self) {
         let Some(live) = &mut self.live else {
@@ -663,6 +771,7 @@ impl PotsApp {
         self.settings = None;
         self.provider_editor = None;
         self.memory_model_editor = None;
+        self.github_editor = None;
         cx.notify();
     }
 
@@ -808,7 +917,7 @@ impl PotsApp {
     }
 
     /// 設定頁的動作在假資料模式下沒有服務可以存，只提示。回傳是否送出。
-    fn settings_command(
+    pub(crate) fn settings_command(
         &mut self,
         command: ClientCommand,
         label: &str,
@@ -1455,7 +1564,7 @@ impl PotsApp {
     }
 
     pub fn resume_automations(&mut self, cx: &mut Context<Self>) {
-        self.store.resume_automations(self.instance);
+        self.store.resume_automations(self.instance, None);
         cx.notify();
     }
 

@@ -184,7 +184,8 @@ impl PotsApp {
     /// 實例層級的自動化頁（左欄「排程」「Listener」）。
     pub fn render_automations_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let inst = self.current_instance();
-        let empty = inst.schedules.is_empty() && inst.listeners.is_empty();
+        let empty =
+            inst.schedules.is_empty() && inst.listeners.is_empty() && inst.sources.is_empty();
 
         let header = div()
             .flex()
@@ -215,9 +216,15 @@ impl PotsApp {
                     ),
             )
             .when(!empty, |d| d.child(self.render_project_filter(cx)))
+            .when(inst.automation_pause.is_none() && !empty, |d| {
+                d.child(
+                    secondary_button("pause-all", "全部暫停")
+                        .on_click(cx.listener(|this, _, _, cx| this.pause_all_automations(cx))),
+                )
+            })
             .child(
                 primary_button("new-listener", "新增 listener").on_click(
-                    cx.listener(|this, _, _, cx| this.notify_unimplemented("新增 listener", cx)),
+                    cx.listener(|this, _, window, cx| this.new_listener(window, cx)),
                 ),
             );
 
@@ -260,13 +267,18 @@ impl PotsApp {
         p: &ProjectView,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.current_instance().automation_count(p.id) == 0 {
-            return empty_state(
-                "這個 project 沒有自動化",
-                "請 agent 定時做某件事，或讓事件自動開工，例如「issue 加上 agent label 就開 Goal」。",
-            )
-            .into_any_element();
-        }
+        let watch = self.render_project_watch(p, cx);
+        let body: Vec<AnyElement> = if self.current_instance().automation_count(p.id) == 0 {
+            vec![
+                empty_state(
+                    "這個 project 沒有自動化",
+                    "請 agent 定時做某件事，或讓事件自動開工，例如「issue 加上 agent label 就開 Goal」。",
+                )
+                .into_any_element(),
+            ]
+        } else {
+            self.render_automation_sections(Some(p.id), false, cx)
+        };
         div()
             .id("project-automations")
             .flex_1()
@@ -277,7 +289,8 @@ impl PotsApp {
             .flex()
             .flex_col()
             .gap(px(24.))
-            .children(self.render_automation_sections(Some(p.id), false, cx))
+            .child(watch)
+            .children(body)
             .into_any_element()
     }
 
@@ -334,6 +347,10 @@ impl PotsApp {
             self.render_listener_table(project, show_project, cx)
                 .into_any_element(),
         );
+        // 實例層級的頁面才列外部來源。
+        if show_project && let Some(sources) = self.render_sources(cx) {
+            out.push(sources.into_any_element());
+        }
         out
     }
 
@@ -536,6 +553,12 @@ impl PotsApp {
                     .into_any_element()
             }
             (ListenerState::Disabled, _) => text("已停用".into(), theme::text_muted()),
+            (ListenerState::Proposed, _) => {
+                pill("待你啟用", theme::warn_text(), theme::warn_soft())
+                    .text_size(px(12.))
+                    .into_any_element()
+            }
+            (ListenerState::Throttled, _) => text("超過上限，已暫停".into(), theme::warn()),
             (ListenerState::Active, Some(p)) => {
                 text(format!("暫停到{}", p.until_short), theme::warn())
             }
@@ -557,7 +580,12 @@ impl PotsApp {
             .count();
         let pending = listeners
             .iter()
-            .filter(|l| matches!(l.state, ListenerState::PendingApproval(_)))
+            .filter(|l| {
+                matches!(
+                    l.state,
+                    ListenerState::PendingApproval(_) | ListenerState::Proposed
+                )
+            })
             .count();
         let mut note = format!("{active} 個啟用");
         if pending > 0 {
@@ -767,60 +795,74 @@ impl PotsApp {
                 Some(format!("全部暫停到{}，期間的事件不會開工。", p.until))
             }
             (ListenerState::Disabled, _) => Some("已停用，事件進來不會觸發。".to_string()),
+            (ListenerState::Proposed, _) => Some(
+                "agent 提案的 listener，你啟用後才會開始監看（核准流程在之後的版本）。".to_string(),
+            ),
+            (ListenerState::Throttled, _) => {
+                Some("一小時內觸發超過上限，先暫停了。確認沒問題後重新啟用。".to_string())
+            }
             _ => None,
         };
 
-        let footer = match pending {
-            Some(approval) => {
-                Self::detail_footer()
-                    .child(
-                        small(primary_button("listener-approve", "核准")).on_click(cx.listener(
-                            move |this, _, window, cx| {
+        let footer =
+            match pending {
+                Some(approval) => {
+                    Self::detail_footer()
+                        .child(small(primary_button("listener-approve", "核准")).on_click(
+                            cx.listener(move |this, _, window, cx| {
                                 this.act(approval, InboxAction::Approve, window, cx)
-                            },
-                        )),
-                    )
-                    .child(small(secondary_button("listener-reject", "拒絕")).on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.act(approval, InboxAction::Reject, window, cx)
-                        }),
-                    ))
-                    .child(
-                        link_button("listener-edit", "修改條件")
-                            .text_size(px(13.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.notify_unimplemented("修改條件", cx)
-                            })),
-                    )
-            }
-            None => {
-                let enabled = l.state == ListenerState::Active;
-                Self::detail_footer()
-                    .child(
-                        small(secondary_button("listener-edit", "編輯條件")).on_click(
-                            cx.listener(|this, _, _, cx| this.notify_unimplemented("編輯條件", cx)),
-                        ),
-                    )
-                    .child(
-                        small(secondary_button(
-                            "listener-toggle",
-                            if enabled { "停用" } else { "啟用" },
+                            }),
                         ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_listener_enabled(id, !enabled, cx)
-                        })),
-                    )
-                    .child(
-                        link_button("listener-delete", "刪除")
-                            .ml_auto()
-                            .text_size(px(13.))
-                            .text_color(theme::danger())
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.delete_listener(id, cx)),
-                            ),
-                    )
-            }
-        };
+                        .child(small(secondary_button("listener-reject", "拒絕")).on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.act(approval, InboxAction::Reject, window, cx)
+                            }),
+                        ))
+                        .child(
+                            link_button("listener-edit", "修改條件")
+                                .text_size(px(13.))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.notify_unimplemented("修改條件", cx)
+                                })),
+                        )
+                }
+                None => {
+                    let enabled = l.state == ListenerState::Active;
+                    let proposed = l.state == ListenerState::Proposed;
+                    Self::detail_footer()
+                        .when(!proposed, |d| {
+                            d.child(
+                                small(secondary_button("listener-edit", "編輯條件")).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.notify_unimplemented("編輯條件", cx)
+                                    }),
+                                ),
+                            )
+                        })
+                        .child(
+                            small(if proposed {
+                                primary_button("listener-toggle", "啟用")
+                            } else {
+                                secondary_button(
+                                    "listener-toggle",
+                                    if enabled { "停用" } else { "啟用" },
+                                )
+                            })
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.set_listener_enabled(id, !enabled, cx),
+                            )),
+                        )
+                        .child(
+                            link_button("listener-delete", "刪除")
+                                .ml_auto()
+                                .text_size(px(13.))
+                                .text_color(theme::danger())
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.delete_listener(id, cx)),
+                                ),
+                        )
+                }
+            };
 
         panel_frame()
             .child(self.detail_header(eyebrow, l.title(), cx))

@@ -148,6 +148,7 @@ impl PotsApp {
                 let l = self.store.listener(self.instance, id)?;
                 Some(self.render_listener_panel(l, cx).into_any_element())
             }
+            Panel::NewListener => self.render_listener_form(cx),
         }
     }
 

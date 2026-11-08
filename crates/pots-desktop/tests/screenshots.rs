@@ -135,7 +135,8 @@ mod shots {
 
     /// 連到真正的服務（腳本化的模型）：還沒設定 provider → 在設定頁新增 OpenAI 相容 API
     /// → 測試連線 → 儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開 Goal、Planner
-    /// 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄。
+    /// 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄 → 設定 GitHub token → project 監看 repo、
+    /// agent 建立排程 → 自動化頁新增 listener。
     fn live_screens() {
         use pots_desktop::connection::{Endpoint, Target};
         use pots_desktop::model::*;
@@ -232,6 +233,11 @@ mod shots {
                 };
             }
             match (last_user, results) {
+                (Some(t), 0) if t.contains("排程") => ScriptedTurn::new().tool_call(
+                    "s1",
+                    "schedule",
+                    r#"{"kind":"every","cron":"0 9 * * 1-5","prompt":"整理昨天失敗的 CI，有需要就開 Goal"}"#,
+                ),
                 (Some(t), 0) if t.contains("開 Goal") => ScriptedTurn::new().tool_call(
                     "g1",
                     "create_goal",
@@ -252,11 +258,11 @@ mod shots {
             Arc::new(pots_server::FakeModelAuth::signed_out()),
         )
         .with_api_providers(Arc::new(ScriptedApi(model)));
+        // GitHub API 指到沒有服務的本機 port：截圖不會連到真的 GitHub。
+        let mut config = pots_server::Config::desktop(dir.path());
+        config.watcher.github_api = "http://127.0.0.1:9".into();
         let handle = runtime
-            .block_on(pots_server::start(
-                pots_server::Config::desktop(dir.path()),
-                deps,
-            ))
+            .block_on(pots_server::start(config, deps))
             .expect("start server");
         let target = Target {
             addr: handle.addr,
@@ -396,6 +402,65 @@ mod shots {
                 .is_some_and(|h| h.revisions.as_ref().is_some_and(|r| r.len() == 2))
         });
         s.shot("17-live-brief-history");
+
+        // 設定視窗的 GitHub 類別：貼上 token、儲存，只看得到末四碼。
+        s.update(|app, window, cx| {
+            app.open_settings(pots_desktop::app::SettingsTab::Github, cx);
+            app.edit_github(window, cx);
+            let editor = app.github_editor.as_ref().expect("表單已開啟");
+            editor.token.update(cx, |state, cx| {
+                state.set_value("ghp_screenshot_1234", window, cx)
+            });
+            app.save_github(cx);
+        });
+        s.wait_until("GitHub token 已儲存", |app| {
+            app.current_instance().github.token_hint.as_deref() == Some("…1234")
+                && app.github_editor.is_none()
+        });
+        s.shot("18-live-github");
+
+        // 頻道「自動化」分頁：監看 repo；agent 建立排程，對話裡出現卡片。
+        s.update(|app, window, cx| {
+            app.close_settings(cx);
+            app.open_panel(None, cx);
+            let project = app.current_project().unwrap().id;
+            app.edit_repos(project, window, cx);
+            let editor = app.repo_editor.as_ref().expect("repo 表單");
+            editor
+                .input
+                .update(cx, |state, cx| state.set_value("me/pots", window, cx));
+            app.save_repos(cx);
+            app.composer.update(cx, |state, cx| {
+                state.set_value("平日早上幫我排程整理 CI", window, cx)
+            });
+            app.send_composer(window, cx);
+        });
+        s.wait_until("repo 與排程", |app| {
+            app.current_project().is_some_and(|p| {
+                p.repos == ["github.com/me/pots"] && p.agent_state == AgentState::Idle
+            }) && app.current_instance().schedules.len() == 1
+        });
+        s.update(|app, _, cx| {
+            app.channel_tab = pots_desktop::app::ChannelTab::Automations;
+            cx.notify();
+        });
+        s.shot("19-live-project-automations");
+
+        // 自動化頁：新增「issue 加上 agent label → 開 Goal」的 listener。
+        s.update(|app, window, cx| {
+            app.open_automations(pots_desktop::app::AutomationSection::Listeners, cx);
+            app.new_listener(window, cx);
+        });
+        s.shot("20-live-new-listener");
+        s.update(|app, _, cx| app.save_listener_form(cx));
+        s.wait_until("listener 已建立", |app| {
+            app.current_instance().listeners.len() == 1 && app.listener_form.is_none()
+        });
+        s.update(|app, _, cx| {
+            let id = app.current_instance().listeners[0].id;
+            app.open_panel(Some(Panel::Listener(id)), cx);
+        });
+        s.shot("21-live-automations");
 
         handle.shutdown();
         runtime.block_on(handle.wait()).expect("shutdown");

@@ -148,11 +148,29 @@ impl Store {
             .find(|l| l.id == id)
     }
 
-    /// 提前結束批次暫停（`resume_automations`）。
-    pub fn resume_automations(&mut self, instance: InstanceId) {
+    // 自動化的修改先改本地，再送指令；連著服務時由 `Automation` 事件整份替換。
+
+    /// 提前結束批次暫停（`resume_automations`）。`project` 為 `None` 是「所有 project」那一筆。
+    pub fn resume_automations(&mut self, instance: InstanceId, project: Option<ProjectId>) {
         if let Some(i) = self.instance_mut(instance) {
-            i.automation_pause = None;
+            if project.is_none() {
+                i.automation_pause = None;
+            }
+            i.pauses.retain(|p| p.project != project);
         }
+        self.outbox
+            .push((instance, ClientCommand::ResumeAutomations { project }));
+    }
+
+    /// 暫停排程與 listener，直到手動恢復。顯示等服務回 `Automation`。
+    pub fn pause_automations(&mut self, instance: InstanceId, project: Option<ProjectId>) {
+        self.outbox.push((
+            instance,
+            ClientCommand::PauseAutomations {
+                project,
+                until: None,
+            },
+        ));
     }
 
     pub fn set_schedule_enabled(&mut self, instance: InstanceId, id: ScheduleId, enabled: bool) {
@@ -161,10 +179,12 @@ impl Store {
             .and_then(|i| i.schedules.iter_mut().find(|s| s.id == id))
         {
             s.enabled = enabled;
+            self.outbox
+                .push((instance, ClientCommand::SetScheduleEnabled { id, enabled }));
         }
     }
 
-    /// 啟用或停用 listener；等待核准中的不受影響。
+    /// 啟用或停用 listener；等待核准中的不受影響。啟用 agent 提案的 listener 就是核准它。
     pub fn set_listener_enabled(&mut self, instance: InstanceId, id: ListenerId, enabled: bool) {
         if let Some(l) = self
             .instance_mut(instance)
@@ -176,6 +196,8 @@ impl Store {
             } else {
                 ListenerState::Disabled
             };
+            self.outbox
+                .push((instance, ClientCommand::SetListenerEnabled { id, enabled }));
         }
     }
 
@@ -183,12 +205,33 @@ impl Store {
         if let Some(i) = self.instance_mut(instance) {
             i.schedules.retain(|s| s.id != id);
         }
+        self.outbox
+            .push((instance, ClientCommand::DeleteSchedule { id }));
     }
 
     pub fn delete_listener(&mut self, instance: InstanceId, id: ListenerId) {
         if let Some(i) = self.instance_mut(instance) {
             i.listeners.retain(|l| l.id != id);
         }
+        self.outbox
+            .push((instance, ClientCommand::DeleteListener { id }));
+    }
+
+    /// 新增 listener；服務檢查後以 `Automation` 回來（被拒絕時回 `Error`）。
+    pub fn save_listener(&mut self, instance: InstanceId, spec: ListenerSpec) {
+        self.outbox
+            .push((instance, ClientCommand::SaveListener { id: None, spec }));
+    }
+
+    /// 設定 project 監看的 repo；服務整理寫法後以 `ProjectRepos` 回來。
+    pub fn set_project_repos(
+        &mut self,
+        instance: InstanceId,
+        project: ProjectId,
+        repos: Vec<String>,
+    ) {
+        self.outbox
+            .push((instance, ClientCommand::SetProjectRepos { project, repos }));
     }
 
     /// `None` 代表所有實例。

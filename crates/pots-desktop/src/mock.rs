@@ -565,6 +565,7 @@ pub fn store() -> Store {
                 )
             },
         ],
+        repos: vec![],
     };
 
     // ---- 家用伺服器 · 其他 project ----------------------------------------
@@ -667,6 +668,7 @@ pub fn store() -> Store {
                  - [ ] 修正 e2e/checkout.spec.ts（CI 連續失敗 3 次，等你決定）\n",
             ),
         ],
+        repos: vec![],
     };
 
     let infra = ProjectView {
@@ -712,6 +714,7 @@ pub fn store() -> Store {
                 INFRA_NOTES,
             ),
         ],
+        repos: vec![],
     };
     let infra_id = infra.id;
 
@@ -737,6 +740,7 @@ pub fn store() -> Store {
             None,
             "# Project Notes\n\n## 建置\n\n- 文件站用 `mdbook build`，輸出在 `book/`。\n",
         )],
+        repos: vec![],
     };
     let docs_id = docs.id;
     let auth_id = auth;
@@ -915,6 +919,7 @@ pub fn store() -> Store {
             Some(shell_goal),
             "# 整理 shell 設定\n\n## 目標\n\n合併重複的 alias，移除過期的 PATH 設定。\n",
         )],
+        repos: vec![],
     };
     let side_id = ProjectId::from_u64(ids.next());
     let side = ProjectView {
@@ -941,6 +946,7 @@ pub fn store() -> Store {
         ],
         goals: vec![],
         artifacts: vec![],
+        repos: vec![],
     };
 
     // ---- 家用伺服器 · 自動化 -------------------------------------------------
@@ -963,6 +969,10 @@ pub fn store() -> Store {
                 ),
                 trigger("11/5 08:00 → 沒有失敗", "花費 $0.03", TriggerStatus::Done),
             ],
+            next_at: None,
+            expires_at: None,
+            goal: None,
+            finished: false,
         },
         ScheduleView {
             id: ScheduleId::from_u64(ids.next()),
@@ -975,6 +985,10 @@ pub fn store() -> Store {
             next_after_pause: None,
             enabled: true,
             history: vec![],
+            next_at: None,
+            expires_at: None,
+            goal: None,
+            finished: false,
         },
         ScheduleView {
             id: ScheduleId::from_u64(ids.next()),
@@ -991,6 +1005,10 @@ pub fn store() -> Store {
                 "花費 $0.08",
                 TriggerStatus::Done,
             )],
+            next_at: None,
+            expires_at: None,
+            goal: None,
+            finished: false,
         },
     ];
     let home_listeners = vec![
@@ -1026,6 +1044,7 @@ pub fn store() -> Store {
                     TriggerStatus::Running,
                 ),
             ],
+            spec: None,
         },
         ListenerView {
             id: ListenerId::from_u64(ids.next()),
@@ -1051,6 +1070,7 @@ pub fn store() -> Store {
                 "11/6 23:10 · 沒有任務受影響",
                 TriggerStatus::Notified,
             )],
+            spec: None,
         },
         ListenerView {
             id: ListenerId::from_u64(ids.next()),
@@ -1072,6 +1092,7 @@ pub fn store() -> Store {
             triggers_this_week: 0,
             state: ListenerState::PendingApproval(infra_listener_approval),
             history: vec![],
+            spec: None,
         },
     ];
 
@@ -1109,6 +1130,9 @@ pub fn store() -> Store {
             model_auth: ModelAuthView::SignedIn {
                 account: Some("you@example.com".into()),
             },
+            pauses: vec![],
+            sources: vec![],
+            github: GithubView::default(),
         },
         InstanceView {
             id: home,
@@ -1138,6 +1162,9 @@ pub fn store() -> Store {
             model_auth: ModelAuthView::SignedIn {
                 account: Some("you@example.com".into()),
             },
+            pauses: vec![],
+            sources: vec![],
+            github: GithubView::default(),
         },
     ];
 
