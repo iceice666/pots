@@ -16,7 +16,7 @@
 
 - Claude Code 邊界：僅執行原版 binary，使用者走官方登入；遵守平台承載與個人用量條款，不代收 Claude.ai token、不轉售用量。使用者專屬 CLI 狀態與 task worktree 分開持久化；憑證更新與 session 續接不可依賴唯讀掛載假設。
 
-- Worker 沙箱：每個任務一個 git worktree，`run` 工具在 Docker/Podman 容器內執行（不用 bubblewrap，省去自行調校 seccomp 等設定），預設拒絕對外網路，依角色只開必要的套件倉庫、官方驗證／推論端點與平台 MCP 端點。ChatGPT provider 在 pots 服務端執行，不把其 token 交給任務容器；Claude Code 容器需自己的官方連線。禁止取得宿主 Docker socket 與其他任務的秘密。
+- Worker 沙箱：每個任務一個 git worktree，`run` 工具在 Docker/Podman 容器內執行（不用 bubblewrap，省去自行調校 seccomp 等設定），預設拒絕對外網路，依角色只開必要的套件倉庫、官方驗證／推論端點與平台 MCP 端點。ChatGPT provider 在 pots 服務端執行，不把其 token 交給任務容器；Claude Code 容器需自己的官方連線。禁止取得宿主 Docker socket 與其他任務的秘密。M4 的實作：每個任務一個獨立的 git repo（不是 `git worktree`），平台不在不信任的工作目錄裡執行會讀它設定的 git 指令；容器拿掉所有 capability、`no-new-privileges`、以你的 uid 執行，GitHub token 只在平台這邊的 git 與 API 用；對外網路的白名單還沒做（容器可以連外網），也還有「本機（沒有沙箱）」的選項。見[M4 的實作](agent-runtime.md#m4-的實作)。
 
 - 託管電腦：node 是專用機、可以清空，不放個人資料，也不登入你的個人帳號，這是 GUI 操作免核准的前提。node 主動連出、只走私有網路，以 Ed25519 金鑰配對；node 上不存模型憑證，GitHub token 照舊短效且限定 repo。effectful app 裡的不可逆操作走 `gui_checkpoint`，執行前驗證畫面；每一步的截圖都寫進 trace。詳見[託管電腦](computer-nodes.md#核准與-gui-的副作用)。
 

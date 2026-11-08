@@ -142,7 +142,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `team_posts` | Goal 內 team 成員的短訊（發現、問題、決定、阻礙、交接） | `id, goal_id, author_task?, kind, to_task?, body, at` |
 | `sources` | 外部來源的設定、輪詢進度與健康狀態 | `id, kind, config, trust, ingest, cursor, health, enabled` |
 
-`model_connections` 不儲存 OAuth token 或 API key；`secret_ref` 指向資料目錄裡的秘密檔（`auth/providers/<id>.json`），host ID 依持久執行環境保存。`worker_sessions.state_ref` 指向官方 session 儲存，不是 Claude token 匯入欄位。以上為待實作的概念 schema，帳號／workspace 註冊與 user 所有權須隔離。
+`model_connections` 不儲存 OAuth token 或 API key；`secret_ref` 指向資料目錄裡的秘密檔（`auth/providers/<id>.json`），host ID 依持久執行環境保存。`worker_sessions.state_ref` 指向官方 session 儲存，不是 Claude token 匯入欄位（M4 已實作，另有 `cli_version`；Team 貼文是 `team_posts` 與 `team_reads`）。以上其餘為待實作的概念 schema，帳號／workspace 註冊與 user 所有權須隔離。
 
 `stream_items` 給人看，`om_raw` 給 agent 用，兩者以 `run_id` 關聯。這樣 UI 可以保留完整歷史，OM 也可以自由壓縮，互不干擾。
 
