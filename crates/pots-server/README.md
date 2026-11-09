@@ -15,7 +15,8 @@ cargo run -p pots-server -- [--data-dir <路徑>] [--port <port>]
 對話用「使用中的 provider」，在設定裡切換（`SaveProvider`／`DeleteProvider`／`SetActiveProvider`／`TestProvider` 指令，狀態是快照與 `Providers` 事件裡的 `ProvidersView`）：
 
 - **ChatGPT 方案**（內建，ID 固定）：SIWC 授權。模型以設定指定的為準，其次是 `POTS_CHAT_MODEL`，都沒有就用帳號可用清單的第一個。
-- **OpenAI 相容／Anthropic 相容 API**：使用者自己新增，填 base URL、API key 與模型。OpenAI 相容的 key 可以不填（例如本機的 Ollama），Anthropic 相容的一定要填。
+- **OpenAI 相容／OpenAI Responses／Anthropic 相容 API**：使用者自己新增，填 base URL、API key 與模型。OpenAI 相容的 key 可以不填（例如本機的 Ollama），其他種類一定要填。
+- **OpenCode Zen／OpenCode Go**：內建 pi-ai 的模型目錄（`crates/pots-proto/data/provider-presets.json`），依模型自動選 Anthropic Messages、Responses 或 Chat Completions；新增時預填 `x-opencode-client: pots`，`x-opencode-session` 由每個 run 的 `session_id` 自動帶。可以另外編輯每次請求的 header（`model_connections.headers`；值不是秘密，不要放 API key）。
 
 第一次啟動時沒有使用中的 provider（要到設定選）；但如果 ChatGPT 已經登入，就直接選 ChatGPT。還沒選 provider 就傳訊息，回覆會失敗並提示到設定新增。
 

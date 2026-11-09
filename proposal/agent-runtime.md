@@ -211,14 +211,28 @@ M0 已依上述約定實作，並對假的 OAuth 與 Responses 伺服器測試�
 | --- | --- | --- | --- |
 | ChatGPT 方案（內建一筆） | `responses::ResponsesProvider` | `POST https://api.openai.com/v1/responses` | SIWC 登入，見上節 |
 | OpenAI 相容 API | `openai_compat::OpenAiCompatProvider` | `POST {base_url}/chat/completions`，base URL 到 `/v1` 為止 | `Authorization: Bearer <key>`；key 可以留空，給 Ollama 這類本機服務 |
+| OpenAI Responses API | `responses::ResponsesProvider::with_api_key` | `POST {base_url}/responses`，base URL 到 `/v1` 為止 | `Authorization: Bearer <key>`；key 必填 |
 | Anthropic 相容 API | `anthropic::AnthropicProvider` | `POST {base_url}/v1/messages` | `x-api-key` 與 `anthropic-version: 2023-06-01`；key 必填 |
+| OpenCode Zen／Go（內建目錄） | `preset_provider::PresetProvider` 依模型轉給上面三種實作 | Anthropic 模型是 `{base_url}/v1/messages`，OpenAI 模型是 `{base_url}/v1/chat/completions` 或 `/responses` | `x-api-key` 或 `Authorization: Bearer`（看模型的 API），加上 `x-opencode-client`；`x-opencode-session` 由 Pots 每次對話自動帶 |
 
-- **對應。** `instructions` 在 OpenAI 相容 API 是第一則 `system` 訊息，在 Anthropic 是頂層 `system`。同一輪的文字與工具呼叫合成一則 assistant 訊息；工具結果在 OpenAI 是 `tool` 角色，在 Anthropic 是 user 訊息裡的 `tool_result`，相鄰同角色的訊息合併。其他 provider 的 `Item::Opaque` 略過。Anthropic 請求必帶 `max_tokens`，預設 8192。
+- **對應。** `instructions` 在 OpenAI 相容 API 是第一則 `system` 訊息，在 Responses 與 Anthropic 是頂層 `instructions`／`system`（ChatGPT plan 的工具放 `pots` namespace；OpenAI 平台 API key 的工具平整地放在 `tools`，`function_call` 不帶 `namespace`）。同一輪的文字與工具呼叫合成一則 assistant 訊息；工具結果在 OpenAI 是 `tool` 角色，在 Anthropic 是 user 訊息裡的 `tool_result`，相鄰同角色的訊息合併。其他 provider 的 `Item::Opaque` 略過。Anthropic 請求必帶 `max_tokens`，預設 8192。
 - **串流。** OpenAI 相容 API 以 `data: [DONE]` 或 `finish_reason` 結束；Anthropic 以 `message_stop` 結束。之前就斷掉的串流是 `Interrupted`。
+- **工具與推理。** Responses API 允許工具與推理並用，所以 GPT-5.4 以後的模型優先用「OpenAI Responses API」；推理不另送 `reasoning`，用模型預設值。GPT-5.4 以後的模型在 Chat Completions 預設會推理，但不接受「工具 + reasoning」，會回 400 `Function tools with reasoning_effort are not supported`。請求帶工具且被這樣拒絕時，改成 `reasoning_effort: "none"` 重送一次並記住（之後帶工具的請求直接關掉推理）；模型連 `none` 都不接受時回 `Unsupported`，提示改用 Responses API 或換模型。
 - **錯誤。** 401／403 → `InvalidCredentials`（請你到設定檢查 key）；400／404／422 → `Unsupported`；429 → `Unavailable`，帳單或額度不足另外標示；5xx 與 Anthropic 的 529 → `Unavailable`。錯誤訊息帶服務回的說明，不帶 key。
 - **測試連線。** 設定視窗的「測試連線」呼叫 `GET {base_url}/models`（Anthropic 是 `/v1/models`，會跟著分頁），回傳可用的模型讓你挑；不會儲存。
 - **秘密。** API key 存在 `data_dir/auth/providers/<id>.json`（`0600`、原子寫入），刪除 provider 時一起刪掉；不進事件日誌、快照、日誌或錯誤訊息。
 - **沒有自動 fallback。** 使用中的 provider 失敗就失敗，不會改用其他 provider；換 provider 一律由你在設定視窗切換。
+
+#### OpenCode 與額外 header
+
+pi-ai 的內建 provider 有些不是單純的 OpenAI／Anthropic 端點：OpenCode Zen／Go 的同一個 base URL 下，Claude 走 Anthropic Messages、GPT 走 Responses、其他模型走 Chat Completions，而且要求 `x-opencode-session` 這類請求 header。Pots 的做法：
+
+- **內建目錄。** `crates/pots-proto/data/provider-presets.json` 是從 pi-ai 1.4.0 的模型資料產生，只留 Pots 支援的三種 chat API。`ProviderKind::OpenCodeZen`／`OpenCodeGo` 用 `ProviderKind::preset()` 找目錄；`PresetProvider` 依 `ModelRequest.model` 的 `api` 選實作，並把 base URL 補成該 API 的路徑（Anthropic 用目錄根目錄，OpenAI 補 `/v1`）。不在目錄裡的模型在儲存與推論時都回 `Unsupported`，避免用錯 API。
+- **模型清單。** 這兩種 provider 的「列出模型」直接回內建目錄，不連網、也不驗證 key；真正的 key 驗證發生在第一次推論。要更新目錄時，用 pi-ai 的 `opencode.json`／`opencode-go.json` 重跑產生步驟（見 `crates/pots-proto/data/README.md`），只留 `anthropic-messages`、`openai-completions`、`openai-responses`。
+- **額外 header。** 所有 API provider 都能在設定填 header 名稱／值，存在 `model_connections.headers`（JSON，不是 `0600` 秘密檔）。值會出現在快照與設定畫面，**不要放 API key**；驗證會拒絕重複名稱、控制字元與 `host`／`content-length` 這類 hop-by-hop header。`Debug` 只印名稱。它們排在 provider 的認證 header 之後，所以可以覆寫預設值（例如自訂的 `Authorization`）。
+- **Session header。** `ModelRequest.session_id` 由 run 帶入：對話是 `project:<id>`、Planner 是 `goal:<id>`、內建 worker 是 `task:<id>`、subagent 是 `run:<id>`。`PresetProvider` 把內建實作設成 `with_session_header("x-opencode-session")`，同一個對話跨輪次會帶同一個值；使用者自己設了同名 header 時以使用者的為準。Session ID 不存進資料庫。
+- **預設 header。** 新增 OpenCode provider 時表單會預填 `x-opencode-client: pots`，使用者可以改或刪。其他 pi-ai provider 之後可以只加 preset 資料與按鈕，不需要再改推論層。
+- **限制。** OpenCode 目錄裡的 Google 模型（`google-generative-ai`）與 classifier 不在 Pots 的支援範圍；OpenCode Zen／Go 的實際 key 權限、模型路由與 header 行為仍要對正式服務手動驗證。成本報表把 Zen 記成 `opencode`、Go 記成 `opencode-go`，models.dev 沒有的話使用者可在單價表覆寫。
 
 ### Worker adapter：內建 worker 與外部 coding CLI
 

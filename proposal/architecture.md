@@ -119,7 +119,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `task_events` | 任務狀態變化的只增日誌（稽核與重播） | `task_id` , `seq` , `from` , `to` , `cause` |
 | `agent_runs` | agent 執行佇列（Postgres 用 `FOR UPDATE SKIP LOCKED`；SQLite 由單一 runner 在寫入 transaction 裡挑選） | `id` , `agent` , `goal_id?` , `task_id?` , `trigger` , `state` （`queued` ｜ `running` ｜ `done` ｜ `failed` ｜ `cancelled`）, `lease_until` , `attempts` , `input_tokens` , `output_tokens` , `stop_reason` , `model` , `memory_revision` |
 | `run_trace` | 每次模型與工具呼叫的 trace（M6a；遮蔽與截短，只增不改） | `run_id` , `seq` , `kind` （`model` ｜ `tool`）, `name` , `detail` , `ok` , `at` |
-| `model_connections` | 設定視窗新增的 API provider（OpenAI／Anthropic 相容）的非秘密設定；內建的 ChatGPT 不是一列 | `id, user_id, kind, name, base_url, model, secret_ref, created_at, updated_at` |
+| `model_connections` | 設定視窗新增的 API provider（OpenAI／Anthropic 相容與 OpenCode preset）的非秘密設定；內建的 ChatGPT 不是一列 | `id, user_id, kind, name, base_url, model, headers, secret_ref, created_at, updated_at` |
 | `instance_settings` | 實例層級的設定（使用中的 provider、ChatGPT 的模型） | `key, value` |
 | `worker_sessions` | 外部 runtime 的續接與 run 對應 | `id, user_id, task_id, run_id, backend, external_session_id, state_ref, worktree_ref` |
 | `nodes` | 託管電腦的註冊、能力、政策與狀態 | `id, user_id, name, os, capabilities, pubkey, policy, status, last_seen` |
@@ -143,7 +143,7 @@ pub fn memory_policy(item: &StreamItem) -> MemoryPolicy {
 | `team_posts` | Goal 內 team 成員的短訊（發現、問題、決定、阻礙、交接） | `id, goal_id, author_task?, kind, to_task?, body, at` |
 | `sources` | 外部來源的設定、輪詢進度與健康狀態 | `id, kind, config, trust, ingest, cursor, health, enabled` |
 
-`model_connections` 不儲存 OAuth token 或 API key；`secret_ref` 指向資料目錄裡的秘密檔（`auth/providers/<id>.json`），host ID 依持久執行環境保存。`worker_sessions.state_ref` 指向官方 session 儲存，不是 Claude token 匯入欄位（M4 已實作，另有 `cli_version`；Team 貼文是 `team_posts` 與 `team_reads`）。以上其餘為待實作的概念 schema，帳號／workspace 註冊與 user 所有權須隔離。
+`model_connections` 不儲存 OAuth token 或 API key；`headers` 只放路由／識別用的額外 header（不是秘密檔），`secret_ref` 指向資料目錄裡的秘密檔（`auth/providers/<id>.json`），host ID 依持久執行環境保存。`worker_sessions.state_ref` 指向官方 session 儲存，不是 Claude token 匯入欄位（M4 已實作，另有 `cli_version`；Team 貼文是 `team_posts` 與 `team_reads`）。以上其餘為待實作的概念 schema，帳號／workspace 註冊與 user 所有權須隔離。
 
 `stream_items` 給人看，`om_raw` 給 agent 用，兩者以 `run_id` 關聯。這樣 UI 可以保留完整歷史，OM 也可以自由壓縮，互不干擾。
 

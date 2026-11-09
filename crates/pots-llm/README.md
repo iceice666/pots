@@ -4,11 +4,11 @@ Pots 的模型推論層：ChatGPT Plan（Sign in with ChatGPT，SIWC）授權、
 
 ## 模組
 
-- `provider`：與模型無關的 `Item`、`ModelRequest`、`StreamEvent`、`LlmError` 與 `ModelProvider` trait。伺服器把每個 `Item` 原樣存進 `om_raw`。
-- `responses`：`POST /v1/responses` 的 provider。請求一律 `store: false`、`stream: true`，指示放 `instructions`，工具放在 `pots` namespace，不送 SIWC 不支援的參數；只有 `response.completed` 算成功。`list_models` 讀 `GET /v1/models`。
-- `openai_compat`：OpenAI 相容的 `POST {base}/chat/completions` 串流 provider（OpenAI、OpenRouter、Ollama、DeepSeek 等），`Authorization: Bearer`。base URL 要含 `/v1`；`instructions` 變成開頭的 system message，同一輪的文字與工具呼叫合成一則 assistant message。`[DONE]` 或送過 `finish_reason` 才算完成。`list_models` 讀 `GET {base}/models`。
+- `provider`：與模型無關的 `Item`、`ModelRequest`、`StreamEvent`、`LlmError` 與 `ModelProvider` trait。伺服器把每個 `Item` 原樣存進 `om_raw`。`ModelRequest::session_id` 是這次對話的穩定 ID，provider 可以用它做 session affinity（OpenCode 的 `x-opencode-session`）。
+- `responses`：`POST /v1/responses` 的 provider。請求一律 `store: false`、`stream: true`，指示放 `instructions`，不送不支援的參數；只有 `response.completed` 算成功。`ResponsesProvider::new` 給 ChatGPT Plan（SIWC），工具放在 `pots` namespace；`ResponsesProvider::with_api_key` 給 OpenAI 平台的 API key，Bearer 授權、工具平整地放在頂層 `tools`，推理交給模型預設值（Responses 允許工具與推理並用）。`list_models` 同時接受 plan 的 `models[]` 與平台的 `data[].id`。
+- `openai_compat`：OpenAI 相容的 `POST {base}/chat/completions` 串流 provider（OpenAI、OpenRouter、Ollama、DeepSeek 等），`Authorization: Bearer`。base URL 要含 `/v1`；`instructions` 變成開頭的 system message，同一輪的文字與工具呼叫合成一則 assistant message。`[DONE]` 或送過 `finish_reason` 才算完成。`list_models` 讀 `GET {base}/models`。不主動送 `reasoning_effort`；帶工具被 Chat Completions 以「工具 + reasoning」拒絕（GPT-5.4 以後的模型預設會推理）時，改成 `reasoning_effort: "none"` 重送並記住，連 `none` 都不接受的模型回 `Unsupported` 並提示改用 Responses API。
 - `anthropic`：Anthropic Messages API（`POST {base}/v1/messages`，base 已含 `/v1` 時不重複）的 provider，`x-api-key` + `anthropic-version: 2023-06-01`。相鄰同角色的 content block 合併成一則 message；只有 `message_stop` 算成功。`list_models` 讀 `GET {base}/v1/models`（會分頁）。
-- 兩個 API key provider 的 HTTP 錯誤一律對應到 `LlmError`（401／403 → `InvalidCredentials`，400／404／422 → `Unsupported`，429 → `Unavailable`，額度或帳單問題 → `Other`，5xx／529 → `Unavailable`）；API key 不會出現在 `Debug` 或錯誤訊息。
+- 三個 API key provider 都支援 `.with_headers(HeaderMap)` 與 `.with_session_header(name)`：額外 header 排在認證 header 之後，同名時可以覆寫預設值；session header 只在請求有 `session_id` 且使用者沒有同名 header 時補上。HTTP 錯誤一律對應到 `LlmError`（401／403 → `InvalidCredentials`，400／404／422 → `Unsupported`，429 → `Unavailable`，額度或帳單問題 → `Other`，5xx／529 → `Unavailable`）；API key 不會出現在 `Debug` 或錯誤訊息。
 - `siwc`：瀏覽器登入（PKCE、state、nonce，callback 固定 `http://127.0.0.1:<port>/auth/callback`）、第一次登入時動態註冊並沿用 issued client ID、ID token 驗證、單一 refresh owner、登出撤銷。憑證存在 `0600` 的 JSON 檔，原子寫入；host ID 另存。
 - `agent`：`agent::run`，一輪一次串流；工具呼叫先經 `Hook` 把關（放行、拒絕、執行後結束本輪、改成核准後結束本輪）。
 - `testing`（feature `test-util`）：腳本化的 `ScriptedProvider` 等，給其他 crate 的測試用。

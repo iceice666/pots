@@ -70,7 +70,7 @@ M5 之前的 merge 一律由你在 GitHub 上手動完成，所以即使核准�
 
 LLM 層要用 rig 這類 agent 框架，還是自己寫？rig-core 0.46 重寫成 Model／Wire／Transport、agent runtime 拆到 rig-agent，原本依賴的 builder、`ConversationMemory`、`PromptHook` 都不再適用；SIWC 對 Responses 的限制多，rig 重建 `function_call` 時又會丟掉 `namespace`。→ 決定：不用 rig。workspace crate `pots-llm` 提供與模型無關的 `ModelProvider` trait、Responses provider、SIWC 授權與共用的多輪工具迴圈（`agent::run`，以 `Hook` 把關）；其他 API provider 實作 `ModelProvider` 即可接上，之後可重新評估 rig。見[為什麼不用 rig](agent-runtime.md#為什麼不用-rig)。
 
-模型 provider 怎麼設定？原本第一次使用就要求登入 ChatGPT。→ 決定：每個實例在設定視窗（左欄最下方打開，左邊是類別）管理 provider，內建 ChatGPT 方案，另外可以新增 OpenAI 相容（Chat Completions）與 Anthropic 相容（Messages）的 API，選一個「使用中」給對話 agent。API key 存在資料目錄的 `0600` 檔案，客戶端只看得到末四碼；不做 provider 之間的自動 fallback。見[模型 provider 設定](agent-runtime.md#模型-provider-設定)。
+模型 provider 怎麼設定？原本第一次使用就要求登入 ChatGPT。→ 決定：每個實例在設定視窗（左欄最下方打開，左邊是類別）管理 provider，內建 ChatGPT 方案，另外可以新增 OpenAI 相容（Chat Completions）、OpenAI Responses、Anthropic 相容（Messages）的 API，以及 OpenCode Zen／Go 的內建模型目錄（依模型自動選 API）；選一個「使用中」給對話 agent。API provider 可以設定每次請求的額外 header，OpenCode 的 `x-opencode-session` 由每個對話自動帶。API key 存在資料目錄的 `0600` 檔案，客戶端只看得到末四碼；不做 provider 之間的自動 fallback。見[模型 provider 設定](agent-runtime.md#模型-provider-設定)。
 
 整理記憶用哪個模型？→ 決定：設定視窗的「記憶」類別另選 provider 與模型（`instance_settings.memory_provider`、`memory_model`），沒設定時跟對話 agent 相同；刪掉那個 provider 時改回跟對話相同。閾值的 token 數用字元估算（CJK 一字約一個 token、其他約四個字元一個），不加 tokenizer 依賴。記憶面板可以查看、釘選、修正、刪除；修正與刪除是軟性的，舊內容保留作稽核。見[Observational Memory](memory.md)。
 
