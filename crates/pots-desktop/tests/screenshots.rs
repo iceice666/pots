@@ -160,6 +160,7 @@ mod shots {
                 _: ProviderKind,
                 _: &url::Url,
                 _: &str,
+                _: &[pots_proto::ProviderHeader],
             ) -> Result<Arc<dyn ModelProvider>, String> {
                 Ok(self.0.clone())
             }
@@ -169,6 +170,7 @@ mod shots {
                 _: ProviderKind,
                 _: &url::Url,
                 _: &str,
+                _: &[pots_proto::ProviderHeader],
             ) -> Result<Vec<ModelOption>, LlmError> {
                 Ok(["gpt-4.1", "gpt-4.1-mini", "o4-mini"]
                     .into_iter()

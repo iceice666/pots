@@ -754,6 +754,7 @@ async fn drive_loop(
         tools: tools::build(profile, ctx),
         hook: Arc::new(gate),
         max_turns: profile.max_turns,
+        session_id: Some(format!("project:{}", project.id)),
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();

@@ -302,6 +302,7 @@ impl PotsApp {
                 list = list.child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .gap(px(8.))
                         .pt(px(4.))
                         .child(
@@ -317,6 +318,17 @@ impl PotsApp {
                             ),
                         )
                         .child(
+                            secondary_button("add-openai-responses", "新增 OpenAI Responses API")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.edit_provider(
+                                        None,
+                                        ProviderKind::OpenAiResponses,
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
                             secondary_button("add-anthropic", "新增 Anthropic 相容 API").on_click(
                                 cx.listener(|this, _, window, cx| {
                                     this.edit_provider(
@@ -325,6 +337,20 @@ impl PotsApp {
                                         window,
                                         cx,
                                     )
+                                }),
+                            ),
+                        )
+                        .child(
+                            secondary_button("add-opencode-zen", "新增 OpenCode Zen").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.edit_provider(None, ProviderKind::OpenCodeZen, window, cx)
+                                }),
+                            ),
+                        )
+                        .child(
+                            secondary_button("add-opencode-go", "新增 OpenCode Go").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.edit_provider(None, ProviderKind::OpenCodeGo, window, cx)
                                 }),
                             ),
                         ),
@@ -672,6 +698,15 @@ impl PotsApp {
                 "API key",
                 p.key_hint.clone().unwrap_or_else(|| "未設定".into()),
             ));
+            if !p.headers.is_empty() {
+                let names = p
+                    .headers
+                    .iter()
+                    .map(|h| h.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                details = details.child(detail_row("Headers", names));
+            }
         }
         details = details.child(detail_row("模型", model));
 
@@ -747,6 +782,12 @@ impl PotsApp {
                 ProviderKind::OpenAiCompatible => {
                     "到 /v1 為止，例如 https://api.openai.com/v1、https://openrouter.ai/api/v1、http://localhost:11434/v1"
                 }
+                ProviderKind::OpenAiResponses => {
+                    "到 /v1 為止，例如 https://api.openai.com/v1；Pots 會呼叫 /responses，工具與推理可以並用"
+                }
+                ProviderKind::OpenCodeZen | ProviderKind::OpenCodeGo => {
+                    "OpenCode 的 API 根目錄；Pots 會依模型自動選 Anthropic／OpenAI 路徑"
+                }
                 _ => "例如 https://api.anthropic.com；Pots 會呼叫 /v1/messages",
             };
             form = form
@@ -755,6 +796,52 @@ impl PotsApp {
                 .child(field("API key", None, input(&editor.api_key)));
         }
         form = form.child(field("模型", None, input(&editor.model)));
+
+        if kind != ProviderKind::ChatGpt {
+            let mut headers = div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("額外 headers"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::text_muted())
+                        .child("每次請求都會送；值不是秘密，API key 請填在上面。"),
+                );
+            for (i, row) in editor.headers.iter().enumerate() {
+                let index = i;
+                headers = headers.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(div().flex_1().child(Input::new(&row.name)))
+                        .child(div().flex_1().child(Input::new(&row.value)))
+                        .child(
+                            link_button(
+                                SharedString::from(format!("provider-header-remove-{i}")),
+                                "移除",
+                            )
+                            .text_color(theme::danger())
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.remove_provider_header(index, cx),
+                            )),
+                        ),
+                );
+            }
+            headers = headers.child(
+                secondary_button("provider-header-add", "新增 header").on_click(
+                    cx.listener(|this, _, window, cx| this.add_provider_header(window, cx)),
+                ),
+            );
+            form = form.child(headers);
+        }
 
         match &editor.test {
             ProviderTest::Idle => {}
@@ -814,7 +901,11 @@ impl PotsApp {
                                 .text_size(px(13.))
                                 .text_color(theme::ok())
                                 .child(icon(IconName::CircleCheck, 14., theme::ok()))
-                                .child(format!("連線成功，{} 個模型，點一個填入", models.len())),
+                                .child(if kind.preset().is_some() {
+                                    format!("內建清單，{} 個模型，點一個填入", models.len())
+                                } else {
+                                    format!("連線成功，{} 個模型，點一個填入", models.len())
+                                }),
                         )
                         .child(chips)
                         .when(more > 0, |d| {
@@ -822,7 +913,11 @@ impl PotsApp {
                                 div()
                                     .text_size(px(12.))
                                     .text_color(theme::text_muted())
-                                    .child(format!("還有 {more} 個沒列出，直接輸入模型 ID")),
+                                    .child(if kind.preset().is_some() {
+                                        format!("還有 {more} 個沒列出；也可以在模型欄輸入完整 ID")
+                                    } else {
+                                        format!("還有 {more} 個沒列出，直接輸入模型 ID")
+                                    }),
                             )
                         }),
                 );
@@ -860,8 +955,15 @@ impl PotsApp {
                 )
                 .when(kind != ProviderKind::ChatGpt, |d| {
                     d.child(
-                        secondary_button("provider-test", "測試連線")
-                            .on_click(cx.listener(|this, _, _, cx| this.test_provider(cx))),
+                        secondary_button(
+                            "provider-test",
+                            if kind.preset().is_some() {
+                                "列出模型"
+                            } else {
+                                "測試連線"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.test_provider(cx))),
                     )
                 })
                 .child(

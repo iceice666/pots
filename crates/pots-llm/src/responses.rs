@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use reqwest::header::{HeaderMap, HeaderName};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -26,6 +27,7 @@ use url::Url;
 pub use self::body::{PROVIDER_NAME, ResponsesOptions, build_request_body};
 pub use self::error::ApiError;
 pub use self::sse::{ResponsesEventMapper, SseDecoder, SseMessage};
+use crate::api_common::with_extra_headers;
 use crate::provider::{EventStream, LlmError, ModelProvider, ModelRequest, StreamEvent};
 use crate::siwc::{AccessToken, TokenSource};
 
@@ -48,6 +50,10 @@ pub struct ResponsesProvider {
     options: ResponsesOptions,
     /// 伺服器拒絕過 `include`（見 [`ApiError::rejects_include`]）；之後的請求都不再送。
     include_rejected: AtomicBool,
+    /// 使用者設定的額外 header，排在認證 header 後面。
+    headers: HeaderMap,
+    /// 有設定時，把 [`ModelRequest::session_id`] 放進這個 header。
+    session_header: Option<HeaderName>,
 }
 
 impl ResponsesProvider {
@@ -60,7 +66,32 @@ impl ResponsesProvider {
             http,
             options: ResponsesOptions::default(),
             include_rejected: AtomicBool::new(false),
+            headers: HeaderMap::new(),
+            session_header: None,
         }
+    }
+
+    /// 每次請求額外送出的 header。排在 `Authorization` 後面，所以可以覆寫預設值。
+    pub fn with_headers(mut self, headers: HeaderMap) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// 把 `ModelRequest::session_id` 放進 `name` header；主要給 OpenCode 用。
+    pub fn with_session_header(mut self, name: &'static str) -> Self {
+        self.session_header = Some(HeaderName::from_static(name));
+        self
+    }
+
+    /// 用一般 OpenAI 平台 API key 呼叫 Responses API（不是 ChatGPT plan）。
+    ///
+    /// 與 plan 的差別只在授權與工具形狀：Bearer key，工具平整地放在頂層 `tools`、
+    /// `function_call` 不帶 `namespace`。推理用模型預設值；Responses API 允許工具與推理並用。
+    pub fn with_api_key(base_url: Url, api_key: String, http: reqwest::Client) -> Self {
+        Self::new(base_url, Arc::new(ApiKeyToken(api_key)), http).with_options(ResponsesOptions {
+            namespace: None,
+            ..ResponsesOptions::default()
+        })
     }
 
     pub fn with_options(mut self, options: ResponsesOptions) -> Self {
@@ -76,7 +107,10 @@ impl ResponsesProvider {
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
         let url = endpoint(&self.base_url, "models");
         let response = self
-            .send_authorized(|token| self.http.get(url.clone()).bearer_auth(&token.0))
+            .send_authorized(
+                |token| self.http.get(url.clone()).bearer_auth(&token.0),
+                None,
+            )
             .await?;
         let body: Value = response
             .json()
@@ -90,23 +124,39 @@ impl ResponsesProvider {
     async fn send_authorized(
         &self,
         build: impl Fn(&AccessToken) -> reqwest::RequestBuilder,
+        session: Option<&str>,
     ) -> Result<reqwest::Response, LlmError> {
-        self.send_checked(build)
+        self.send_checked(build, session)
             .await?
             .map_err(ApiError::into_llm_error)
+    }
+
+    /// 加上額外 header 與這次對話的 session header。
+    fn with_extra(
+        &self,
+        request: reqwest::RequestBuilder,
+        session: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
+        with_extra_headers(
+            request,
+            &self.headers,
+            self.session_header.as_ref(),
+            session,
+        )
     }
 
     /// 同 [`Self::send_authorized`]，但非 2xx 時回傳解析過的 [`ApiError`]，讓呼叫端決定要不要重送。
     async fn send_checked(
         &self,
         build: impl Fn(&AccessToken) -> reqwest::RequestBuilder,
+        session: Option<&str>,
     ) -> Result<Result<reqwest::Response, ApiError>, LlmError> {
         let token = self.auth.access_token().await?;
-        let mut response = send(build(&token)).await?;
+        let mut response = send(self.with_extra(build(&token), session)?).await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             tracing::info!("Responses 回 401，強制 refresh 後重送一次");
             let token = self.auth.token_rejected(&token).await?;
-            response = send(build(&token)).await?;
+            response = send(self.with_extra(build(&token), session)?).await?;
         }
         if response.status().is_success() {
             Ok(Ok(response))
@@ -151,13 +201,16 @@ impl ResponsesProvider {
         options: &ResponsesOptions,
     ) -> Result<Result<reqwest::Response, ApiError>, LlmError> {
         let body = build_request_body(request, options);
-        self.send_checked(|token| {
-            self.http
-                .post(url.clone())
-                .bearer_auth(&token.0)
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .json(&body)
-        })
+        self.send_checked(
+            |token| {
+                self.http
+                    .post(url.clone())
+                    .bearer_auth(&token.0)
+                    .header(reqwest::header::ACCEPT, "text/event-stream")
+                    .json(&body)
+            },
+            request.session_id.as_deref(),
+        )
         .await
     }
 }
@@ -184,6 +237,21 @@ impl ModelProvider for ResponsesProvider {
             response.bytes_stream().boxed(),
             cancel,
         )))
+    }
+}
+
+/// 固定的 API key，當成 [`TokenSource`]；key 不會出現在 `Debug` 或錯誤訊息。
+struct ApiKeyToken(String);
+
+#[async_trait::async_trait]
+impl TokenSource for ApiKeyToken {
+    async fn access_token(&self) -> Result<AccessToken, LlmError> {
+        Ok(AccessToken(self.0.clone()))
+    }
+
+    /// API key 沒有更新機制：401 就直接回報憑證錯誤。
+    async fn token_rejected(&self, _: &AccessToken) -> Result<AccessToken, LlmError> {
+        Err(LlmError::InvalidCredentials("API key 被拒絕（401）".into()))
     }
 }
 
@@ -294,23 +362,49 @@ async fn api_error(response: reqwest::Response) -> ApiError {
 }
 
 fn parse_models(body: &Value) -> Result<Vec<ModelInfo>, LlmError> {
-    let models = body
-        .get("models")
+    // ChatGPT plan 回 `{"models": [{"slug", "visibility"}]}`；一般平台 API 的
+    // `GET /v1/models` 回 `{"data": [{"id"}]}`。兩種都接受。
+    if let Some(models) = body.get("models").and_then(Value::as_array) {
+        return Ok(models
+            .iter()
+            .filter(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
+            .filter_map(|model| {
+                let slug = model.get("slug").and_then(Value::as_str)?.to_owned();
+                let display_name = model
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map_or_else(|| slug.clone(), str::to_owned);
+                Some(ModelInfo { slug, display_name })
+            })
+            .collect());
+    }
+    let data = body
+        .get("data")
         .and_then(Value::as_array)
-        .ok_or_else(|| LlmError::Other("模型清單格式不符：缺少 `models` 陣列".into()))?;
-    Ok(models
+        .ok_or_else(|| LlmError::Other("模型清單格式不符：缺少 `models` 或 `data` 陣列".into()))?;
+    Ok(data
         .iter()
-        .filter(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
-        .filter_map(|model| {
-            let slug = model.get("slug").and_then(Value::as_str)?.to_owned();
-            let display_name = model
-                .get("display_name")
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty())
-                .map_or_else(|| slug.clone(), str::to_owned);
-            Some(ModelInfo { slug, display_name })
+        .filter_map(|model| model.get("id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty() && is_chat_model(id))
+        .map(|id| ModelInfo {
+            slug: id.to_owned(),
+            display_name: id.to_owned(),
         })
         .collect())
+}
+
+/// 平台模型清單包含 embeddings、語音等不能用在 Responses 的模型，先篩掉。
+fn is_chat_model(id: &str) -> bool {
+    const NOT_CHAT: [&str; 6] = [
+        "text-embedding",
+        "whisper",
+        "tts-",
+        "dall-e",
+        "omni-moderation",
+        "sora-",
+    ];
+    !NOT_CHAT.iter().any(|prefix| id.starts_with(prefix))
 }
 
 #[cfg(test)]
@@ -354,6 +448,26 @@ mod tests {
                 },
             ]
         );
-        assert!(parse_models(&json!({"data": []})).is_err());
+        assert!(parse_models(&json!({"models": []})).is_ok());
+        assert!(parse_models(&json!({"data": []})).is_ok());
+        assert!(parse_models(&json!({"object": "list"})).is_err());
+    }
+
+    #[test]
+    fn platform_models_use_data_ids() {
+        let body = json!({"object": "list", "data": [
+            {"id": "gpt-6-luna", "object": "model"},
+            {"id": "text-embedding-3-large", "object": "model"},
+            {"id": "whisper-1", "object": "model"},
+            {"object": "model"},
+            {"id": "", "object": "model"},
+        ]});
+        assert_eq!(
+            parse_models(&body).unwrap(),
+            vec![ModelInfo {
+                slug: "gpt-6-luna".into(),
+                display_name: "gpt-6-luna".into()
+            }]
+        );
     }
 }

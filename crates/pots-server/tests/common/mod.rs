@@ -11,7 +11,8 @@ use futures::{SinkExt, StreamExt};
 use pots_llm::testing::{ScriptedProvider, ScriptedTurn};
 use pots_llm::{LlmError, ModelProvider};
 use pots_proto::{
-    ClientCommand, ItemId, ModelOption, ProjectId, ProviderId, ProviderKind, SendMode, ServerEvent,
+    ClientCommand, ItemId, ModelOption, ProjectId, ProviderHeader, ProviderId, ProviderKind,
+    SendMode, ServerEvent,
 };
 use pots_server::{ApiProviderFactory, Config, Deps, FakeModelAuth, ServerHandle};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,6 +29,7 @@ pub struct ApiCall {
     pub kind: ProviderKind,
     pub base_url: String,
     pub api_key: String,
+    pub headers: Vec<ProviderHeader>,
 }
 
 /// 腳本化的 API provider 工廠：`build` 一律回同一個 [`ScriptedProvider`]；`list_models`
@@ -76,11 +78,13 @@ impl ApiProviderFactory for ScriptedApi {
         kind: ProviderKind,
         base_url: &url::Url,
         api_key: &str,
+        headers: &[ProviderHeader],
     ) -> Result<Arc<dyn ModelProvider>, String> {
         self.builds.lock().unwrap().push(ApiCall {
             kind,
             base_url: base_url.to_string(),
             api_key: api_key.into(),
+            headers: headers.to_vec(),
         });
         Ok(self.provider.clone())
     }
@@ -90,11 +94,13 @@ impl ApiProviderFactory for ScriptedApi {
         kind: ProviderKind,
         base_url: &url::Url,
         api_key: &str,
+        headers: &[ProviderHeader],
     ) -> Result<Vec<ModelOption>, LlmError> {
         self.lists.lock().unwrap().push(ApiCall {
             kind,
             base_url: base_url.to_string(),
             api_key: api_key.into(),
+            headers: headers.to_vec(),
         });
         if api_key.starts_with("sk-bad") {
             return Err(LlmError::InvalidCredentials(format!(

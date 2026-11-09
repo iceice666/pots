@@ -627,6 +627,7 @@ impl Planner {
             tools: tools::build(&inner.profile, ctx),
             hook: Arc::new(gate),
             max_turns: inner.profile.max_turns,
+            session_id: Some(format!("goal:{}", job.goal)),
         };
         // Planner 的輸出不串流給 UI；最後的文字當作狀態面板的備註。
         let (events, rx) = tokio::sync::mpsc::unbounded_channel();

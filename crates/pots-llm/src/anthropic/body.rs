@@ -130,6 +130,7 @@ mod tests {
                 description: "現在時間".into(),
                 parameters: json!({"type": "object", "properties": {}}),
             }],
+            session_id: None,
         };
         assert_eq!(
             build_request_body(&request, 1024),
@@ -170,6 +171,7 @@ mod tests {
             instructions: None,
             input: vec![Item::User { text: "hi".into() }],
             tools: vec![],
+            session_id: None,
         };
         let body = build_request_body(&request, DEFAULT_MAX_TOKENS);
         let object = body.as_object().unwrap();

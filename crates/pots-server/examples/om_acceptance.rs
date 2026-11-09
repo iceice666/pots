@@ -9,7 +9,8 @@
 //! cargo run -p pots-server --example om_acceptance -- --kind chatgpt [--model gpt-5.1]
 //! ```
 //!
-//! - `--kind`：`openai`（OpenAI 相容）、`anthropic`（Anthropic 相容）或 `chatgpt`（ChatGPT 方案，
+//! - `--kind`：`openai`（OpenAI 相容）、`anthropic`（Anthropic 相容）、`opencode-zen`／
+//!   `opencode-go`（內建目錄）或 `chatgpt`（ChatGPT 方案，
 //!   第一次會開瀏覽器登入，授權存在資料目錄，下次沿用）。
 //! - API key 從環境變數 `POTS_OM_API_KEY` 讀，不放在命令列；OpenAI 相容的本機服務可以不給。
 //!   執行期間 key 存在 `--data-dir` 裡（`0600`），跑完會刪掉這次新增的 provider 與 key；中途中斷時
@@ -70,7 +71,10 @@ fn parse_args() -> Result<Args, BoxError> {
             "--kind" => {
                 args.kind = match value()?.as_str() {
                     "openai" => ProviderKind::OpenAiCompatible,
+                    "responses" => ProviderKind::OpenAiResponses,
                     "anthropic" => ProviderKind::AnthropicCompatible,
+                    "opencode-zen" => ProviderKind::OpenCodeZen,
+                    "opencode-go" => ProviderKind::OpenCodeGo,
                     "chatgpt" => ProviderKind::ChatGpt,
                     other => return Err(format!("不認得的 --kind：{other}").into()),
                 }
@@ -82,7 +86,7 @@ fn parse_args() -> Result<Args, BoxError> {
             "--data-dir" => args.data_dir = PathBuf::from(value()?),
             "-h" | "--help" => {
                 println!(
-                    "用法：om_acceptance --kind openai|anthropic|chatgpt [--base-url URL] \
+                    "用法：om_acceptance --kind openai|responses|anthropic|opencode-zen|opencode-go|chatgpt [--base-url URL] \
                      [--model M] [--memory-model M] [--rounds N] [--data-dir DIR]\n\
                      API key 放在環境變數 POTS_OM_API_KEY。"
                 );
@@ -293,6 +297,7 @@ async fn main() -> Result<(), BoxError> {
                     base_url: String::new(),
                     model: args.model.clone(),
                     api_key: None,
+                    headers: Vec::new(),
                 },
             })
             .await?;
@@ -312,6 +317,11 @@ async fn main() -> Result<(), BoxError> {
                 base_url: args.base_url.clone(),
                 model: args.model.clone(),
                 api_key,
+                headers: args
+                    .kind
+                    .preset()
+                    .map(|p| p.headers.clone())
+                    .unwrap_or_default(),
             },
         })
         .await?;

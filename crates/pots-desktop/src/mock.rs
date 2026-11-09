@@ -15,6 +15,7 @@ fn mock_providers(extra: Option<ProviderView>) -> ProvidersView {
         base_url: String::new(),
         model: String::new(),
         key_hint: None,
+        headers: Vec::new(),
     }];
     items.extend(extra);
     ProvidersView {
@@ -1255,6 +1256,7 @@ pub fn store() -> Store {
                 base_url: "https://api.anthropic.com".into(),
                 model: "claude-sonnet-4-5".into(),
                 key_hint: Some("…9f2c".into()),
+                headers: Vec::new(),
             })),
             model_auth: ModelAuthView::SignedIn {
                 account: Some("you@example.com".into()),

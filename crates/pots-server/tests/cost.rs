@@ -198,6 +198,7 @@ async fn api_cost_report_uses_the_configured_price_table() {
             base_url: "https://api.openai.com/v1".into(),
             model: MODEL.into(),
             api_key: Some("sk-test-1234567890".into()),
+            headers: Vec::new(),
         },
     })
     .await;

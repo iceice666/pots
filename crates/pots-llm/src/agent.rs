@@ -92,6 +92,8 @@ pub struct RunConfig {
     pub tools: Vec<Arc<dyn Tool>>,
     pub hook: Arc<dyn Hook>,
     pub max_turns: usize,
+    /// 這次對話的穩定 ID；provider 需要 session affinity 時會變成 header。
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +170,7 @@ pub async fn run(
             instructions: config.instructions.clone(),
             input: state.history.clone(),
             tools: specs.clone(),
+            session_id: config.session_id.clone(),
         };
         let turn_span = tracing::info_span!("model.turn", turn, model = %config.model);
         let (items, usage) = stream_turn(config.provider.as_ref(), request, &state.events, &cancel)

@@ -25,7 +25,11 @@ use uuid::Uuid;
 ///   `ProjectMergeMethod` 與對應的指令，快照帶核准、通知設定、USER.md 與 project 的 merge 方式）。
 /// - 10：其他 connector（`SaveSource`／`DeleteSource`、`SourceDraft`、`SourceView::url`、
 ///   `AutomationView::custom_kinds`、feed／探測／狀態頁／自訂 webhook 的事件種類）。
-pub const PROTOCOL_VERSION: u32 = 10;
+/// - 11：模型 provider 的額外 headers（`ProviderView`／`ProviderDraft`）與 OpenCode Zen／Go preset。
+pub const PROTOCOL_VERSION: u32 = 11;
+
+mod presets;
+pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -1810,8 +1814,14 @@ pub enum ProviderKind {
     ChatGpt,
     /// OpenAI 相容的 Chat Completions API（`POST {base_url}/chat/completions`）。
     OpenAiCompatible,
+    /// OpenAI 平台的 Responses API（`POST {base_url}/responses`，API key）。工具與推理可以並用。
+    OpenAiResponses,
     /// Anthropic 相容的 Messages API（`POST {base_url}/v1/messages`）。
     AnthropicCompatible,
+    /// OpenCode Zen：同一個 base URL 下依模型混用 Anthropic／OpenAI API（見 [`preset_for`]）。
+    OpenCodeZen,
+    /// OpenCode Go：同一個 base URL 下依模型混用 Anthropic／OpenAI API（見 [`preset_for`]）。
+    OpenCodeGo,
 }
 
 impl ProviderKind {
@@ -1819,7 +1829,10 @@ impl ProviderKind {
         match self {
             Self::ChatGpt => "ChatGPT 方案",
             Self::OpenAiCompatible => "OpenAI 相容 API",
+            Self::OpenAiResponses => "OpenAI Responses API",
             Self::AnthropicCompatible => "Anthropic 相容 API",
+            Self::OpenCodeZen => "OpenCode Zen",
+            Self::OpenCodeGo => "OpenCode Go",
         }
     }
 
@@ -1827,9 +1840,22 @@ impl ProviderKind {
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::ChatGpt => "",
-            Self::OpenAiCompatible => "https://api.openai.com/v1",
+            Self::OpenAiCompatible | Self::OpenAiResponses => "https://api.openai.com/v1",
             Self::AnthropicCompatible => "https://api.anthropic.com",
+            Self::OpenCodeZen | Self::OpenCodeGo => {
+                preset_for(self).map_or("", |preset| preset.base_url.as_str())
+            }
         }
+    }
+
+    /// 有內建模型目錄的 provider（目前是 OpenCode Zen／Go）。
+    pub fn preset(self) -> Option<&'static ProviderPreset> {
+        preset_for(self)
+    }
+
+    /// 需要 API key。OpenAI 相容的可以沒有（本機 Ollama 等）。
+    pub fn key_required(self) -> bool {
+        !matches!(self, Self::ChatGpt | Self::OpenAiCompatible)
     }
 }
 
@@ -1850,6 +1876,26 @@ pub struct ProviderView {
     pub model: String,
     /// API key 的末四碼，例如 `…a1b2`；沒有 key 是 `None`。
     pub key_hint: Option<String>,
+    /// 每次請求額外送出的 header；ChatGPT 方案是空的。
+    #[serde(default)]
+    pub headers: Vec<ProviderHeader>,
+}
+
+/// 額外送出的 HTTP header。值不是秘密（API key 仍在 key 欄位）。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHeader {
+    pub name: String,
+    pub value: String,
+}
+
+impl std::fmt::Debug for ProviderHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 值可能被使用者拿來放自訂憑證；不要讓 Debug／日誌印出來。
+        f.debug_struct("ProviderHeader")
+            .field("name", &self.name)
+            .field("value", &"..")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1893,6 +1939,9 @@ pub struct ProviderDraft {
     pub model: String,
     /// `None` 表示沿用已存的 key；新增時必填（ChatGPT 除外）。
     pub api_key: Option<String>,
+    /// 每次請求額外送出的 header；編輯時整份取代。
+    #[serde(default)]
+    pub headers: Vec<ProviderHeader>,
 }
 
 impl std::fmt::Debug for ProviderDraft {
@@ -1903,6 +1952,7 @@ impl std::fmt::Debug for ProviderDraft {
             .field("name", &self.name)
             .field("base_url", &self.base_url)
             .field("model", &self.model)
+            .field("headers", &self.headers)
             .field("api_key", &self.api_key.as_ref().map(|_| ".."))
             .finish()
     }

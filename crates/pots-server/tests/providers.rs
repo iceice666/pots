@@ -9,8 +9,8 @@ use std::time::Duration;
 use common::{Client, ScriptedApi, TestServer};
 use pots_llm::testing::ScriptedTurn;
 use pots_proto::{
-    ClientCommand, MsgStatus, ProjectId, ProviderDraft, ProviderId, ProviderKind, ProvidersView,
-    SendMode, ServerEvent, StreamItemKind,
+    ClientCommand, MsgStatus, ProjectId, ProviderDraft, ProviderHeader, ProviderId, ProviderKind,
+    ProvidersView, SendMode, ServerEvent, StreamItemKind,
 };
 use pots_server::{Config, FakeModelAuth};
 
@@ -24,6 +24,7 @@ fn openai_draft(id: Option<ProviderId>, model: &str, key: Option<&str>) -> Provi
         base_url: "https://openrouter.ai/api/v1/".into(),
         model: model.into(),
         api_key: key.map(Into::into),
+        headers: Vec::new(),
     }
 }
 
@@ -200,6 +201,7 @@ async fn api_provider_lifecycle() {
             base_url: String::new(),
             model: " gpt-5 ".into(),
             api_key: None,
+            headers: Vec::new(),
         },
     })
     .await;
@@ -893,4 +895,113 @@ async fn unknown_provider_kind_is_skipped() {
     let (_, inst) = srv.client().await.snapshot().await;
     assert_eq!(inst.providers, before);
     srv.stop().await;
+}
+
+#[tokio::test]
+async fn provider_headers_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let srv = launch(
+        dir,
+        None,
+        [],
+        [ScriptedTurn::reply("好")],
+        FakeModelAuth::signed_out(),
+    )
+    .await;
+    let mut c = srv.client().await;
+    c.snapshot().await;
+
+    let headers = vec![
+        ProviderHeader {
+            name: "x-opencode-client".into(),
+            value: "pots".into(),
+        },
+        ProviderHeader {
+            name: "X-Test".into(),
+            value: "yes".into(),
+        },
+    ];
+    let mut draft = openai_draft(None, "gpt-x", Some(KEY));
+    draft.headers = headers.clone();
+    c.send(&ClientCommand::SaveProvider { draft }).await;
+    let view = next_providers(&mut c).await;
+    let api = &view.items[1];
+    assert_eq!(api.headers, headers);
+    assert_eq!(srv.api.builds().last().unwrap().headers, headers);
+
+    drop(c);
+    srv.stop().await;
+
+    // 重啟後 headers 從資料庫讀回，建立 provider 時仍然帶著。
+    let srv = launch(dir, None, [], [], FakeModelAuth::signed_out()).await;
+    let mut c = srv.client().await;
+    let (_, snap) = c.snapshot().await;
+    assert_eq!(snap.providers.items[1].headers, headers);
+    assert_eq!(srv.api.builds().last().unwrap().headers, headers);
+}
+
+#[tokio::test]
+async fn opencode_preset_uses_catalog_and_headers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = launch(
+        tmp.path(),
+        None,
+        [],
+        [ScriptedTurn::reply("好")],
+        FakeModelAuth::signed_out(),
+    )
+    .await;
+    let mut c = srv.client().await;
+    c.snapshot().await;
+
+    // 測試連線：preset 直接回內建目錄，不呼叫工廠、不連網。
+    let preset = ProviderKind::OpenCodeGo;
+    let draft = ProviderDraft {
+        id: None,
+        kind: preset,
+        name: "OpenCode Go".into(),
+        base_url: preset.default_base_url().into(),
+        model: String::new(),
+        api_key: Some(KEY.into()),
+        headers: vec![ProviderHeader {
+            name: "x-opencode-client".into(),
+            value: "pots".into(),
+        }],
+    };
+    c.send(&ClientCommand::TestProvider {
+        request: 1,
+        draft: draft.clone(),
+    })
+    .await;
+    let models = match c.next().await {
+        ServerEvent::ProviderTest { result, .. } => result.unwrap(),
+        other => panic!("預期 ProviderTest，收到 {other:?}"),
+    };
+    assert!(models.iter().any(|m| m.id == "claude-haiku-5-5"));
+    assert!(srv.api.lists().is_empty());
+
+    // 不在目錄裡的模型不能存。
+    let mut unknown = draft.clone();
+    unknown.model = "not-in-the-catalog".into();
+    expect_error(
+        &mut c,
+        ClientCommand::SaveProvider { draft: unknown },
+        "內建模型清單",
+    )
+    .await;
+
+    // 目錄裡的模型可以存；建立 provider 時拿到 preset kind 與 header。
+    let mut valid = draft;
+    valid.model = "claude-haiku-5-5".into();
+    c.send(&ClientCommand::SaveProvider { draft: valid }).await;
+    let view = next_providers(&mut c).await;
+    let api = &view.items[1];
+    assert_eq!(api.kind, ProviderKind::OpenCodeGo);
+    assert_eq!(api.model, "claude-haiku-5-5");
+    assert_eq!(api.headers[0].name, "x-opencode-client");
+    let builds = srv.api.builds();
+    let build = builds.last().unwrap();
+    assert_eq!(build.kind, ProviderKind::OpenCodeGo);
+    assert_eq!(build.headers[0].value, "pots");
 }

@@ -117,6 +117,7 @@ impl ApiProviderFactory for FnApi {
         _: ProviderKind,
         _: &url::Url,
         _: &str,
+        _: &[pots_proto::ProviderHeader],
     ) -> Result<Arc<dyn ModelProvider>, String> {
         match &self.0 {
             Some(p) => Ok(p.clone()),
@@ -129,6 +130,7 @@ impl ApiProviderFactory for FnApi {
         _: ProviderKind,
         _: &url::Url,
         _: &str,
+        _: &[pots_proto::ProviderHeader],
     ) -> Result<Vec<ModelOption>, LlmError> {
         Ok(vec![])
     }
@@ -467,6 +469,7 @@ async fn memory_model_is_configured_separately() {
             base_url: "https://api.example.com/v1".into(),
             model: "big-model".into(),
             api_key: Some("sk-test-123456789".into()),
+            headers: Vec::new(),
         },
     })
     .await;

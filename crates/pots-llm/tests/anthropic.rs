@@ -9,6 +9,7 @@ use common::{Reply, sse};
 use futures::StreamExt;
 use pots_llm::agent::{self, AllowAll, RunConfig, RunOutcome};
 use pots_llm::anthropic::{AnthropicProvider, ModelInfo};
+use pots_llm::reqwest::header::{HeaderMap, HeaderValue};
 use pots_llm::testing::FnTool;
 use pots_llm::{
     Item, LlmError, ModelProvider, ModelRequest, StreamEvent, ToolCall, ToolSpec, Usage,
@@ -28,6 +29,7 @@ fn request(text: &str) -> ModelRequest {
         instructions: Some("你是 Pots".into()),
         input: vec![Item::User { text: text.into() }],
         tools: vec![],
+        session_id: None,
     }
 }
 
@@ -67,6 +69,38 @@ fn message_end(stop_reason: &str, output_tokens: u64) -> [Value; 2] {
 
 fn stream(parts: Vec<Vec<Value>>) -> String {
     sse(&parts.concat())
+}
+
+fn extra_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-pots-test", HeaderValue::from_static("1"));
+    headers
+}
+
+#[tokio::test]
+async fn sends_extra_headers_on_models_and_stream() {
+    let fake = FakeApi::start([
+        Reply::Status(200, json!({"data": []})),
+        Reply::Sse(stream(vec![
+            vec![message_start(1)],
+            text_block(0, &["好"]),
+            message_end("end_turn", 1).to_vec(),
+        ])),
+    ])
+    .await;
+    let provider = provider(&fake, "").with_headers(extra_headers());
+    provider.list_models().await.unwrap();
+    let mut request = request("嗨");
+    request.session_id = Some("session-1".into());
+    collect(&provider.with_session_header("x-opencode-session"), request)
+        .await
+        .unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests[0].header("x-pots-test"), Some("1"));
+    assert_eq!(requests[0].header("x-api-key"), Some(KEY));
+    assert_eq!(requests[1].header("x-pots-test"), Some("1"));
+    assert_eq!(requests[1].header("x-opencode-session"), Some("session-1"));
 }
 
 #[tokio::test]
@@ -171,6 +205,7 @@ async fn tool_roundtrip_through_agent_loop() {
         tools: vec![tool.clone()],
         hook: Arc::new(AllowAll),
         max_turns: 4,
+        session_id: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let result = agent::run(
@@ -409,6 +444,7 @@ async fn truncated_tool_call_is_not_executed() {
         tools: vec![tool.clone()],
         hook: Arc::new(AllowAll),
         max_turns: 4,
+        session_id: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let error = agent::run(&config, request("幾點").input, tx, CancellationToken::new())

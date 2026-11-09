@@ -1414,6 +1414,7 @@ impl Worker {
             tools: crate::tools::build(&inner.profiles.worker, ctx.clone()),
             hook: Arc::new(ctx.gate()),
             max_turns: inner.profiles.worker.max_turns,
+            session_id: Some(format!("task:{}", task.id)),
         };
         let (events, rx) = tokio::sync::mpsc::unbounded_channel();
         drop(rx);

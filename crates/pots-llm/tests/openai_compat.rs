@@ -9,6 +9,7 @@ use common::api::FakeApi;
 use futures::StreamExt;
 use pots_llm::agent::{self, AllowAll, RunConfig, RunOutcome};
 use pots_llm::openai_compat::{ModelInfo, OpenAiCompatProvider};
+use pots_llm::reqwest::header::{HeaderMap, HeaderValue};
 use pots_llm::testing::FnTool;
 use pots_llm::{
     Item, LlmError, ModelProvider, ModelRequest, StreamEvent, ToolCall, ToolSpec, Usage,
@@ -28,6 +29,7 @@ fn request(text: &str) -> ModelRequest {
         instructions: Some("你是 Pots".into()),
         input: vec![Item::User { text: text.into() }],
         tools: vec![],
+        session_id: None,
     }
 }
 
@@ -61,6 +63,37 @@ fn finish(reason: &str) -> Value {
 
 fn usage(prompt: u64, completion: u64) -> Value {
     json!({"choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}})
+}
+
+fn extra_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-pots-test", HeaderValue::from_static("1"));
+    headers
+}
+
+#[tokio::test]
+async fn sends_extra_headers_on_models_and_stream() {
+    let fake = FakeApi::start([
+        Reply::Status(200, json!({"data": []})),
+        Reply::Sse(chunks(&[text("好"), finish("stop"), usage(1, 1)], true)),
+    ])
+    .await;
+    let provider = provider(&fake, "v1").with_headers(extra_headers());
+    provider.list_models().await.unwrap();
+    let mut request = request("嗨");
+    request.session_id = Some("session-1".into());
+    collect(&provider.with_session_header("x-opencode-session"), request)
+        .await
+        .unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests[0].header("x-pots-test"), Some("1"));
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-test-secret")
+    );
+    assert_eq!(requests[1].header("x-pots-test"), Some("1"));
+    assert_eq!(requests[1].header("x-opencode-session"), Some("session-1"));
 }
 
 #[tokio::test]
@@ -171,6 +204,7 @@ async fn tool_roundtrip_through_agent_loop() {
         tools: vec![tool.clone()],
         hook: Arc::new(AllowAll),
         max_turns: 4,
+        session_id: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let result = agent::run(
@@ -388,6 +422,7 @@ async fn truncated_tool_call_is_not_executed() {
         tools: vec![tool.clone()],
         hook: Arc::new(AllowAll),
         max_turns: 4,
+        session_id: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let error = agent::run(&config, request("幾點").input, tx, CancellationToken::new())
@@ -398,4 +433,89 @@ async fn truncated_tool_call_is_not_executed() {
         LlmError::Interrupted("輸出被截斷（達到 max tokens）".into())
     );
     assert!(tool.calls().is_empty());
+}
+
+/// 帶工具的請求被 Chat Completions 以「工具 + reasoning」拒絕。
+fn tools_with_reasoning_rejected(model: &str) -> Reply {
+    Reply::Status(
+        400,
+        json!({"error": {
+            "message": format!(
+                "Function tools with reasoning_effort are not supported for {model} in /v1/chat/completions. \
+                 To use function tools, use /v1/responses or set reasoning_effort to 'none'."
+            ),
+            "type": "invalid_request_error",
+            "param": "reasoning_effort",
+            "code": "invalid_request_error",
+        }}),
+    )
+}
+
+fn request_with_tool(text: &str) -> ModelRequest {
+    let mut request = request(text);
+    request.tools = vec![ToolSpec {
+        name: "get_time".into(),
+        description: "現在時間".into(),
+        parameters: json!({"type": "object", "properties": {}}),
+    }];
+    request
+}
+
+fn ok_stream() -> Reply {
+    Reply::Sse(chunks(&[text("ok"), finish("stop"), usage(1, 1)], true))
+}
+
+#[tokio::test]
+async fn tools_retry_with_reasoning_disabled() {
+    let fake = FakeApi::start([
+        tools_with_reasoning_rejected("gpt-6-luna"),
+        ok_stream(),
+        ok_stream(),
+    ])
+    .await;
+    let provider = provider(&fake, "v1");
+    let events = collect(&provider, request_with_tool("嗨")).await.unwrap();
+    assert!(matches!(
+        events.last(),
+        Some(Ok(StreamEvent::Completed { .. }))
+    ));
+    // 同一個 provider 的下一輪直接關掉推理，不再先失敗一次。
+    collect(&provider, request_with_tool("再一輪"))
+        .await
+        .unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].body.get("reasoning_effort").is_none());
+    for downgraded in &requests[1..] {
+        assert_eq!(downgraded.body["reasoning_effort"], json!("none"));
+        // 重送要保留工具與歷史。
+        assert_eq!(downgraded.body["tools"], requests[0].body["tools"]);
+    }
+    assert_eq!(requests[1].body["messages"], requests[0].body["messages"]);
+    assert_ne!(requests[2].body["messages"], requests[1].body["messages"]);
+}
+
+#[tokio::test]
+async fn models_rejecting_none_point_at_responses_api() {
+    let fake = FakeApi::start([
+        tools_with_reasoning_rejected("gpt-6.1-sol"),
+        Reply::Status(
+            400,
+            json!({"error": {
+                "message": "Unsupported value: 'reasoning_effort' does not support 'none' with this model.",
+                "type": "invalid_request_error",
+                "param": "reasoning_effort",
+            }}),
+        ),
+    ])
+    .await;
+    let error = collect(&provider(&fake, "v1"), request_with_tool("嗨"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, LlmError::Unsupported(m) if m.contains("Responses API")),
+        "{error:?}"
+    );
+    assert_eq!(fake.requests().len(), 2);
 }

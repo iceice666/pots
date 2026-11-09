@@ -56,6 +56,9 @@ pub struct ModelRequest {
     /// 完整的必要歷史，依時間排序。
     pub input: Vec<Item>,
     pub tools: Vec<ToolSpec>,
+    /// 這次對話的穩定 ID，給需要 session affinity 的 provider（例如 OpenCode 的
+    /// `x-opencode-session`）。沒有設定時不送。
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

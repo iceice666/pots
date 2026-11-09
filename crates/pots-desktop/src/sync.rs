@@ -801,7 +801,7 @@ pub fn refresh_setup_prompt(store: &mut Store, instance: InstanceId) {
     }
 }
 
-/// 使用中的 API provider 缺了什麼（沒選模型、Anthropic 沒有 key）；齊全時是 `None`。
+/// 使用中的 API provider 缺了什麼（沒選模型、需要 key 的種類沒有 key）；齊全時是 `None`。
 fn incomplete(provider: Option<&ProviderView>, kind: ProviderKind) -> Option<&'static str> {
     let provider = provider?;
     if kind == ProviderKind::ChatGpt {
@@ -810,8 +810,16 @@ fn incomplete(provider: Option<&ProviderView>, kind: ProviderKind) -> Option<&'s
     if provider.model.trim().is_empty() {
         return Some("使用中的 provider 還沒選模型。到「設定」編輯它，用「測試連線」挑一個模型。");
     }
-    if kind == ProviderKind::AnthropicCompatible && provider.key_hint.is_none() {
-        return Some("使用中的 Anthropic 相容 API 沒有 API key。到「設定」編輯它並填入 key。");
+    if kind.key_required() && provider.key_hint.is_none() {
+        return Some(match kind {
+            ProviderKind::AnthropicCompatible => {
+                "使用中的 Anthropic 相容 API 沒有 API key。到「設定」編輯它並填入 key。"
+            }
+            ProviderKind::OpenAiResponses => {
+                "使用中的 OpenAI Responses API 沒有 API key。到「設定」編輯它並填入 key。"
+            }
+            _ => "使用中的 provider 沒有 API key。到「設定」編輯它並填入 key。",
+        });
     }
     None
 }
@@ -927,6 +935,7 @@ mod tests {
                 base_url: String::new(),
                 model: String::new(),
                 key_hint: None,
+                headers: Vec::new(),
             }],
             memory: MemoryModelView::default(),
         }
@@ -1031,6 +1040,7 @@ mod tests {
             base_url: "https://api.openai.com/v1".into(),
             model: "gpt-4.1".into(),
             key_hint: Some("…abcd".into()),
+            headers: Vec::new(),
         });
         providers.active = Some(api);
         sync.apply(

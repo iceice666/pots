@@ -12,7 +12,10 @@ pub const PROVIDER_NAME: &str = "openai-responses";
 pub struct ResponsesOptions {
     /// 所有 Pots 工具放進這個 namespace。SIWC 要求 function tool 放在 namespace
     /// （或 `additional_tools`）裡，不能直接放在頂層 `tools`。
-    pub namespace: String,
+    ///
+    /// `None` 是給一般 OpenAI 平台 API 用：工具平整地放在頂層 `tools`，回送的
+    /// `function_call` 也不帶 `namespace`。
+    pub namespace: Option<String>,
     /// namespace 的說明，給模型看。
     pub namespace_description: String,
     /// 在 `include` 要求 `reasoning.encrypted_content`，並在下一輪回送 reasoning item。
@@ -32,7 +35,7 @@ pub struct ResponsesOptions {
 impl Default for ResponsesOptions {
     fn default() -> Self {
         Self {
-            namespace: "pots".into(),
+            namespace: Some("pots".into()),
             namespace_description: "Pots 平台工具".into(),
             include_encrypted_reasoning: true,
         }
@@ -41,10 +44,12 @@ impl Default for ResponsesOptions {
 
 /// 組出 `POST /responses` 的 body。
 ///
-/// 只送 SIWC 允許的欄位：`model`、`instructions`（有才送）、`input`、`tools`（有才送）、
+/// 只送必要的欄位（也是 SIWC 允許的）：`model`、`instructions`（有才送）、`input`、`tools`（有才送）、
 /// `include`（見 [`ResponsesOptions::include_encrypted_reasoning`]）、`store: false`、
 /// `stream: true`。不送 `previous_response_id`、`temperature`、`max_output_tokens` 等，也不產生
 /// system message item。
+///
+/// 不送 `reasoning`：讓伺服器用模型預設值（推理模型預設會推理，Responses API 允許工具與推理並用）。
 pub fn build_request_body(request: &ModelRequest, options: &ResponsesOptions) -> Value {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
@@ -58,10 +63,7 @@ pub fn build_request_body(request: &ModelRequest, options: &ResponsesOptions) ->
         .collect();
     body.insert("input".into(), Value::Array(input));
     if !request.tools.is_empty() {
-        body.insert(
-            "tools".into(),
-            json!([namespace_tool(&request.tools, options)]),
-        );
+        body.insert("tools".into(), tools_field(&request.tools, options));
     }
     if options.include_encrypted_reasoning {
         body.insert("include".into(), json!(["reasoning.encrypted_content"]));
@@ -71,25 +73,35 @@ pub fn build_request_body(request: &ModelRequest, options: &ResponsesOptions) ->
     Value::Object(body)
 }
 
-fn namespace_tool(tools: &[ToolSpec], options: &ResponsesOptions) -> Value {
-    let functions: Vec<Value> = tools
-        .iter()
-        .map(|tool| {
-            json!({
-                "type": "function",
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
-                // 平台工具的 schema 不一定符合 strict mode 的限制，明確關掉。
-                "strict": false,
-            })
-        })
-        .collect();
+/// 工具放進 namespace（SIWC）或平整地放在頂層（一般 OpenAI 平台）。
+fn tools_field(tools: &[ToolSpec], options: &ResponsesOptions) -> Value {
+    match &options.namespace {
+        Some(namespace) => json!([namespace_tool(
+            tools,
+            namespace,
+            &options.namespace_description
+        )]),
+        None => Value::Array(tools.iter().map(function_tool).collect()),
+    }
+}
+
+/// 一個 function tool；平台工具的 schema 不一定符合 strict mode 的限制，明確關掉。
+fn function_tool(tool: &ToolSpec) -> Value {
+    json!({
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": tool.parameters,
+        "strict": false,
+    })
+}
+
+fn namespace_tool(tools: &[ToolSpec], namespace: &str, description: &str) -> Value {
     json!({
         "type": "namespace",
-        "name": options.namespace,
-        "description": options.namespace_description,
-        "tools": functions,
+        "name": namespace,
+        "description": description,
+        "tools": tools.iter().map(function_tool).collect::<Vec<_>>(),
     })
 }
 
@@ -106,13 +118,18 @@ fn input_item(item: &Item, options: &ResponsesOptions) -> Option<Value> {
             "role": "assistant",
             "content": [{ "type": "output_text", "text": text }],
         }),
-        Item::ToolCall(call) => json!({
-            "type": "function_call",
-            "namespace": options.namespace,
-            "name": call.name,
-            "call_id": call.call_id,
-            "arguments": call.arguments,
-        }),
+        Item::ToolCall(call) => {
+            let mut value = json!({
+                "type": "function_call",
+                "name": call.name,
+                "call_id": call.call_id,
+                "arguments": call.arguments,
+            });
+            if let Some(namespace) = &options.namespace {
+                value["namespace"] = json!(namespace);
+            }
+            value
+        }
         Item::ToolResult { call_id, output } => json!({
             "type": "function_call_output",
             "call_id": call_id,
@@ -189,6 +206,7 @@ mod tests {
                 description: "現在時間".into(),
                 parameters: json!({"type": "object", "properties": {}}),
             }],
+            session_id: None,
         }
     }
 
@@ -233,6 +251,7 @@ mod tests {
             instructions: None,
             input: vec![Item::User { text: "hi".into() }],
             tools: vec![],
+            session_id: None,
         };
         let options = ResponsesOptions {
             include_encrypted_reasoning: false,
@@ -269,5 +288,28 @@ mod tests {
             reasoning,
             vec![&json!({"type": "reasoning", "summary": [], "encrypted_content": "enc"})]
         );
+    }
+    #[test]
+    fn api_key_tools_are_flat_without_namespace() {
+        let options = ResponsesOptions {
+            namespace: None,
+            include_encrypted_reasoning: false,
+            ..ResponsesOptions::default()
+        };
+        let body = build_request_body(&request(), &options);
+        assert_eq!(
+            body["tools"],
+            json!([{
+                "type": "function",
+                "name": "get_time",
+                "description": "現在時間",
+                "parameters": {"type": "object", "properties": {}},
+                "strict": false,
+            }])
+        );
+        let call = &body["input"][2];
+        assert_eq!(call["type"], "function_call");
+        assert_eq!(call["name"], "get_time");
+        assert!(call.get("namespace").is_none(), "{call}");
     }
 }

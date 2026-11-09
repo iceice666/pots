@@ -11,13 +11,14 @@
 mod body;
 mod stream;
 
+use reqwest::header::{HeaderMap, HeaderName};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub use self::body::{DEFAULT_MAX_TOKENS, PROVIDER_NAME, build_request_body};
 pub use self::stream::MessagesEventMapper;
-use crate::api_common::{event_stream, read_json, send};
+use crate::api_common::{event_stream, read_json, send, with_extra_headers};
 use crate::provider::{EventStream, LlmError, ModelProvider, ModelRequest};
 pub use crate::responses::ModelInfo;
 
@@ -35,6 +36,10 @@ pub struct AnthropicProvider {
     api_key: String,
     http: reqwest::Client,
     max_tokens: u32,
+    /// 使用者設定的額外 header，排在 provider 的預設值後面。
+    headers: HeaderMap,
+    /// 有設定時，把 [`ModelRequest::session_id`] 放進這個 header。
+    session_header: Option<HeaderName>,
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -43,6 +48,8 @@ impl std::fmt::Debug for AnthropicProvider {
             .field("base_url", &self.base_url.as_str())
             .field("api_key", &"<redacted>")
             .field("max_tokens", &self.max_tokens)
+            .field("extra_headers", &self.headers.keys())
+            .field("session_header", &self.session_header)
             .finish_non_exhaustive()
     }
 }
@@ -56,7 +63,21 @@ impl AnthropicProvider {
             api_key,
             http,
             max_tokens: DEFAULT_MAX_TOKENS,
+            headers: HeaderMap::new(),
+            session_header: None,
         }
+    }
+
+    /// 每次請求額外送出的 header。排在認證 header 後面，所以可以覆寫預設值。
+    pub fn with_headers(mut self, headers: HeaderMap) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// 把 `ModelRequest::session_id` 放進 `name` header；主要給 OpenCode 用。
+    pub fn with_session_header(mut self, name: &'static str) -> Self {
+        self.session_header = Some(HeaderName::from_static(name));
+        self
     }
 
     /// 每次請求的 `max_tokens`（Messages API 必填）。
@@ -86,7 +107,9 @@ impl AnthropicProvider {
                     query.append_pair("after_id", after);
                 }
             }
-            let response = send(self.headers(self.http.get(url))?, &self.api_key).await?;
+            let request = self.authorized(self.http.get(url))?;
+            let request = with_extra_headers(request, &self.headers, None, None)?;
+            let response = send(request, &self.api_key).await?;
             let body = read_json(response, "模型清單").await?;
             models.extend(parse_models(&body)?);
             let has_more = body.get("has_more").and_then(Value::as_bool) == Some(true);
@@ -102,7 +125,7 @@ impl AnthropicProvider {
     }
 
     /// 加上 `x-api-key`（標成 sensitive）與 `anthropic-version`。
-    fn headers(
+    fn authorized(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder, LlmError> {
@@ -127,12 +150,20 @@ impl ModelProvider for AnthropicProvider {
         cancel: CancellationToken,
     ) -> Result<EventStream, LlmError> {
         let url = endpoint(&self.base_url, "messages");
+        let session = request.session_id.clone();
         let body = build_request_body(&request, self.max_tokens);
-        // `.json()` 會設定 `content-type: application/json`。
+        // `.json()` 會設定 `content-type: application/json`；額外 header 最後套用，
+        // 讓使用者可以覆寫。
         let builder = self
-            .headers(self.http.post(url))?
+            .authorized(self.http.post(url))?
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&body);
+        let builder = with_extra_headers(
+            builder,
+            &self.headers,
+            self.session_header.as_ref(),
+            session.as_deref(),
+        )?;
         let response = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(LlmError::Cancelled),

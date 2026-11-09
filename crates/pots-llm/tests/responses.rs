@@ -4,9 +4,11 @@ mod common;
 
 use std::sync::Arc;
 
+use common::api::FakeApi;
 use common::{FakeResponses, Reply, completed, item_done, message, sse, text_delta};
 use futures::StreamExt;
 use pots_llm::agent::{self, AgentEvent, AllowAll, RunConfig, RunOutcome};
+use pots_llm::reqwest::header::{HeaderMap, HeaderValue};
 use pots_llm::responses::{ModelInfo, ResponsesProvider};
 use pots_llm::testing::{FnTool, StaticTokenSource};
 use pots_llm::{
@@ -25,6 +27,7 @@ fn request(text: &str) -> ModelRequest {
         instructions: Some("你是 Pots".into()),
         input: vec![Item::User { text: text.into() }],
         tools: vec![],
+        session_id: None,
     }
 }
 
@@ -34,6 +37,43 @@ async fn collect(
 ) -> Result<Vec<Result<StreamEvent, LlmError>>, LlmError> {
     let stream = provider.stream(request, CancellationToken::new()).await?;
     Ok(stream.collect().await)
+}
+
+fn extra_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-pots-test", HeaderValue::from_static("1"));
+    headers
+}
+
+#[tokio::test]
+async fn sends_extra_headers_on_models_and_stream() {
+    let fake = FakeApi::start([
+        Reply::Status(200, json!({"data": [{"id": "gpt-test"}]})),
+        Reply::Sse(sse(&[
+            json!({"type": "response.created", "response": {"id": "resp_1"}}),
+            text_delta("好"),
+            completed(1, 1),
+        ])),
+    ])
+    .await;
+    let provider = ResponsesProvider::new(
+        fake.url("v1"),
+        StaticTokenSource::new(["token-1"]),
+        reqwest::Client::new(),
+    )
+    .with_headers(extra_headers());
+    provider.list_models().await.unwrap();
+    let mut request = request("嗨");
+    request.session_id = Some("session-1".into());
+    collect(&provider.with_session_header("x-opencode-session"), request)
+        .await
+        .unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests[0].header("x-pots-test"), Some("1"));
+    assert_eq!(requests[0].header("authorization"), Some("Bearer token-1"));
+    assert_eq!(requests[1].header("x-pots-test"), Some("1"));
+    assert_eq!(requests[1].header("x-opencode-session"), Some("session-1"));
 }
 
 /// SIWC 不接受的請求欄位。
@@ -146,6 +186,7 @@ async fn namespaced_tool_roundtrip_through_agent_loop() {
         tools: vec![tool.clone()],
         hook: Arc::new(AllowAll),
         max_turns: 4,
+        session_id: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let result = agent::run(
@@ -404,5 +445,95 @@ async fn list_models_filters_visibility_in_order() {
     assert_eq!(
         fake.requests()[0].authorization.as_deref(),
         Some("Bearer t1")
+    );
+}
+
+/// 一般 OpenAI 平台 API key：Bearer 授權、扁平工具、不帶 namespace。
+#[tokio::test]
+async fn api_key_uses_flat_tools_and_bearer_auth() {
+    let fake = FakeResponses::start([Reply::Sse(sse(&[
+        text_delta("12:00"),
+        message("12:00"),
+        completed(10, 2),
+    ]))])
+    .await;
+    let provider = ResponsesProvider::with_api_key(
+        fake.base.clone(),
+        "sk-test-secret".into(),
+        reqwest::Client::new(),
+    );
+    let mut request = request("幾點");
+    request.tools = vec![ToolSpec {
+        name: "get_time".into(),
+        description: "現在時間".into(),
+        parameters: json!({"type": "object", "properties": {}}),
+    }];
+    let events = collect(&provider, request).await.unwrap();
+    assert!(matches!(
+        events.last(),
+        Some(Ok(StreamEvent::Completed { .. }))
+    ));
+
+    let sent = &fake.requests()[0];
+    assert_eq!(sent.authorization.as_deref(), Some("Bearer sk-test-secret"));
+    assert_eq!(
+        sent.body["tools"],
+        json!([{
+            "type": "function",
+            "name": "get_time",
+            "description": "現在時間",
+            "parameters": {"type": "object", "properties": {}},
+            "strict": false,
+        }])
+    );
+    assert_eq!(sent.body["instructions"], json!("你是 Pots"));
+    assert_eq!(sent.body["store"], json!(false));
+    // 推理用模型預設值；只要求回傳加密內容以便續接。
+    assert!(sent.body.get("reasoning").is_none());
+    assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[tokio::test]
+async fn api_key_reads_platform_model_list() {
+    let fake = FakeResponses::start([]).await;
+    fake.set_models(json!({"object": "list", "data": [
+        {"id": "gpt-6-luna", "object": "model"},
+        {"id": "text-embedding-3-large", "object": "model"},
+        {"object": "model"},
+    ]}));
+    let provider = ResponsesProvider::with_api_key(
+        fake.base.clone(),
+        "sk-test-secret".into(),
+        reqwest::Client::new(),
+    );
+    assert_eq!(
+        provider.list_models().await.unwrap(),
+        vec![ModelInfo {
+            slug: "gpt-6-luna".into(),
+            display_name: "gpt-6-luna".into()
+        }]
+    );
+    assert_eq!(
+        fake.requests()[0].authorization.as_deref(),
+        Some("Bearer sk-test-secret")
+    );
+}
+
+#[tokio::test]
+async fn api_key_401_is_invalid_credentials_without_key() {
+    let fake = FakeResponses::start([Reply::Status(
+        401,
+        json!({"error": {"message": "Incorrect API key provided: sk-test-secret", "type": "invalid_request_error", "code": "invalid_api_key"}}),
+    )])
+    .await;
+    let provider = ResponsesProvider::with_api_key(
+        fake.base.clone(),
+        "sk-test-secret".into(),
+        reqwest::Client::new(),
+    );
+    let error = collect(&provider, request("嗨")).await.unwrap_err();
+    assert!(
+        matches!(&error, LlmError::InvalidCredentials(m) if !m.contains("sk-test-secret")),
+        "{error:?}"
     );
 }

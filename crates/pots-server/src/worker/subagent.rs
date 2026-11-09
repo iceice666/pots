@@ -134,6 +134,7 @@ pub async fn run(
                         tools: crate::tools::build(&profile, sub.clone()),
                         hook: Arc::new(sub.gate()),
                         max_turns: profile.max_turns,
+                        session_id: Some(format!("run:{run_id}")),
                     };
                     if let Err(e) =
                         record_start(&ctx, run_id, &profile.name, &model_name, &job.prompt).await

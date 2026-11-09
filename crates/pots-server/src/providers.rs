@@ -22,14 +22,15 @@
 //! run 開始時用 [`ProviderRouter`] 依當下使用中的 provider 決定一次 [`Route`]，整個 run 都用它；
 //! Observer／Reflector 每次呼叫用 [`ProviderRouter::resolve_memory`]。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pots_llm::{LlmError, ModelProvider};
 use pots_proto::{
-    MemoryModelView, ModelOption, ProviderDraft, ProviderId, ProviderKind, ProviderView,
-    ProvidersView, ServerEvent, Timestamp,
+    MemoryModelView, ModelOption, ProviderDraft, ProviderHeader, ProviderId, ProviderKind,
+    ProviderView, ProvidersView, ServerEvent, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -46,6 +47,10 @@ const SECRET_DIR: &str = "auth/providers";
 /// `TestProvider` 列模型的時限。
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_NAME: usize = 100;
+/// 一個 provider 最多幾個額外 header。
+const MAX_HEADERS: usize = 32;
+const MAX_HEADER_NAME: usize = 100;
+const MAX_HEADER_VALUE: usize = 4096;
 /// key 至少這麼長才在 `key_hint` 顯示末四碼。
 const MIN_HINT_KEY_LEN: usize = 16;
 /// 換了主機卻沒有重新輸入 key：不把已存的 key 送到別的主機。
@@ -68,6 +73,7 @@ pub trait ApiProviderFactory: Send + Sync {
         kind: ProviderKind,
         base_url: &Url,
         api_key: &str,
+        headers: &[ProviderHeader],
     ) -> Result<Arc<dyn ModelProvider>, String>;
 
     /// 列出可用的模型，用來驗證 base URL 與 key。
@@ -76,6 +82,7 @@ pub trait ApiProviderFactory: Send + Sync {
         kind: ProviderKind,
         base_url: &Url,
         api_key: &str,
+        headers: &[ProviderHeader],
     ) -> Result<Vec<ModelOption>, LlmError>;
 
     /// 內建 ChatGPT 方案的模型清單（需要已登入）。預設不支援。
@@ -91,7 +98,13 @@ pub struct NoApiProviders;
 
 #[async_trait::async_trait]
 impl ApiProviderFactory for NoApiProviders {
-    fn build(&self, _: ProviderKind, _: &Url, _: &str) -> Result<Arc<dyn ModelProvider>, String> {
+    fn build(
+        &self,
+        _: ProviderKind,
+        _: &Url,
+        _: &str,
+        _: &[ProviderHeader],
+    ) -> Result<Arc<dyn ModelProvider>, String> {
         Err("這個組裝不支援 API provider".into())
     }
 
@@ -100,6 +113,7 @@ impl ApiProviderFactory for NoApiProviders {
         _: ProviderKind,
         _: &Url,
         _: &str,
+        _: &[ProviderHeader],
     ) -> Result<Vec<ModelOption>, LlmError> {
         Err(LlmError::Unsupported("這個組裝不支援 API provider".into()))
     }
@@ -150,6 +164,7 @@ impl ApiEntry {
             base_url: self.row.base_url.clone(),
             model: self.row.model.clone(),
             key_hint: self.key.as_ref().map(ApiKey::hint),
+            headers: self.row.headers.clone(),
         }
     }
 }
@@ -175,6 +190,7 @@ impl ProviderState {
             base_url: String::new(),
             model: self.chatgpt_model.clone(),
             key_hint: None,
+            headers: Vec::new(),
         }];
         items.extend(self.api.iter().map(ApiEntry::view));
         ProvidersView {
@@ -302,7 +318,7 @@ impl ProviderRegistry {
             Err(_) => Err(LlmError::Other("provider 的 base URL 格式不對".into())),
             Ok(url) => self
                 .factory
-                .build(row.kind, &url, key_str(&key))
+                .build(row.kind, &url, key_str(&key), &row.headers)
                 .map_err(|m| LlmError::Other(format!("無法建立 provider：{m}"))),
         };
         if let Err(e) = &built {
@@ -398,6 +414,9 @@ impl Route {
 /// 依 base URL 猜 models.dev 的 provider 鍵；不認得時用 API 種類的預設值。
 /// 單價只是估計，使用者可以在單價表覆寫。
 fn pricing_provider(kind: ProviderKind, base_url: &str) -> String {
+    if let Some(preset) = kind.preset() {
+        return preset.pricing_provider.clone();
+    }
     let host = Url::parse(base_url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_ascii_lowercase));
@@ -417,12 +436,15 @@ fn pricing_provider(kind: ProviderKind, base_url: &str) -> String {
         Some("api.perplexity.ai") => Some("perplexity"),
         Some("api.minimax.io") => Some("minimax"),
         Some("api.z.ai") => Some("zai"),
+        Some("opencode.ai") => Some("opencode"),
         _ => None,
     };
     known.map(str::to_string).unwrap_or_else(|| match kind {
-        ProviderKind::OpenAiCompatible => "openai".into(),
+        ProviderKind::OpenAiCompatible | ProviderKind::OpenAiResponses => "openai".into(),
         ProviderKind::AnthropicCompatible => "anthropic".into(),
         ProviderKind::ChatGpt => "chatgpt".into(),
+        // 有 preset 的種類在上面就回傳了；這裡只是讓 match 完整。
+        ProviderKind::OpenCodeZen | ProviderKind::OpenCodeGo => "opencode".into(),
     })
 }
 
@@ -540,7 +562,54 @@ fn same_origin(stored: &str, url: &Url) -> bool {
 /// 這個種類的 provider 必須有 API key。OpenAI 相容的可以沒有（例如本機的 Ollama，
 /// 沒有 key 時不送 `Authorization`）。
 fn key_required(kind: ProviderKind) -> bool {
-    kind != ProviderKind::OpenAiCompatible
+    kind.key_required()
+}
+
+/// 驗證並整理額外 header：去掉空白列、拒絕重複名稱與 hop-by-hop header。
+/// 值可以是空的；不允許控制字元（reqwest 也送不出去）。
+fn sanitize_headers(headers: &[ProviderHeader]) -> Result<Vec<ProviderHeader>, String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for header in headers {
+        let name = header.name.trim();
+        let value = header.value.trim();
+        if name.is_empty() {
+            if value.is_empty() {
+                continue;
+            }
+            return Err("header 名稱不能是空的".into());
+        }
+        if name.chars().count() > MAX_HEADER_NAME {
+            return Err(format!("header 名稱最多 {MAX_HEADER_NAME} 個字"));
+        }
+        if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            return Err(format!("header 名稱「{name}」含有無效字元"));
+        }
+        let lower = name.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "host" | "content-length" | "transfer-encoding" | "connection"
+        ) {
+            return Err(format!("不能設定 {name} header"));
+        }
+        if !seen.insert(lower) {
+            return Err(format!("header「{name}」重複了"));
+        }
+        if value.chars().count() > MAX_HEADER_VALUE {
+            return Err(format!("header「{name}」的值太長"));
+        }
+        if reqwest::header::HeaderValue::from_str(value).is_err() {
+            return Err(format!("header「{name}」的值含有無效字元"));
+        }
+        out.push(ProviderHeader {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
+    }
+    if out.len() > MAX_HEADERS {
+        return Err(format!("最多 {MAX_HEADERS} 個 header"));
+    }
+    Ok(out)
 }
 
 /// 沒有 key 時給 provider 空字串。
@@ -591,6 +660,18 @@ pub(crate) async fn save(app: &App, draft: ProviderDraft) -> Result<(), String> 
         let (base_url, url) = parse_base_url(&draft.base_url)?;
         let typed_key = draft_key(&draft);
         let model = draft.model.trim().to_string();
+        let headers = sanitize_headers(&draft.headers)?;
+        if let Some(preset) = draft.kind.preset() {
+            if model.is_empty() {
+                return Err("請選擇模型".into());
+            }
+            if !preset.contains_model(&model) {
+                return Err(format!(
+                    "「{model}」不在 {} 的內建模型清單；請按「測試連線」挑一個",
+                    preset.label
+                ));
+            }
+        }
 
         let (row, key, is_new) = match draft.id {
             None => {
@@ -605,6 +686,7 @@ pub(crate) async fn save(app: &App, draft: ProviderDraft) -> Result<(), String> 
                     name,
                     base_url,
                     model,
+                    headers,
                     secret_ref: key.is_some().then(|| ProviderRegistry::secret_rel(id)),
                     created_at: Timestamp::now(),
                 };
@@ -636,6 +718,7 @@ pub(crate) async fn save(app: &App, draft: ProviderDraft) -> Result<(), String> 
                     name,
                     base_url,
                     model,
+                    headers,
                     secret_ref,
                     ..existing.row.clone()
                 };
@@ -645,7 +728,7 @@ pub(crate) async fn save(app: &App, draft: ProviderDraft) -> Result<(), String> 
 
         let built = registry
             .factory
-            .build(row.kind, &url, key_str(&key))
+            .build(row.kind, &url, key_str(&key), &row.headers)
             .map_err(|m| format!("無法建立 provider：{m}"))?;
         if let Some(typed) = &typed_key {
             let rel = ProviderRegistry::secret_rel(row.id);
@@ -832,6 +915,17 @@ async fn test_inner(
         };
     }
     let (_, url) = parse_base_url(&draft.base_url)?;
+    let headers = sanitize_headers(&draft.headers)?;
+    if let Some(preset) = draft.kind.preset() {
+        return Ok(preset
+            .models
+            .iter()
+            .map(|model| ModelOption {
+                id: model.id.clone(),
+                display_name: model.name.clone(),
+            })
+            .collect());
+    }
     let key = match draft_key(draft) {
         Some(k) => Some(k),
         None => {
@@ -858,7 +952,7 @@ async fn test_inner(
         TEST_TIMEOUT,
         registry
             .factory
-            .list_models(draft.kind, &url, key_str(&key)),
+            .list_models(draft.kind, &url, key_str(&key), &headers),
     )
     .await;
     match listed {
@@ -939,5 +1033,40 @@ mod tests {
         let key = ApiKey("sk-leaky-9999".into());
         let msg = describe(&LlmError::Other("bad key sk-leaky-9999".into()), Some(&key));
         assert!(!msg.contains("sk-leaky"));
+    }
+
+    #[test]
+    fn headers_are_trimmed_and_blank_rows_dropped() {
+        let headers = sanitize_headers(&[
+            ProviderHeader {
+                name: " x-test ".into(),
+                value: " yes ".into(),
+            },
+            ProviderHeader {
+                name: " ".into(),
+                value: String::new(),
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            headers,
+            vec![ProviderHeader {
+                name: "x-test".into(),
+                value: "yes".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn invalid_headers_are_rejected() {
+        let header = |name: &str, value: &str| ProviderHeader {
+            name: name.into(),
+            value: value.into(),
+        };
+        assert!(sanitize_headers(&[header("x-a", "1"), header("X-A", "2")]).is_err());
+        assert!(sanitize_headers(&[header("bad name", "1")]).is_err());
+        assert!(sanitize_headers(&[header("x-a", "line\r\nbreak")]).is_err());
+        assert!(sanitize_headers(&[header("host", "evil")]).is_err());
+        assert!(sanitize_headers(&[header("", "value")]).is_err());
     }
 }

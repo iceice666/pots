@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -114,6 +115,28 @@ pub(crate) fn event_stream<M: EventMapper>(
             }
         }
     })
+}
+
+/// 加上使用者設定的額外 header，以及（有設定時）這次對話的 session header。
+///
+/// `headers` 已經排在最前面，所以使用者可以在裡面覆寫 provider 的預設值；session header
+/// 只在 `headers` 沒有同名項目時才補上。
+pub(crate) fn with_extra_headers(
+    request: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+    session_header: Option<&HeaderName>,
+    session: Option<&str>,
+) -> Result<reqwest::RequestBuilder, LlmError> {
+    let mut request = request.headers(headers.clone());
+    if let (Some(name), Some(session)) = (session_header, session)
+        && !session.is_empty()
+        && !headers.contains_key(name)
+    {
+        let value = HeaderValue::from_str(session)
+            .map_err(|_| LlmError::Unsupported("session ID 含有無效字元".into()))?;
+        request = request.header(name, value);
+    }
+    Ok(request)
 }
 
 /// 送出請求；連線錯誤轉成 [`LlmError::Unavailable`]（不含 URL）。非 2xx 轉成對應的錯誤。

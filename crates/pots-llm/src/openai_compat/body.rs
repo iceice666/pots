@@ -14,6 +14,8 @@ pub const PROVIDER_NAME: &str = "openai-compatible";
 /// - [`Item::ToolResult`] 變成 `tool` message。
 /// - [`Item::Opaque`]（其他 provider 的專屬項目）略過。
 /// - 一律 `stream: true` 並要求最後一塊帶 usage；沒有工具時不送 `tools`。
+/// - 不主動送 `reasoning_effort`：不是每個模型都接受，只有被 Chat Completions 以
+///   「工具 + reasoning」拒絕時才用 [`build_request_body_with_effort`] 重送。
 pub fn build_request_body(request: &ModelRequest) -> Value {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
@@ -38,6 +40,18 @@ pub fn build_request_body(request: &ModelRequest) -> Value {
         body.insert("tools".into(), Value::Array(tools));
     }
     Value::Object(body)
+}
+
+/// 同 [`build_request_body`]，但明確送 `reasoning_effort`。
+///
+/// GPT-5.4 以後的模型預設會推理，而 Chat Completions 不接受「工具 + reasoning」；被拒絕時
+/// 用 `"none"` 重送一次（見 [`super::OpenAiCompatProvider`]），用工具但關掉推理。
+pub fn build_request_body_with_effort(request: &ModelRequest, effort: &str) -> Value {
+    let mut body = build_request_body(request);
+    if let Some(map) = body.as_object_mut() {
+        map.insert("reasoning_effort".into(), json!(effort));
+    }
+    body
 }
 
 /// 還沒送出的 assistant message：文字與同一輪的工具呼叫。
@@ -169,6 +183,7 @@ mod tests {
                 description: "現在時間".into(),
                 parameters: json!({"type": "object", "properties": {}}),
             }],
+            session_id: None,
         };
         assert_eq!(
             build_request_body(&request),
@@ -208,6 +223,7 @@ mod tests {
             instructions: Some(String::new()),
             input: vec![Item::User { text: "hi".into() }],
             tools: vec![],
+            session_id: None,
         };
         let body = build_request_body(&request);
         assert!(body.get("tools").is_none());

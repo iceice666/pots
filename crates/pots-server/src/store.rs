@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use pots_llm::Item;
 use pots_proto::{
-    Author, InstanceId, ItemId, ObservationId, Priority, ProjectId, ProviderId, ProviderKind,
-    ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp,
+    Author, InstanceId, ItemId, ObservationId, Priority, ProjectId, ProviderHeader, ProviderId,
+    ProviderKind, ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -58,6 +58,8 @@ pub struct ConnectionRow {
     pub name: String,
     pub base_url: String,
     pub model: String,
+    /// 每次請求額外送出的 header；值不是秘密。
+    pub headers: Vec<ProviderHeader>,
     /// API key 檔案相對於資料目錄的路徑。
     pub secret_ref: Option<String>,
     pub created_at: Timestamp,
@@ -1240,8 +1242,8 @@ impl Store {
     /// 本機使用者的 API provider，依建立時間。
     pub async fn list_connections(&self) -> Result<Vec<ConnectionRow>, Error> {
         let rows = sqlx::query(
-            "SELECT id, kind, name, base_url, model, secret_ref, created_at FROM model_connections \
-             WHERE user_id = ? ORDER BY created_at, id",
+            "SELECT id, kind, name, base_url, model, headers, secret_ref, created_at \
+             FROM model_connections WHERE user_id = ? ORDER BY created_at, id",
         )
         .bind(LOCAL_USER_ID.to_string())
         .fetch_all(&self.pool)
@@ -1258,12 +1260,21 @@ impl Store {
                     continue;
                 }
             };
+            let headers: String = row.try_get("headers")?;
+            let headers = match serde_json::from_str::<Vec<ProviderHeader>>(&headers) {
+                Ok(headers) => headers,
+                Err(e) => {
+                    tracing::warn!(%id, error = %e, "provider 的 headers 格式不對，當成空的");
+                    Vec::new()
+                }
+            };
             out.push(ConnectionRow {
                 id: parse_id(id)?,
                 kind,
                 name: row.try_get("name")?,
                 base_url: row.try_get("base_url")?,
                 model: row.try_get("model")?,
+                headers,
                 secret_ref: row.try_get("secret_ref")?,
                 created_at: Timestamp(row.try_get("created_at")?),
             });
@@ -1280,13 +1291,16 @@ impl Store {
             serde_json::Value::String(s) => s,
             other => return Err(Error::Corrupt(format!("provider 種類序列化錯誤：{other}"))),
         };
+        let headers = serde_json::to_string(&row.headers)?;
         sqlx::query(
             "INSERT INTO model_connections \
-             (id, user_id, kind, name, base_url, model, secret_ref, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (id, user_id, kind, name, base_url, model, headers, secret_ref, created_at, \
+              updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
              base_url = excluded.base_url, model = excluded.model, \
-             secret_ref = excluded.secret_ref, updated_at = excluded.updated_at",
+             headers = excluded.headers, secret_ref = excluded.secret_ref, \
+             updated_at = excluded.updated_at",
         )
         .bind(row.id.to_string())
         .bind(LOCAL_USER_ID.to_string())
@@ -1294,6 +1308,7 @@ impl Store {
         .bind(&row.name)
         .bind(&row.base_url)
         .bind(&row.model)
+        .bind(&headers)
         .bind(row.secret_ref.as_deref())
         .bind(row.created_at.0)
         .bind(Timestamp::now().0)

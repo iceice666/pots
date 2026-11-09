@@ -18,16 +18,18 @@ use std::sync::Arc;
 
 use pots_llm::anthropic::AnthropicProvider;
 use pots_llm::openai_compat::OpenAiCompatProvider;
+use pots_llm::reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use pots_llm::responses::{DEFAULT_BASE_URL, ResponsesProvider};
 use pots_llm::siwc::{
     AuthStatus, FileCredentialStore, SiwcAuth, SiwcConfig, load_or_create_host_id,
 };
 use pots_llm::{EventStream, LlmError, ModelProvider, ModelRequest};
-use pots_proto::{ModelAuthView, ModelOption, ProviderKind};
+use pots_proto::{ModelAuthView, ModelOption, ProviderHeader, ProviderKind};
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::preset_provider::PresetProvider;
 use crate::{ApiProviderFactory, Config, Deps, Error, ModelAuthControl};
 
 /// [`Deps::model`] 用這個值時，由 [`AutoModel`] 在第一次推論前決定實際的模型。
@@ -345,6 +347,20 @@ fn model_options(models: Vec<pots_llm::responses::ModelInfo>) -> Vec<ModelOption
         .collect()
 }
 
+/// 把協定裡的 header 轉成 reqwest 的 [`HeaderMap`]；值標成 sensitive，避免任何 Debug 輸出。
+fn header_map(headers: &[ProviderHeader]) -> Result<HeaderMap, String> {
+    let mut map = HeaderMap::new();
+    for header in headers {
+        let name = HeaderName::from_bytes(header.name.as_bytes())
+            .map_err(|_| format!("header 名稱「{}」含有無效字元", header.name))?;
+        let mut value = HeaderValue::from_str(&header.value)
+            .map_err(|_| format!("header「{}」的值含有無效字元", header.name))?;
+        value.set_sensitive(true);
+        map.insert(name, value);
+    }
+    Ok(map)
+}
+
 #[async_trait::async_trait]
 impl ApiProviderFactory for HttpApiProviders {
     fn build(
@@ -352,16 +368,29 @@ impl ApiProviderFactory for HttpApiProviders {
         kind: ProviderKind,
         base_url: &Url,
         api_key: &str,
+        headers: &[ProviderHeader],
     ) -> Result<Arc<dyn ModelProvider>, String> {
         let (base, key, http) = (base_url.clone(), api_key.to_string(), self.http.clone());
+        let headers = header_map(headers)?;
+        if let Some(preset) = kind.preset() {
+            return Ok(Arc::new(PresetProvider::new(
+                preset, base, key, http, headers,
+            )));
+        }
         match kind {
-            ProviderKind::OpenAiCompatible => {
-                Ok(Arc::new(OpenAiCompatProvider::new(base, key, http)))
-            }
-            ProviderKind::AnthropicCompatible => {
-                Ok(Arc::new(AnthropicProvider::new(base, key, http)))
-            }
+            ProviderKind::OpenAiCompatible => Ok(Arc::new(
+                OpenAiCompatProvider::new(base, key, http).with_headers(headers),
+            )),
+            ProviderKind::OpenAiResponses => Ok(Arc::new(
+                ResponsesProvider::with_api_key(base, key, http).with_headers(headers),
+            )),
+            ProviderKind::AnthropicCompatible => Ok(Arc::new(
+                AnthropicProvider::new(base, key, http).with_headers(headers),
+            )),
             ProviderKind::ChatGpt => Err("ChatGPT 方案不是 API provider".into()),
+            ProviderKind::OpenCodeZen | ProviderKind::OpenCodeGo => {
+                unreachable!("preset 在上面的分支處理")
+            }
         }
     }
 
@@ -370,20 +399,43 @@ impl ApiProviderFactory for HttpApiProviders {
         kind: ProviderKind,
         base_url: &Url,
         api_key: &str,
+        headers: &[ProviderHeader],
     ) -> Result<Vec<ModelOption>, LlmError> {
         let (base, key, http) = (base_url.clone(), api_key.to_string(), self.http.clone());
+        let headers = header_map(headers).map_err(LlmError::Other)?;
+        if let Some(preset) = kind.preset() {
+            return Ok(PresetProvider::new(preset, base, key, http, headers)
+                .models()
+                .into_iter()
+                .map(|m| ModelOption {
+                    id: m.slug,
+                    display_name: m.display_name,
+                })
+                .collect());
+        }
         let models = match kind {
             ProviderKind::OpenAiCompatible => {
                 OpenAiCompatProvider::new(base, key, http)
+                    .with_headers(headers)
+                    .list_models()
+                    .await?
+            }
+            ProviderKind::OpenAiResponses => {
+                ResponsesProvider::with_api_key(base, key, http)
+                    .with_headers(headers)
                     .list_models()
                     .await?
             }
             ProviderKind::AnthropicCompatible => {
                 AnthropicProvider::new(base, key, http)
+                    .with_headers(headers)
                     .list_models()
                     .await?
             }
             ProviderKind::ChatGpt => return self.chatgpt_models().await,
+            ProviderKind::OpenCodeZen | ProviderKind::OpenCodeGo => {
+                unreachable!("preset 在上面的分支處理")
+            }
         };
         Ok(model_options(models))
     }
@@ -415,6 +467,26 @@ mod tests {
                 plan_usage: true
             }),
             ModelAuthView::SignedIn { account: None }
+        );
+    }
+
+    #[test]
+    fn api_providers_build_by_kind() {
+        let factory = HttpApiProviders::new(reqwest::Client::new(), None);
+        let base = Url::parse("https://api.openai.com/v1").unwrap();
+        assert_eq!(
+            factory
+                .build(ProviderKind::OpenAiResponses, &base, "sk-test", &[])
+                .unwrap()
+                .name(),
+            "openai-responses"
+        );
+        assert_eq!(
+            factory
+                .build(ProviderKind::OpenAiCompatible, &base, "sk-test", &[])
+                .unwrap()
+                .name(),
+            "openai-compatible"
         );
     }
 }

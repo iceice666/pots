@@ -23,6 +23,7 @@ mod memory;
 pub mod model_auth;
 mod notifications;
 mod planner;
+mod preset_provider;
 mod profiles;
 mod providers;
 mod runs;

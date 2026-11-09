@@ -7,19 +7,26 @@
 //! - [`build_request_body`]：純函式，把 [`ModelRequest`] 轉成請求 JSON。
 //! - [`ChatCompletionsMapper`]：純狀態機，把 SSE chunk 轉成 [`StreamEvent`](crate::StreamEvent)。
 //!
+//! GPT-5.4 以後的模型預設會推理，而 Chat Completions 不接受「工具 + reasoning」。請求帶工具時
+//! 若被以那個理由拒絕，會改成 `reasoning_effort: "none"` 重送一次，並記住這個 provider
+//! 之後都直接這樣送；連 `none` 都不接受的模型則回報要改用 Responses API。
+//!
 //! API key 只放在 `Authorization: Bearer` header，不會出現在 `Debug`、log 或錯誤訊息；
 //! key 是空字串時不送 `Authorization`（例如本機的 Ollama）。
 
 mod body;
 mod stream;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use reqwest::header::{HeaderMap, HeaderName};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-pub use self::body::{PROVIDER_NAME, build_request_body};
+pub use self::body::{PROVIDER_NAME, build_request_body, build_request_body_with_effort};
 pub use self::stream::ChatCompletionsMapper;
-use crate::api_common::{event_stream, read_json, send};
+use crate::api_common::{event_stream, read_json, send, with_extra_headers};
 use crate::provider::{EventStream, LlmError, ModelProvider, ModelRequest};
 pub use crate::responses::ModelInfo;
 use crate::responses::endpoint;
@@ -31,6 +38,12 @@ pub struct OpenAiCompatProvider {
     base_url: Url,
     api_key: String,
     http: reqwest::Client,
+    /// 伺服器拒絕過「工具 + reasoning」（見模組說明）；之後帶工具的請求都直接關掉推理。
+    tools_without_reasoning: AtomicBool,
+    /// 使用者設定的額外 header，排在認證 header 後面。
+    headers: HeaderMap,
+    /// 有設定時，把 [`ModelRequest::session_id`] 放進這個 header。
+    session_header: Option<HeaderName>,
 }
 
 impl std::fmt::Debug for OpenAiCompatProvider {
@@ -49,7 +62,22 @@ impl OpenAiCompatProvider {
             base_url,
             api_key,
             http,
+            tools_without_reasoning: AtomicBool::new(false),
+            headers: HeaderMap::new(),
+            session_header: None,
         }
+    }
+
+    /// 每次請求額外送出的 header。排在 `Authorization` 後面，所以可以覆寫預設值。
+    pub fn with_headers(mut self, headers: HeaderMap) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// 把 `ModelRequest::session_id` 放進 `name` header；主要給 OpenCode 用。
+    pub fn with_session_header(mut self, name: &'static str) -> Self {
+        self.session_header = Some(HeaderName::from_static(name));
+        self
     }
 
     pub fn base_url(&self) -> &Url {
@@ -59,7 +87,13 @@ impl OpenAiCompatProvider {
     /// `GET {base}/models` 的 `data[].id`，依伺服器順序；`display_name` 等於 ID。
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
         let url = endpoint(&self.base_url, "models");
-        let response = send(self.authorized(self.http.get(url)), &self.api_key).await?;
+        let request = with_extra_headers(
+            self.authorized(self.http.get(url)),
+            &self.headers,
+            None,
+            None,
+        )?;
+        let response = send(request, &self.api_key).await?;
         let body = read_json(response, "模型清單").await?;
         parse_models(&body)
     }
@@ -85,22 +119,78 @@ impl ModelProvider for OpenAiCompatProvider {
         cancel: CancellationToken,
     ) -> Result<EventStream, LlmError> {
         let url = endpoint(&self.base_url, "chat/completions");
-        let body = build_request_body(&request);
-        let builder = self
-            .authorized(self.http.post(url))
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&body);
-        let response = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Err(LlmError::Cancelled),
-            response = send(builder, &self.api_key) => response?,
+        let session = request.session_id.clone();
+        let mut downgraded =
+            !request.tools.is_empty() && self.tools_without_reasoning.load(Ordering::Relaxed);
+        let mut body = if downgraded {
+            build_request_body_with_effort(&request, "none")
+        } else {
+            build_request_body(&request)
         };
-        Ok(Box::pin(event_stream(
-            response,
-            ChatCompletionsMapper::new(),
-            cancel,
-            &self.api_key,
-        )))
+        loop {
+            let builder = self
+                .authorized(self.http.post(url.clone()))
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .json(&body);
+            let builder = with_extra_headers(
+                builder,
+                &self.headers,
+                self.session_header.as_ref(),
+                session.as_deref(),
+            )?;
+            let response = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(LlmError::Cancelled),
+                response = send(builder, &self.api_key) => response,
+            };
+            match response {
+                Ok(response) => {
+                    return Ok(Box::pin(event_stream(
+                        response,
+                        ChatCompletionsMapper::new(),
+                        cancel,
+                        &self.api_key,
+                    )));
+                }
+                Err(error) if !downgraded && tools_need_no_reasoning(&error) => {
+                    tracing::warn!(
+                        model = %request.model,
+                        "Chat Completions 不接受工具與推理並用，改成 reasoning_effort=none 重送"
+                    );
+                    self.tools_without_reasoning.store(true, Ordering::Relaxed);
+                    downgraded = true;
+                    body = build_request_body_with_effort(&request, "none");
+                }
+                Err(error) => {
+                    return Err(if downgraded {
+                        explain_none_rejected(error)
+                    } else {
+                        error
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Chat Completions 以「工具 + reasoning」為由拒絕（GPT-5.4 以後的模型預設會推理）。
+fn tools_need_no_reasoning(error: &LlmError) -> bool {
+    matches!(error, LlmError::Unsupported(message)
+        if message.contains("Function tools with reasoning_effort are not supported"))
+}
+
+/// 關掉推理後仍被拒：模型連 `reasoning_effort: "none"` 都不接受，只能改用 Responses API。
+fn explain_none_rejected(error: LlmError) -> LlmError {
+    match &error {
+        LlmError::Unsupported(message)
+            if message.contains("reasoning_effort") && message.contains("none") =>
+        {
+            LlmError::Unsupported(format!(
+                "{message}（這個模型不能用 Chat Completions 搭配工具：請改用 ChatGPT 方案\
+                 （Responses API）或換一個模型）"
+            ))
+        }
+        _ => error,
     }
 }
 

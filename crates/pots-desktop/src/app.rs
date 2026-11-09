@@ -258,11 +258,19 @@ pub struct ProviderEditor {
     /// 遮蔽輸入；修改時留空表示沿用已存的 key。
     pub api_key: Entity<InputState>,
     pub model: Entity<InputState>,
+    /// 每次請求額外送出的 header；空白列在送出時略過。
+    pub headers: Vec<ProviderHeaderRow>,
     pub test: ProviderTest,
     /// 已送出 `SaveProvider`、等服務回覆；成功（收到 `Providers`）就收起表單。
     pub saving: bool,
     /// 服務拒絕儲存的原因，顯示在表單裡，打過的內容不會不見。
     pub error: Option<String>,
+}
+
+/// provider 表單裡的一列 header。
+pub struct ProviderHeaderRow {
+    pub name: Entity<InputState>,
+    pub value: Entity<InputState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1149,12 +1157,7 @@ impl PotsApp {
         let (name, base_url, model) = match &existing {
             Some(p) => (p.name.clone(), p.base_url.clone(), p.model.clone()),
             None => (
-                match kind {
-                    ProviderKind::ChatGpt => "ChatGPT",
-                    ProviderKind::OpenAiCompatible => "OpenAI",
-                    ProviderKind::AnthropicCompatible => "Anthropic",
-                }
-                .to_string(),
+                kind.label().to_string(),
                 kind.default_base_url().to_string(),
                 String::new(),
             ),
@@ -1182,7 +1185,32 @@ impl PotsApp {
         };
         let model_placeholder = match kind {
             ProviderKind::ChatGpt => "留空自動選帳號清單的第一個",
+            _ if kind.preset().is_some() => "按「列出模型」從內建清單挑一個",
             _ => "例如 gpt-4.1、claude-sonnet-4-5；可先「測試連線」再從清單挑",
+        };
+        let headers = match &existing {
+            Some(p) => p
+                .headers
+                .iter()
+                .map(|h| ProviderHeaderRow {
+                    name: input(h.name.clone(), "header 名稱", false, window, cx),
+                    value: input(h.value.clone(), "header 值", false, window, cx),
+                })
+                .collect(),
+            // 新的 preset 先帶上目錄預設的 header（例如 x-opencode-client）。
+            None => kind
+                .preset()
+                .map(|preset| {
+                    preset
+                        .headers
+                        .iter()
+                        .map(|h| ProviderHeaderRow {
+                            name: input(h.name.clone(), "header 名稱", false, window, cx),
+                            value: input(h.value.clone(), "header 值", false, window, cx),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         self.provider_editor = Some(ProviderEditor {
             id,
@@ -1191,6 +1219,7 @@ impl PotsApp {
             base_url: input(base_url, kind.default_base_url(), false, window, cx),
             api_key: input(String::new(), key_placeholder, true, window, cx),
             model: input(model, model_placeholder, false, window, cx),
+            headers,
             test: ProviderTest::Idle,
             saving: false,
             error: None,
@@ -1214,7 +1243,38 @@ impl PotsApp {
             base_url: value(&e.base_url),
             model: value(&e.model),
             api_key: (!key.is_empty()).then_some(key),
+            headers: e
+                .headers
+                .iter()
+                .filter_map(|h| {
+                    let name = value(&h.name);
+                    let value = value(&h.value);
+                    (!name.is_empty()).then_some(ProviderHeader { name, value })
+                })
+                .collect(),
         })
+    }
+
+    /// 表單加一列空白 header。
+    pub fn add_provider_header(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = &mut self.provider_editor else {
+            return;
+        };
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("header 名稱"));
+        let value = cx.new(|cx| InputState::new(window, cx).placeholder("header 值"));
+        editor.headers.push(ProviderHeaderRow { name, value });
+        cx.notify();
+    }
+
+    /// 移除表單的第 `index` 列 header。
+    pub fn remove_provider_header(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(editor) = &mut self.provider_editor else {
+            return;
+        };
+        if index < editor.headers.len() {
+            editor.headers.remove(index);
+        }
+        cx.notify();
     }
 
     pub fn test_provider(&mut self, cx: &mut Context<Self>) {
@@ -1246,11 +1306,8 @@ impl PotsApp {
             return;
         }
         // OpenAI 相容的本機服務（例如 Ollama）不需要 key。
-        if draft.id.is_none()
-            && draft.kind == ProviderKind::AnthropicCompatible
-            && draft.api_key.is_none()
-        {
-            self.set_editor_error("新增 Anthropic 相容 API 需要 API key", cx);
+        if draft.id.is_none() && draft.kind.key_required() && draft.api_key.is_none() {
+            self.set_editor_error(&format!("新增 {} 需要 API key", draft.kind.label()), cx);
             return;
         }
         // 表單留著等服務回覆：收到 `Providers` 才收起來，被拒絕時把原因顯示在表單裡。

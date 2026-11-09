@@ -65,6 +65,7 @@ fn config(
         tools,
         hook,
         max_turns: 8,
+        session_id: None,
     }
 }
 

@@ -648,7 +648,13 @@ impl Inner {
         let route = self.router.resolve_memory()?;
         let input = format::observer_input(&observations, &state.current_task, chunk);
         let (output, usage) = self
-            .complete(&route, format::OBSERVER_INSTRUCTIONS, input, cancel)
+            .complete(
+                &route,
+                format::OBSERVER_INSTRUCTIONS,
+                input,
+                format!("memory:{project}"),
+                cancel,
+            )
             .await?;
         self.record_om_usage(project, "observer", &route, usage, started)
             .await;
@@ -725,7 +731,13 @@ impl Inner {
         let route = self.router.resolve_memory()?;
         let input = format::reflector_input(&observations, &state.current_task);
         let (output, usage) = self
-            .complete(&route, format::REFLECTOR_INSTRUCTIONS, input, cancel)
+            .complete(
+                &route,
+                format::REFLECTOR_INSTRUCTIONS,
+                input,
+                format!("memory:{project}"),
+                cancel,
+            )
             .await?;
         self.record_om_usage(project, "reflector", &route, usage, started)
             .await;
@@ -870,6 +882,7 @@ impl Inner {
         route: &Route,
         instructions: &str,
         input: String,
+        session_id: String,
         cancel: &CancellationToken,
     ) -> Result<(String, Usage), OmError> {
         let request = ModelRequest {
@@ -877,6 +890,7 @@ impl Inner {
             instructions: Some(instructions.to_string()),
             input: vec![Item::User { text: input }],
             tools: Vec::new(),
+            session_id: Some(session_id),
         };
         // 排隊等名額的時間不算進請求的時限。
         let _permit = tokio::select! {
