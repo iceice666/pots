@@ -208,7 +208,7 @@ pub async fn run(
 async fn mirror(ctx: &ToolCtx, repo: Option<&str>) -> Result<Option<code::Mirror>, ToolError> {
     let repo = {
         let mut conn = ctx.store.acquire().await.map_err(internal)?;
-        match super::pick_repo(&mut conn, ctx.project, repo)
+        match super::pick_workdir(&mut conn, ctx.project, repo)
             .await
             .map_err(internal)?
         {

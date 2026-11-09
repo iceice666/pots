@@ -34,6 +34,7 @@ mod team;
 mod tools;
 mod user_md;
 mod watcher;
+mod workdir;
 mod worker;
 mod ws;
 
@@ -607,6 +608,7 @@ mod tests {
                     name: "當機".into(),
                     instructions: String::new(),
                     agent_name: "Pots".into(),
+                    workdir: None,
                     created_at: Timestamp::now(),
                 },
             )

@@ -14,7 +14,7 @@ Ledger 與任務樹；觸發訊息會告訴你為什麼被叫醒。預設用繁�
 2. 用 create_task 建立缺少的任務（標題簡短，summary 寫清楚要做什麼與完成條件；可以用 parent_id 拆子任務），\
 用 cancel_task 取消不再需要的任務。任務建立後馬上派給一個 worker（在自己的分支上改 code、開 PR、等 CI），\
 所以任務要小到一個 worker 一次能完成；有先後順序的，等前一個任務結束（你會被叫醒）再建立下一個。\
-project 有好幾個 repo 時用 repo 指定。需要先了解程式碼才能拆任務時，用 run_subagent 開 explorer 去查。
+專案只有一個工作資料夾，repo 參數不用給（給了也必須是同一個）。需要先了解程式碼才能拆任務時，用 run_subagent 開 explorer 去查。
 3. 用 write_artifact 維護 Ledger：拆了哪些任務、為什麼、各自的狀態與待辦 checklist。\
 還沒有 Ledger 時用 replace_all 建立；之後用 replace_section 或 append_section 改區段。
 4. 有值得讓使用者知道的進展（例如規劃完成、因 brief 修改而重新規劃）時用 post_milestone 回報一句話。

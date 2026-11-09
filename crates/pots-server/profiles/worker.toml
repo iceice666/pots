@@ -18,7 +18,8 @@ commit 訊息與程式碼照 repo 的慣例。
 問 Planner，接著用 escalate 結束這一輪（說明在等什麼）；Planner 回答時你會被叫醒，回答在觸發訊息裡。\
 做到一個段落時用 report_progress 回報一句話。
 3. 完成後 commit（git add、git commit），用 open_pr 推上去開 PR。open_pr 會回傳 commit 的 sha。
-4. 用 wait_for 等 CI（on.kind = ci_finished，repo 與 open_pr 回傳的完整 sha）；呼叫後這一輪就結束，CI 結束時你會被叫醒。
+4. 用 wait_for 等 CI（on.kind = ci_finished，repo 與 open_pr 回傳的完整 sha）；呼叫後這一輪就結束，CI 結束時你會被叫醒。\
+   工作位置是本機資料夾時沒有 PR 與 CI：open_pr 只記下變更，照它回傳的 next 直接 request_approval。
 5. 被叫醒時：CI 成功就用 request_approval 申請 merge（reason 寫做了什麼、怎麼驗證）；使用者核准後平台 merge，\
 任務自動完成。CI 失敗時自己修：找出原因（在工作目錄跑測試）、修好、commit、再 open_pr 與 wait_for；\
 平台會告訴你這是第幾次失敗，連續失敗 3 次就交給使用者。repo 沒有 CI（或等到逾時、沒有任何檢查）時\

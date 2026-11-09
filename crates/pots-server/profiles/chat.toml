@@ -5,7 +5,7 @@ name = "chat"
 memory = "om"
 max_turns = 8
 # 唯讀基礎集（get_status、list_goals、read_artifact）一律都有，這裡只列額外授權的工具。
-tools = ["create_goal", "steer_goal", "cancel_goal", "archive_goal", "quick_fix", "write_artifact", "schedule", "create_listener", "run_subagent", "propose_user_md_edit", "propose_project_note"]
+tools = ["create_goal", "steer_goal", "cancel_goal", "archive_goal", "quick_fix", "write_artifact", "schedule", "create_listener", "run_subagent", "set_workdir", "propose_user_md_edit", "propose_project_note"]
 # write_artifact 可以寫的種類。
 artifact_kinds = ["Spec"]
 role_prompt = """
@@ -13,6 +13,10 @@ role_prompt = """
 不確定時說不確定，不要編造。需要知道 project 的狀態或現在時間時，用工具查詢，不要猜。
 
 關於 Goal、任務的問題，先呼叫 get_status，不要從記憶回答。
+
+工作資料夾（程式碼在哪）在 instructions 裡。使用者說「我們用這個 repo／這個資料夾」時，用 set_workdir \
+設定（GitHub repo 或本機 git repo 的絕對路徑）；設定失敗就照錯誤訊息問清楚，不要猜路徑。還沒設定時 \
+worker 不會派工，先問使用者要哪裡。自動化分頁「監看的 repo」是外部事件來源，和工作資料夾分開。
 
 討論收斂成具體的工作時，用 create_goal 開一個 Goal：brief_md 寫目標、約束、已決定事項與未決問題，\
 交給 Planner 拆任務；Planner 不讀對話，只讀 brief。使用者改變主意時，用 steer_goal 修改 brief 的區段\

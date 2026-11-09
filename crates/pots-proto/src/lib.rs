@@ -26,7 +26,9 @@ use uuid::Uuid;
 /// - 10：其他 connector（`SaveSource`／`DeleteSource`、`SourceDraft`、`SourceView::url`、
 ///   `AutomationView::custom_kinds`、feed／探測／狀態頁／自訂 webhook 的事件種類）。
 /// - 11：模型 provider 的額外 headers（`ProviderView`／`ProviderDraft`）與 OpenCode Zen／Go preset。
-pub const PROTOCOL_VERSION: u32 = 11;
+/// - 12：project 的工作資料夾（`WorkDir`、`ProjectWorkdir`、`SetProjectWorkdir`、`CreateProject`
+///   帶 `workdir`、`ApprovalActionView::ApplyChanges`）。
+pub const PROTOCOL_VERSION: u32 = 12;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -285,9 +287,48 @@ pub struct ProjectView {
     /// 監看的 repo，例如 `github.com/owner/repo`。
     #[serde(default)]
     pub repos: Vec<String>,
+    /// 工作資料夾（onboarding 設定的「我們在哪個資料夾工作」）；還沒設定時是 `None`，worker
+    /// 不會派工。
+    #[serde(default)]
+    pub workdir: Option<WorkDir>,
     /// 平台 merge PR 時預設的方式（agent 申請時可以另外指定）。
     #[serde(default)]
     pub merge_method: MergeMethod,
+}
+
+/// project 的工作資料夾：程式碼在哪、worker 在哪裡改。一個 project 只有一個。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkDir {
+    /// `github.com/owner/repo`。worker 在平台維護的鏡像上開任務分支，核准後 merge PR。
+    Github { repo: String },
+    /// 本機的 git repo（絕對路徑）。worker 一樣在任務分支上工作，核准後由平台套用到這個資料夾。
+    Local { path: String },
+}
+
+impl WorkDir {
+    /// 任務與事件記的 key：`github.com/owner/repo` 或 `local:/abs/path`。
+    pub fn key(&self) -> String {
+        match self {
+            Self::Github { repo } => repo.clone(),
+            Self::Local { path } => format!("local:{path}"),
+        }
+    }
+
+    /// 給人看的一行，例如 `GitHub：owner/repo` 或 `本機：/Users/me/code/app`。
+    pub fn label(&self) -> String {
+        match self {
+            Self::Github { repo } => format!(
+                "GitHub：{}",
+                repo.strip_prefix("github.com/").unwrap_or(repo)
+            ),
+            Self::Local { path } => format!("本機：{path}"),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local { .. })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1384,6 +1425,16 @@ pub enum ApprovalActionView {
         base_rev: u32,
         diff: String,
     },
+    /// 本機資料夾的工作分支要套用進你的資料夾（沒有 PR 與 CI）。
+    ApplyChanges {
+        /// 本機資料夾的絕對路徑（和核准時一致才執行）。
+        path: String,
+        branch: String,
+        /// 任務分支從哪個分支開出來；你的資料夾要還在那個分支上。
+        base: String,
+        /// 核准的 commit；任務分支之後有新的 commit 就不套用。
+        sha: String,
+    },
     /// Goal 的預算用完了，核准就追加 `tokens`。
     IncreaseBudget {
         goal: GoalId,
@@ -1984,6 +2035,9 @@ pub struct ProjectSnapshot {
     /// 監看的 repo，例如 `github.com/owner/repo`。
     #[serde(default)]
     pub repos: Vec<String>,
+    /// 工作資料夾；還沒設定時是 `None`。
+    #[serde(default)]
+    pub workdir: Option<WorkDir>,
     #[serde(default)]
     pub merge_method: MergeMethod,
 }
@@ -2166,6 +2220,12 @@ pub enum ServerEvent {
         project: ProjectId,
         repos: Vec<String>,
     },
+    /// project 的工作資料夾有變（onboarding 或設定）。
+    ProjectWorkdir {
+        seq: u64,
+        project: ProjectId,
+        workdir: Option<WorkDir>,
+    },
     /// worker 設定有變。
     Worker {
         seq: u64,
@@ -2210,6 +2270,7 @@ impl ServerEvent {
             | Self::Automation { seq, .. }
             | Self::Github { seq, .. }
             | Self::ProjectRepos { seq, .. }
+            | Self::ProjectWorkdir { seq, .. }
             | Self::Worker { seq, .. } => Some(*seq),
             Self::GithubTest { .. }
             | Self::Delta { .. }
@@ -2232,8 +2293,16 @@ pub enum ClientCommand {
     Resume {
         last_seq: u64,
     },
+    /// 建立 project。`workdir` 在建立前就驗證，錯誤時不會留下半個 project（onboarding 精靈用）。
     CreateProject {
         name: String,
+        #[serde(default)]
+        workdir: Option<WorkDir>,
+    },
+    /// 設定或清除工作資料夾（對話 agent 的 `set_workdir` 也走同一條驗證）。
+    SetProjectWorkdir {
+        project: ProjectId,
+        workdir: Option<WorkDir>,
     },
     Send {
         project: ProjectId,

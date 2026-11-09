@@ -349,6 +349,7 @@ mod shots {
                 instance,
                 ClientCommand::CreateProject {
                     name: "pots".into(),
+                    workdir: None,
                 },
             ));
             cx.notify();

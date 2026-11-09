@@ -270,8 +270,11 @@ impl Client {
 
     /// 建立 project，收到 `ProjectAdded` 與同一筆寫入的 Project Notes（`ArtifactChanged`）為止。
     pub async fn create_project(&mut self, name: &str) -> ProjectId {
-        self.send(&ClientCommand::CreateProject { name: name.into() })
-            .await;
+        self.send(&ClientCommand::CreateProject {
+            name: name.into(),
+            workdir: None,
+        })
+        .await;
         let evs = self
             .until(|e| matches!(e, ServerEvent::ProjectAdded { .. }))
             .await;

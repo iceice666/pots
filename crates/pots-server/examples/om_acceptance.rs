@@ -357,7 +357,11 @@ async fn main() -> Result<(), BoxError> {
     .await?;
 
     let name = format!("OM 驗收 {}", pots_proto::Timestamp::now().0);
-    c.send(&ClientCommand::CreateProject { name }).await?;
+    c.send(&ClientCommand::CreateProject {
+        name,
+        workdir: None,
+    })
+    .await?;
     let ServerEvent::ProjectAdded { project, .. } = c
         .until(Duration::from_secs(10), |e| {
             matches!(e, ServerEvent::ProjectAdded { .. })

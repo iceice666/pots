@@ -636,6 +636,7 @@ pub fn store() -> Store {
             },
         ],
         repos: vec![],
+        workdir: None,
         merge_method: MergeMethod::Squash,
     };
 
@@ -751,6 +752,7 @@ pub fn store() -> Store {
             ),
         ],
         repos: vec![],
+        workdir: None,
         merge_method: MergeMethod::Squash,
     };
 
@@ -798,6 +800,7 @@ pub fn store() -> Store {
             ),
         ],
         repos: vec![],
+        workdir: None,
         merge_method: MergeMethod::Squash,
     };
     let infra_id = infra.id;
@@ -825,6 +828,7 @@ pub fn store() -> Store {
             "# Project Notes\n\n## 建置\n\n- 文件站用 `mdbook build`，輸出在 `book/`。\n",
         )],
         repos: vec![],
+        workdir: None,
         merge_method: MergeMethod::Squash,
     };
     let docs_id = docs.id;
@@ -1009,6 +1013,7 @@ pub fn store() -> Store {
             "# 整理 shell 設定\n\n## 目標\n\n合併重複的 alias，移除過期的 PATH 設定。\n",
         )],
         repos: vec![],
+        workdir: None,
         merge_method: MergeMethod::Squash,
     };
     let side_id = ProjectId::from_u64(ids.next());
@@ -1037,6 +1042,7 @@ pub fn store() -> Store {
         goals: vec![],
         artifacts: vec![],
         repos: vec![],
+        workdir: None,
         merge_method: MergeMethod::Squash,
     };
 

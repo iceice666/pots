@@ -685,6 +685,40 @@ impl WorkerTool {
                 return Err(bad("任務已經不在執行中，沒有推上去"));
             }
         }
+        // 本機資料夾：沒有 remote、PR 與 CI。變更留在鏡像的任務分支上，核准後由平台套用。
+        if let Some(path) = work.source.local_path() {
+            let change = work.source.key();
+            let progress = "已記錄變更，等使用者核准".to_string();
+            let result: Result<(), Error> = async {
+                let mut txn = ctx.hub.begin().await?;
+                tasks::set_task_work(
+                    txn.conn(),
+                    work.task,
+                    Some(&work.checkout.branch),
+                    Some((&change, None)),
+                    Some(&progress),
+                )
+                .await?;
+                if let Some(goal) = ctx.scope.goal() {
+                    tasks::push_goal(&mut txn, goal).await?;
+                }
+                txn.commit().await
+            }
+            .await;
+            result.map_err(internal)?;
+            return Ok(json!({
+                "change": change,
+                "path": path,
+                "branch": work.checkout.branch,
+                "base": work.checkout.base,
+                "sha": pushed.sha,
+                "changed": {"files": pushed.files, "insertions": pushed.insertions, "deletions": pushed.deletions},
+                "next": format!(
+                    "這是本機資料夾：沒有 PR 與 CI，變更留在任務分支上。用 request_approval 請使用者核准，核准後平台把分支套用到 {path}。",
+                ),
+            })
+            .to_string());
+        }
         // 3. push 與開 PR（token 只在平台這邊用）。
         let Some(watcher) = ctx.worker.watcher() else {
             return Err(bad("服務還沒準備好"));
@@ -735,7 +769,7 @@ impl WorkerTool {
                 txn.conn(),
                 work.task,
                 Some(&work.checkout.branch),
-                Some((&change, &pr_url)),
+                Some((&change, Some(pr_url.as_str()))),
                 Some(&progress),
             )
             .await?;
@@ -1004,11 +1038,11 @@ impl WorkerTool {
         }
         let result: Result<Result<(pots_proto::GoalId, TaskId, String), String>, Error> = async {
             let mut txn = ctx.hub.begin().await?;
-            let repo = match super::pick_repo(txn.conn(), ctx.project, args.repo.as_deref()).await?
-            {
-                Ok(r) => r,
-                Err(e) => return Ok(Err(e)),
-            };
+            let repo =
+                match super::pick_workdir(txn.conn(), ctx.project, args.repo.as_deref()).await? {
+                    Ok(r) => r,
+                    Err(e) => return Ok(Err(e)),
+                };
             let opened = super::open_quick(
                 &mut txn,
                 ctx.project,

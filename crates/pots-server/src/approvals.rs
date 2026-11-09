@@ -38,6 +38,7 @@ use crate::store::{LOCAL_USER_ID, Store, parse_id, to_json};
 use crate::tasks::{self, Principal, TaskRow, TaskState};
 use crate::tools::{Scope, ToolCtx, bad, internal};
 use crate::watcher::{self, WaitCond, Watcher};
+use crate::worker::repo::RepoSource;
 use crate::worker::{self, Ends, TaskEnd, Worker};
 
 /// 沒有決定的核准多久後逾時。
@@ -65,6 +66,15 @@ pub enum Action {
     },
     /// 刪除平台推上去的任務分支（`pots/` 開頭）。
     DeleteBranch { repo: String, branch: String },
+    /// 把本機資料夾的任務分支套用進你的資料夾；只在任務分支還是 `sha` 時執行。
+    ApplyChanges {
+        /// 本機資料夾的絕對路徑。
+        path: String,
+        branch: String,
+        /// 任務分支從哪個分支開出來；你的資料夾要還在那個分支上。
+        base: String,
+        sha: String,
+    },
     /// 啟用 agent 提案的 listener（條件與動作就是這份 `spec`）。
     CreateListener {
         listener: ListenerId,
@@ -92,9 +102,13 @@ impl Action {
         hex::encode(Sha256::digest(json.as_bytes()))
     }
 
-    /// 要連網執行的（merge、刪分支）在 commit 之後另外執行。
+    /// 要另外執行的（連網的 merge／刪分支、動檔案的套用）：commit 之後在另一個 task 裡做，
+    /// 不會卡住日誌的 transaction。
     fn is_remote(&self) -> bool {
-        matches!(self, Self::MergePr { .. } | Self::DeleteBranch { .. })
+        matches!(
+            self,
+            Self::MergePr { .. } | Self::DeleteBranch { .. } | Self::ApplyChanges { .. }
+        )
     }
 }
 
@@ -375,6 +389,17 @@ pub async fn view(conn: &mut SqliteConnection, row: &ApprovalRow) -> Result<Appr
             repo: repo.clone(),
             branch: branch.clone(),
         },
+        Action::ApplyChanges {
+            path,
+            branch,
+            base,
+            sha,
+        } => ApprovalActionView::ApplyChanges {
+            path: path.clone(),
+            branch: branch.clone(),
+            base: base.clone(),
+            sha: sha.clone(),
+        },
         Action::CreateListener { listener, spec } => ApprovalActionView::CreateListener {
             listener: *listener,
             summary: automation::listener_title(spec),
@@ -608,6 +633,21 @@ async fn expire_one(
                 .await?;
             }
         }
+        Action::ApplyChanges { .. } => {
+            if let Some(t) = waiting_task(txn.conn(), row).await? {
+                ends = worker::end_task(
+                    txn,
+                    &t,
+                    TaskEnd::NeedsHuman(format!(
+                        "「{}」的核准 {hours} 小時內沒有決定，已經逾時；變更還在任務分支上，可以重試讓 worker 重新申請",
+                        row.title
+                    )),
+                    &Principal::System,
+                    None,
+                )
+                .await?;
+            }
+        }
         Action::CreateListener { listener, .. } => {
             if let Some(l) = automation::listener(txn.conn(), *listener).await?
                 && l.approval == Some(row.id)
@@ -711,6 +751,12 @@ impl Exec {
                     ..
                 } => self.merge(repo, *number, sha, *method).await,
                 Action::DeleteBranch { repo, branch } => self.delete_branch(repo, branch).await,
+                Action::ApplyChanges {
+                    path,
+                    branch,
+                    base,
+                    sha,
+                } => self.apply(path, branch, base, sha, row.task).await,
                 _ => Err("這個動作不需要另外執行".to_string()),
             }
         };
@@ -776,6 +822,18 @@ impl Exec {
                         .await?;
                     }
                 }
+                if matches!(row.action, Action::ApplyChanges { .. })
+                    && let Some(t) = waiting_task(txn.conn(), &row).await?
+                {
+                    ends = worker::end_task(
+                        &mut txn,
+                        &t,
+                        TaskEnd::Done(format!("你核准後平台{result}")),
+                        &Principal::System,
+                        None,
+                    )
+                    .await?;
+                }
             }
             Err(error) => {
                 transition(
@@ -796,7 +854,7 @@ impl Exec {
                         &t,
                         &cond,
                         &format!(
-                            "使用者核准了，但平台沒有 merge：{error}。請處理後重新 request_approval"
+                            "使用者核准了，但平台沒有完成：{error}。請處理後重新 request_approval"
                         ),
                     )
                     .await?;
@@ -871,6 +929,76 @@ impl Exec {
         })
     }
 
+    /// 把本機資料夾的任務分支 fast-forward 進你的資料夾。只在任務分支還是核准的 `sha`、
+    /// 資料夾乾淨、而且可以直接 fast-forward 時動手；任何一個不成立就失敗並說明怎麼做。
+    async fn apply(
+        &self,
+        path: &str,
+        branch: &str,
+        base: &str,
+        sha: &str,
+        task: Option<TaskId>,
+    ) -> Result<String, String> {
+        let Some(task) = task else {
+            return Err("這筆核准沒有任務".into());
+        };
+        let source = RepoSource::Local {
+            path: path.to_string(),
+        };
+        let repos = self.worker.repos();
+        let mirror = repos.mirror(&source);
+        let current = repos
+            .task_sha(&mirror, task)
+            .await
+            .map_err(|e| format!("找不到任務分支：{e}"))?;
+        if !current.eq_ignore_ascii_case(sha) {
+            return Err(format!(
+                "任務分支在申請之後有新的 commit（現在是 {}，核准的是 {}），沒有套用",
+                short(&current),
+                short(sha)
+            ));
+        }
+        let dir = std::path::Path::new(path);
+        let status = crate::workdir::status(dir).await?;
+        if status.branch != base {
+            return Err(format!(
+                "{path} 現在在 {} 分支，核准的是從 {base} 開出來的變更：先切回 {base} 再核准套用",
+                status.branch
+            ));
+        }
+        if status.dirty {
+            return Err(format!(
+                "{path} 有未 commit 的修改：先 commit 或 stash，再重新核准套用"
+            ));
+        }
+        // 任務分支在鏡像裡；先抓進你的 repo 的暫時 ref（只動 .git，不動工作區），再 fast-forward。
+        let temp = format!("refs/pots/apply/{task}");
+        let fetched = crate::workdir::git(
+            dir,
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                &mirror.display().to_string(),
+                &format!("+refs/pots/tasks/{task}:{temp}"),
+            ],
+        )
+        .await;
+        if let Err(e) = fetched {
+            return Err(format!("無法讀取任務分支：{e}"));
+        }
+        let merged = crate::workdir::git(dir, &["merge", "--ff-only", "--quiet", &temp]).await;
+        // 不論成敗都收掉暫時 ref。
+        let _ = crate::workdir::git(dir, &["update-ref", "-d", &temp]).await;
+        merged.map_err(|e| {
+            format!(
+                "無法把 {branch} 套用到 {path}（你的 {} 上有任務分支沒有的 commit，或工作區衝突）：{e}",
+                status.branch
+            )
+        })?;
+        Ok(format!("把 {branch} 套用到 {path}（{}）", short(sha)))
+    }
+
     async fn delete_branch(&self, repo: &str, branch: &str) -> Result<String, String> {
         if !branch.starts_with("pots/") {
             return Err("只會刪除平台建立的任務分支（pots/ 開頭）".into());
@@ -888,6 +1016,11 @@ impl Exec {
             Err(e) => Err(format!("無法刪除分支 {branch}：{e}")),
         }
     }
+}
+
+/// commit 的前 7 碼。
+fn short(sha: &str) -> String {
+    sha[..sha.len().min(7)].to_string()
 }
 
 fn waiting_cond(t: &TaskRow) -> Option<WaitCond> {
@@ -1053,6 +1186,25 @@ async fn on_rejected(
                 return Ok(true);
             }
         }
+        Action::ApplyChanges { .. } => {
+            if let Some(t) = waiting_task(txn.conn(), row).await?
+                && let Some(cond) = waiting_cond(&t)
+            {
+                let why = row
+                    .note
+                    .as_deref()
+                    .map(|n| format!("，理由：{n}"))
+                    .unwrap_or_else(|| "（沒有附理由）".into());
+                watcher::wake_task(
+                    txn,
+                    &t,
+                    &cond,
+                    &format!("使用者拒絕了套用{why}。照理由修改後再 open_pr，再 request_approval"),
+                )
+                .await?;
+                return Ok(true);
+            }
+        }
         Action::CreateListener { listener, .. } => {
             if let Some(l) = automation::listener(txn.conn(), *listener).await?
                 && l.approval == Some(row.id)
@@ -1180,7 +1332,7 @@ async fn execute_local(
             .await?;
             Ok(Ok("已恢復這個 project 的 run".into()))
         }
-        Action::MergePr { .. } | Action::DeleteBranch { .. } => {
+        Action::MergePr { .. } | Action::DeleteBranch { .. } | Action::ApplyChanges { .. } => {
             Ok(Err("這個動作要另外執行".into()))
         }
     }
@@ -1276,6 +1428,64 @@ pub async fn request_merge(
             .map_err(internal)?;
         (task, m)
     };
+    // 本機資料夾：沒有 PR 與 CI，核准的是「把任務分支套用到資料夾」。
+    if let Some(path) = task
+        .pr
+        .as_deref()
+        .and_then(|c| c.strip_prefix("local:"))
+        .map(str::to_string)
+    {
+        let workdir = {
+            let mut conn = ctx.store.acquire().await.map_err(internal)?;
+            crate::store::Store::workdir(&mut conn, ctx.project)
+                .await
+                .map_err(internal)?
+        };
+        if !matches!(&workdir, Some(pots_proto::WorkDir::Local { path: p }) if p == &path) {
+            return Err(bad(
+                "這個 project 的工作資料夾換過了：先重新 open_pr 再申請".to_string(),
+            ));
+        }
+        let branch = task
+            .branch
+            .clone()
+            .ok_or_else(|| bad("這個任務還沒有分支：先 open_pr"))?;
+        let base = task
+            .base
+            .clone()
+            .ok_or_else(|| bad("這個任務沒有記下基準分支：先重新 open_pr"))?;
+        let repos = ctx.worker.repos();
+        let mirror = repos.mirror(&RepoSource::Local { path: path.clone() });
+        let sha = repos
+            .task_sha(&mirror, task.id)
+            .await
+            .map_err(|e| bad(format!("找不到任務分支：{e}")))?;
+        let action = Action::ApplyChanges {
+            path: path.clone(),
+            branch: branch.clone(),
+            base,
+            sha: sha.clone(),
+        };
+        let title = format!("套用變更到 {path}：{}", tasks::one_line(&task.title, 120));
+        let (approval, _) = request_approval_card(
+            ctx,
+            &task,
+            action,
+            title,
+            &reason,
+            format!("套用變更到 {path}"),
+            |t| check(t, ctx),
+        )
+        .await?;
+        return Ok(json!({
+            "approval_id": approval.to_string(),
+            "path": path,
+            "branch": branch,
+            "sha": sha,
+            "note": "已送出核准請求：使用者核准後平台會把分支套用到資料夾、任務自動完成；拒絕時你會被叫醒並看到理由。這一輪到此結束。",
+        })
+        .to_string());
+    }
     let change = task.pr.clone().unwrap_or_default();
     let (repo, number) = crate::watcher::event::parse_change(&change)
         .map_err(|e| bad(format!("PR 格式不對：{e}")))?;
@@ -1338,13 +1548,48 @@ pub async fn request_merge(
         url: pr.url.clone(),
     };
     // 3. 寫入：再檢查一次任務（期間可能被取消），任務轉 `Waiting { Approval }`。
+    let (approval, _) = request_approval_card(
+        ctx,
+        &task,
+        action,
+        title,
+        &reason,
+        format!("merge PR #{number}"),
+        |t| check(t, ctx),
+    )
+    .await?;
+    if ctx.scope.task().is_some() {
+        // 和 wait_for 一樣：等核准時這一輪就結束。
+        ctx.finish();
+    }
+    Ok(json!({
+        "approval_id": approval.to_string(),
+        "pr": change,
+        "sha": pr.head_sha,
+        "method": method.as_str(),
+        "note": "已送出核准請求：使用者核准後平台會 merge，任務自動完成；拒絕時你會被叫醒並看到理由。這一輪到此結束。",
+    })
+    .to_string())
+}
+
+/// 寫入核准、把任務掛成「等這筆核准」、貼卡片。`verify` 在 transaction 裡再跑一次（期間可能被取消）。
+async fn request_approval_card(
+    ctx: &ToolCtx,
+    task: &TaskRow,
+    action: Action,
+    title: String,
+    reason: &str,
+    what: String,
+    verify: impl FnOnce(&TaskRow) -> Result<(), ToolError>,
+) -> Result<(ApprovalId, bool), ToolError> {
+    let id = task.id;
     let now = ctx.clock.now();
     let result: Result<Result<(ApprovalId, bool), ToolError>, Error> = async {
         let mut txn = ctx.hub.begin().await?;
         let Some(task) = tasks::task(txn.conn(), id).await? else {
             return Ok(Err(bad(format!("沒有任務 {id}"))));
         };
-        if let Err(e) = check(&task, ctx) {
+        if let Err(e) = verify(&task) {
             return Ok(Err(e));
         }
         let row = insert(
@@ -1354,8 +1599,8 @@ pub async fn request_merge(
                 goal: Some(task.goal),
                 task: Some(task.id),
                 action,
-                title: title.clone(),
-                reason: reason.clone(),
+                title,
+                reason: reason.to_string(),
                 by: ctx.actor.clone(),
                 notify: true,
             },
@@ -1366,10 +1611,7 @@ pub async fn request_merge(
             &mut txn,
             &task,
             ctx.project,
-            WaitCond::Approval {
-                id: row.id,
-                what: format!("merge PR #{number}"),
-            },
+            WaitCond::Approval { id: row.id, what },
             row.expires_at,
             &ctx.actor,
             now,
@@ -1387,18 +1629,7 @@ pub async fn request_merge(
             .unwrap()
             .push(Card::Approval { id: approval });
     }
-    if ctx.scope.task().is_some() {
-        // 和 wait_for 一樣：等核准時這一輪就結束。
-        ctx.finish();
-    }
-    Ok(json!({
-        "approval_id": approval.to_string(),
-        "pr": change,
-        "sha": pr.head_sha,
-        "method": method.as_str(),
-        "note": "已送出核准請求：使用者核准後平台會 merge，任務自動完成；拒絕時你會被叫醒並看到理由。這一輪到此結束。",
-    })
-    .to_string())
+    Ok((approval, attach))
 }
 
 /// `propose_user_md_edit`／`propose_project_note`：對話 agent（與 Planner）提案修改，你核准後才寫入。

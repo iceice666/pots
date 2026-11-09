@@ -353,6 +353,15 @@ async fn setup(c: &mut Client) -> ProjectId {
     .await;
     c.until(|e| matches!(e, ServerEvent::ProjectRepos { .. }))
         .await;
+    c.send(&ClientCommand::SetProjectWorkdir {
+        project,
+        workdir: Some(pots_proto::WorkDir::Github {
+            repo: "me/app".into(),
+        }),
+    })
+    .await;
+    c.until(|e| matches!(e, ServerEvent::ProjectWorkdir { .. }))
+        .await;
     project
 }
 

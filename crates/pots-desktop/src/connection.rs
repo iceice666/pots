@@ -350,6 +350,7 @@ mod tests {
                     goals: vec![],
                     artifacts: vec![],
                     repos: vec![],
+                    workdir: None,
                     merge_method: Default::default(),
                 }],
                 model_auth: ModelAuthView::SignedOut,

@@ -226,6 +226,7 @@ impl Hub {
                 goals,
                 artifacts,
                 repos,
+                workdir: p.workdir.clone(),
                 merge_method,
             });
         }

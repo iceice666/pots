@@ -599,8 +599,9 @@ impl Tool for PlatformTool {
                 "request_approval",
                 match self.ctx.scope {
                     Scope::Task { .. } => {
-                        "CI 通過後申請 merge 你的任務的 PR：使用者在核准卡片決定，核准後由平台 merge（只 merge \
+                        "申請 merge 你的任務的 PR（CI 通過後）：使用者在核准卡片決定，核准後由平台 merge（只 merge \
                         現在的 head；之後再 push 就要重新申請），任務自動完成；拒絕時你會被叫醒並看到理由。\
+                        工作資料夾是本機資料夾時沒有 PR 與 CI：open_pr 之後直接申請，核准後平台把分支套用進資料夾。\
                         呼叫成功後這一輪就結束。"
                     }
                     _ => {
@@ -639,6 +640,20 @@ impl Tool for PlatformTool {
                     &["edits", "reason"],
                 ),
             ),
+            Kind::Granted(ToolName::SetWorkdir) => (
+                "set_workdir",
+                "設定這個 project 的工作資料夾（程式碼在哪、worker 在哪裡改）。使用者說「我們用這個 repo」\
+                 或「在這個資料夾工作」時用，不要自己猜路徑。GitHub repo 要 owner/repo，本機要是 git repo \
+                 的絕對路徑。回傳設定後的說明與限制。",
+                object(
+                    json!({
+                        "kind": {"type": "string", "enum": ["github", "local"]},
+                        "repo": {"type": "string", "description": "kind=github：owner/repo 或 github.com/owner/repo"},
+                        "path": {"type": "string", "description": "kind=local：本機 git repo 的絕對路徑，例如 /Users/me/code/app"},
+                    }),
+                    &["kind"],
+                ),
+            ),
             Kind::Granted(t) => unreachable!("{} 由 worker::tools 提供", t.as_str()),
         };
         ToolSpec {
@@ -666,6 +681,58 @@ impl Tool for PlatformTool {
 }
 
 impl PlatformTool {
+    /// 設定 project 的工作資料夾（對話 agent 的 `set_workdir`）。和人類的 `SetProjectWorkdir`
+    /// 走同一份驗證；本機資料夾另外確認現在不在 detached HEAD。
+    async fn set_workdir(&self, args: SetWorkdirArgs) -> Result<String, ToolError> {
+        let ctx = &self.ctx;
+        if ctx.scope != Scope::Project {
+            return Err(bad("只有 project 的對話 agent 能設定工作資料夾"));
+        }
+        let dir = match args.kind.as_str() {
+            "github" => pots_proto::WorkDir::Github {
+                repo: args.repo.unwrap_or_default(),
+            },
+            "local" => pots_proto::WorkDir::Local {
+                path: args.path.unwrap_or_default(),
+            },
+            _ => return Err(bad("kind 要是 github 或 local")),
+        };
+        let dir = crate::workdir::normalize(dir, ctx.worker.data_dir()).map_err(bad)?;
+        let mut warning = None;
+        if let pots_proto::WorkDir::Local { path } = &dir {
+            let status = crate::workdir::status(std::path::Path::new(path))
+                .await
+                .map_err(bad)?;
+            if status.dirty {
+                warning =
+                    Some("這個資料夾現在有未 commit 的修改：核准套用前要先 commit 或 stash。");
+            }
+        }
+        let mut txn = ctx.hub.begin().await.map_err(internal)?;
+        Store::set_workdir(txn.conn(), ctx.project, Some(&dir))
+            .await
+            .map_err(internal)?;
+        let event = dir.clone();
+        txn.push(|seq| ServerEvent::ProjectWorkdir {
+            seq,
+            project: ctx.project,
+            workdir: Some(event),
+        })
+        .await
+        .map_err(internal)?;
+        txn.commit().await.map_err(internal)?;
+        let mut out = format!(
+            "工作資料夾已設成 {}。{}",
+            dir.label(),
+            crate::workdir::describe(Some(&dir))
+        );
+        if let Some(warning) = warning {
+            out.push(' ');
+            out.push_str(warning);
+        }
+        Ok(out)
+    }
+
     async fn dispatch(&self, arguments: &str) -> Result<String, ToolError> {
         match self.kind {
             Kind::GetStatus => self.get_status().await,
@@ -701,6 +768,7 @@ impl PlatformTool {
                 )
                 .await
             }
+            Kind::Granted(ToolName::SetWorkdir) => self.set_workdir(parse(arguments)?).await,
             Kind::Granted(t @ (ToolName::ProposeUserMdEdit | ToolName::ProposeProjectNote)) => {
                 let args: ProposeArgs = parse(arguments)?;
                 crate::approvals::propose_edit(
@@ -725,6 +793,16 @@ struct RequestApprovalArgs {
     #[serde(default)]
     method: Option<String>,
     reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetWorkdirArgs {
+    kind: String,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1488,21 +1566,18 @@ impl PlatformTool {
             }
             None => None,
         };
-        // project 還沒有設定 repo：任務只記在任務樹上，不派給 worker。
-        let none = crate::automation::project_repos(txn.conn(), ctx.project)
+        // project 還沒有工作資料夾：任務只記在任務樹上，不派給 worker（沒有指定 repo 時不算錯）。
+        let picked = worker::pick_workdir(txn.conn(), ctx.project, args.repo.as_deref())
             .await
-            .map_err(internal)?
-            .is_empty()
-            && args.repo.as_deref().is_none_or(|r| r.trim().is_empty());
-        let repo = if none {
-            None
-        } else {
-            Some(
-                worker::pick_repo(txn.conn(), ctx.project, args.repo.as_deref())
-                    .await
-                    .map_err(internal)?
-                    .map_err(bad)?,
-            )
+            .map_err(internal)?;
+        let mut no_workdir = None;
+        let repo = match picked {
+            Ok(key) => Some(key),
+            Err(e) if args.repo.as_deref().is_none_or(|r| r.trim().is_empty()) => {
+                no_workdir = Some(e);
+                None
+            }
+            Err(e) => return Err(bad(e)),
         };
         let mut task = TaskRow::new(g.id, title, summary);
         task.parent = parent;
@@ -1534,7 +1609,9 @@ impl PlatformTool {
         let note = if repo.is_some() {
             "已派給 worker"
         } else {
-            "這個 project 還沒有設定 repo，任務只記在任務樹上、不會派給 worker（請使用者在頻道的「自動化」分頁加上 repo）"
+            no_workdir
+                .as_deref()
+                .unwrap_or("這個 project 還沒有工作資料夾")
         };
         Ok(json!({"task_id": task.id.to_string(), "repo": repo, "note": note}).to_string())
     }

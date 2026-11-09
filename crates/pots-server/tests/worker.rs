@@ -383,6 +383,15 @@ async fn setup(c: &mut Client) -> ProjectId {
     .await;
     c.until(|e| matches!(e, ServerEvent::ProjectRepos { .. }))
         .await;
+    c.send(&ClientCommand::SetProjectWorkdir {
+        project,
+        workdir: Some(pots_proto::WorkDir::Github {
+            repo: "me/app".into(),
+        }),
+    })
+    .await;
+    c.until(|e| matches!(e, ServerEvent::ProjectWorkdir { .. }))
+        .await;
     project
 }
 
@@ -1127,5 +1136,178 @@ async fn chat_runs_explorer_subagent_on_mirror() {
     assert!(out.contains("## subagent 1"), "{out}");
     assert!(out.contains("README 寫著：hello pots"), "{out}");
     assert!(out.contains("README.md:1:hello pots"), "{out}");
+    srv.stop().await;
+}
+
+/// 本機工作資料夾：worker 在平台鏡像的任務分支上改（不是你資料夾裡的即時檔案），open_pr 只記下
+/// 變更；核准後平台把分支 fast-forward 套用進你的資料夾，任務完成。
+#[tokio::test]
+async fn local_workdir_applies_the_branch_on_approval() {
+    let env = env().await;
+    let local = env.dir.join("local-app");
+    std::fs::create_dir_all(&local).unwrap();
+    git(&local, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(local.join("README.md"), "base\n").unwrap();
+    git(&local, &["add", "."]);
+    git(
+        &local,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+    );
+    let path = local.canonicalize().unwrap().display().to_string();
+
+    let model = FnProvider::new("m", |req| {
+        let instr = instructions(req);
+        let trigger = first_user(req);
+        let outputs = tool_outputs(req);
+        if instr.starts_with(PLANNER) {
+            if trigger.contains("剛建立這個 Goal") {
+                return match outputs.len() {
+                    0 => ScriptedTurn::new().tool_call(
+                        "p0",
+                        "create_task",
+                        json!({"title": "Add hello", "summary": "加上 hello.txt"}).to_string(),
+                    ),
+                    _ => ScriptedTurn::reply("派好了"),
+                };
+            }
+            if trigger.contains("完成：") {
+                return match outputs.len() {
+                    0 => ScriptedTurn::new().tool_call(
+                        "p2",
+                        "complete_goal",
+                        json!({"summary": "hello.txt 加好了"}).to_string(),
+                    ),
+                    _ => ScriptedTurn::reply("結束"),
+                };
+            }
+            return ScriptedTurn::reply("看過了");
+        }
+        if instr.starts_with(WORKER) {
+            return match outputs.len() {
+                0 => ScriptedTurn::new().tool_call(
+                    "w0",
+                    "edit_file",
+                    json!({"path": "hello.txt", "new_text": "hi\n"}).to_string(),
+                ),
+                1 => ScriptedTurn::new().tool_call(
+                    "w1",
+                    "run",
+                    json!({"command": "git add -A && git commit -qm 'Add hello'"}).to_string(),
+                ),
+                2 => ScriptedTurn::new().tool_call(
+                    "w2",
+                    "open_pr",
+                    json!({"title": "Add hello", "body": "加上 hello.txt"}).to_string(),
+                ),
+                3 => ScriptedTurn::new().tool_call(
+                    "w3",
+                    "request_approval",
+                    json!({"action": "merge_pr", "reason": "加上 hello.txt"}).to_string(),
+                ),
+                _ => ScriptedTurn::reply("等核准"),
+            };
+        }
+        chat_turn(req)
+    });
+    let srv = launch(
+        config(&env, WorkerBackendKind::Builtin, None),
+        model.clone(),
+    )
+    .await;
+    let mut c = srv.client().await;
+    c.snapshot().await;
+    c.send(&ClientCommand::CreateProject {
+        name: "app".into(),
+        workdir: Some(pots_proto::WorkDir::Local { path: path.clone() }),
+    })
+    .await;
+    let evs = c
+        .until(|e| matches!(e, ServerEvent::ProjectAdded { .. }))
+        .await;
+    let project = match evs.last() {
+        Some(ServerEvent::ProjectAdded { project, .. }) => {
+            assert_eq!(
+                project.workdir,
+                Some(pots_proto::WorkDir::Local { path: path.clone() })
+            );
+            project.id
+        }
+        _ => unreachable!(),
+    };
+    c.until(|e| {
+        matches!(e, ServerEvent::ArtifactChanged { project: p, artifact, .. }
+            if *p == project && artifact.kind == pots_proto::ArtifactKind::ProjectNotes)
+    })
+    .await;
+
+    let text = call(
+        "create_goal",
+        json!({"title": "加 hello", "brief_md": "## 目標\n\n加一個 hello.txt"}),
+    );
+    c.say(project, &text, SendMode::Queue).await;
+
+    // 等候核准，順便確認任務的「PR」是本機資料夾的 key、沒有 PR 網址。
+    let evs = c
+        .until(
+            |e| matches!(e, ServerEvent::ApprovalChanged { approval, .. } if approval.is_pending()),
+        )
+        .await;
+    let approval = match evs.last() {
+        Some(ServerEvent::ApprovalChanged { approval, .. }) => approval.clone(),
+        _ => unreachable!(),
+    };
+    match &approval.action {
+        pots_proto::ApprovalActionView::ApplyChanges { base, branch, .. } => {
+            assert_eq!(base, "main");
+            assert!(branch.starts_with("pots/add-hello-"), "{branch}");
+        }
+        other => panic!("預期 ApplyChanges，收到 {other:?}"),
+    }
+    assert!(approval.title.contains("套用變更到"), "{}", approval.title);
+    assert!(approval.task.is_some());
+
+    c.send(&ClientCommand::Decide {
+        approval: approval.id,
+        approve: true,
+        note: None,
+    })
+    .await;
+    let g = until_goal(&mut c, |g| g.state != GoalState::Active).await;
+    assert_eq!(
+        g.state,
+        GoalState::Done {
+            summary: "hello.txt 加好了".into()
+        }
+    );
+    let t = &g.tasks[0];
+    let TaskStateView::Done { outcome } = &t.state else {
+        panic!("任務沒有完成：{:?}", t.state);
+    };
+    assert!(outcome.starts_with("你核准後平台把 pots/"), "{outcome}");
+    assert!(t.pr.as_deref().is_some_and(|p| p.starts_with("local:")));
+    assert_eq!(t.pr_url, None);
+
+    // 你的資料夾收到 fast-forward 的 commit，工作區是乾淨的。
+    assert_eq!(git(&local, &["show", "HEAD:hello.txt"]), "hi\n");
+    assert_eq!(
+        git(&local, &["log", "--format=%s", "-1"]).trim(),
+        "Add hello"
+    );
+    assert_eq!(git(&local, &["status", "--porcelain"]).trim(), "");
+    // 任務分支只在平台的鏡像裡，沒有推到你的 repo。
+    assert!(
+        git(&local, &["branch", "--list", "pots/*"])
+            .trim()
+            .is_empty()
+    );
     srv.stop().await;
 }

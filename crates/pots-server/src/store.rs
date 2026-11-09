@@ -10,7 +10,7 @@ use std::time::Duration;
 use pots_llm::Item;
 use pots_proto::{
     Author, InstanceId, ItemId, ObservationId, Priority, ProjectId, ProviderHeader, ProviderId,
-    ProviderKind, ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp,
+    ProviderKind, ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp, WorkDir,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -47,6 +47,8 @@ pub struct ProjectRow {
     pub name: String,
     pub instructions: String,
     pub agent_name: String,
+    /// 工作資料夾；`None` 表示 onboarding 還沒設定。
+    pub workdir: Option<WorkDir>,
     pub created_at: Timestamp,
 }
 
@@ -315,8 +317,8 @@ impl Store {
 
     pub async fn list_projects(&self) -> Result<Vec<ProjectRow>, Error> {
         let rows = sqlx::query(
-            "SELECT id, name, instructions, agent_name, created_at FROM projects \
-             WHERE user_id = ? AND residency = 'active' AND kind = 'project' \
+            "SELECT id, name, instructions, agent_name, workdir_kind, workdir, created_at \
+             FROM projects WHERE user_id = ? AND residency = 'active' AND kind = 'project' \
              ORDER BY created_at, id",
         )
         .bind(LOCAL_USER_ID.to_string())
@@ -327,8 +329,8 @@ impl Store {
 
     pub async fn project(&self, id: ProjectId) -> Result<Option<ProjectRow>, Error> {
         let row = sqlx::query(
-            "SELECT id, name, instructions, agent_name, created_at FROM projects \
-             WHERE id = ? AND user_id = ?",
+            "SELECT id, name, instructions, agent_name, workdir_kind, workdir, created_at \
+             FROM projects WHERE id = ? AND user_id = ?",
         )
         .bind(id.to_string())
         .bind(LOCAL_USER_ID.to_string())
@@ -368,18 +370,53 @@ impl Store {
     }
 
     pub async fn insert_project(conn: &mut SqliteConnection, p: &ProjectRow) -> Result<(), Error> {
+        let (kind, value) = workdir_columns(p.workdir.as_ref());
         sqlx::query(
-            "INSERT INTO projects (id, user_id, name, instructions, agent_name, residency, created_at) \
-             VALUES (?, ?, ?, ?, ?, 'active', ?)",
+            "INSERT INTO projects (id, user_id, name, instructions, agent_name, residency, \
+             workdir_kind, workdir, created_at) \
+             VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)",
         )
         .bind(p.id.to_string())
         .bind(LOCAL_USER_ID.to_string())
         .bind(&p.name)
         .bind(&p.instructions)
         .bind(&p.agent_name)
+        .bind(kind)
+        .bind(value)
         .bind(p.created_at.0)
         .execute(conn)
         .await?;
+        Ok(())
+    }
+
+    /// 一個 project 的工作資料夾（不含總管的內部 project）。
+    pub async fn workdir(
+        conn: &mut SqliteConnection,
+        id: ProjectId,
+    ) -> Result<Option<WorkDir>, Error> {
+        let row = sqlx::query("SELECT workdir_kind, workdir FROM projects WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(conn)
+            .await?;
+        row.as_ref()
+            .map(workdir_from_row)
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    /// 設定或清除 project 的工作資料夾。
+    pub async fn set_workdir(
+        conn: &mut SqliteConnection,
+        id: ProjectId,
+        workdir: Option<&WorkDir>,
+    ) -> Result<(), Error> {
+        let (kind, value) = workdir_columns(workdir);
+        sqlx::query("UPDATE projects SET workdir_kind = ?, workdir = ? WHERE id = ?")
+            .bind(kind)
+            .bind(value)
+            .bind(id.to_string())
+            .execute(conn)
+            .await?;
         Ok(())
     }
 
@@ -1393,7 +1430,27 @@ fn project_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ProjectRow, Error> 
         name: row.try_get("name")?,
         instructions: row.try_get("instructions")?,
         agent_name: row.try_get("agent_name")?,
+        workdir: workdir_from_row(row)?,
         created_at: Timestamp(row.try_get("created_at")?),
+    })
+}
+
+/// 工作資料夾的兩個欄位（`workdir_kind`、`workdir`）；`None` 時兩欄都是 NULL。
+fn workdir_columns(workdir: Option<&WorkDir>) -> (Option<&'static str>, Option<&str>) {
+    match workdir {
+        Some(WorkDir::Github { repo }) => (Some("github"), Some(repo)),
+        Some(WorkDir::Local { path }) => (Some("local"), Some(path)),
+        None => (None, None),
+    }
+}
+
+fn workdir_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Option<WorkDir>, Error> {
+    let kind: Option<String> = row.try_get("workdir_kind")?;
+    let value: Option<String> = row.try_get("workdir")?;
+    Ok(match (kind.as_deref(), value) {
+        (Some("github"), Some(repo)) => Some(WorkDir::Github { repo }),
+        (Some("local"), Some(path)) => Some(WorkDir::Local { path }),
+        _ => None,
     })
 }
 

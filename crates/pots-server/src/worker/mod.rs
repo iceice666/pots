@@ -275,35 +275,50 @@ pub async fn note_gave_up(txn: &mut LogTxn<'_>, tasks_: &[TaskId]) -> Result<(),
     Ok(())
 }
 
-/// 任務在哪個 repo 做：指定的（必須是 project 監看的）或 project 唯一的那個。
-pub async fn pick_repo(
+/// 任務在哪个工作資料夾做（`WorkDir::key()`）：project 的工作資料夾；沒有設定時退回「唯一監看
+/// 的 repo」（onboarding 之前的 project）。`arg` 只能是同一個資料夾（Planner 的舊參數）。
+pub async fn pick_workdir(
     conn: &mut SqliteConnection,
     project: ProjectId,
     arg: Option<&str>,
 ) -> Result<Result<String, String>, Error> {
-    let repos = crate::automation::project_repos(conn, project).await?;
-    match arg.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(raw) => {
-            let repo = match crate::watcher::event::normalize_repo(raw) {
-                Ok(r) => r,
-                Err(e) => return Ok(Err(e)),
-            };
-            if repos.contains(&repo) {
-                Ok(Ok(repo))
-            } else {
-                Ok(Err(format!(
-                    "這個 project 沒有監看 {repo}；可用的有：{}",
-                    if repos.is_empty() { "（沒有）".into() } else { repos.join("、") }
-                )))
-            }
-        }
-        None => match repos.as_slice() {
-            [one] => Ok(Ok(one.clone())),
-            [] => Ok(Err(
-                "這個 project 還沒有設定 repo：請使用者在頻道的「自動化」分頁加上監看的 GitHub repo".into(),
-            )),
-            many => Ok(Err(format!("這個 project 有好幾個 repo，請用 repo 指定：{}", many.join("、")))),
+    let workdir = match crate::store::Store::workdir(conn, project).await? {
+        Some(dir) => Some(dir),
+        // onboarding 之前的 project 只有自動化分頁的「監看的 repo」：一個 repo 就照舊派工。
+        None => match crate::automation::project_repos(conn, project)
+            .await?
+            .as_slice()
+        {
+            [one] => Some(pots_proto::WorkDir::Github { repo: one.clone() }),
+            _ => None,
         },
+    };
+    let Some(workdir) = workdir else {
+        return Ok(Err(
+            "這個 project 還沒有工作資料夾：請使用者在新增專案的精靈或「設定工作資料夾」裡指定 GitHub repo 或本機資料夾".into(),
+        ));
+    };
+    let key = workdir.key();
+    let Some(raw) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(Ok(key));
+    };
+    let wanted = if raw.starts_with("local:") {
+        raw.to_string()
+    } else if std::path::Path::new(raw).is_absolute() {
+        format!("local:{raw}")
+    } else {
+        match crate::watcher::event::normalize_repo(raw) {
+            Ok(repo) => repo,
+            Err(e) => return Ok(Err(e)),
+        }
+    };
+    if wanted == key {
+        Ok(Ok(key))
+    } else {
+        Ok(Err(format!(
+            "這個 project 的工作資料夾是 {}，不是 {wanted}",
+            workdir.label()
+        )))
     }
 }
 
@@ -1214,7 +1229,12 @@ impl Worker {
             let mut conn = inner.store.acquire().await?;
             crate::watcher::github_config(&mut conn).await?
         };
-        let token = gh.token();
+        // 本機資料夾沒有 remote：不帶 GitHub token。
+        let token = if source.local_path().is_some() {
+            None
+        } else {
+            gh.token()
+        };
         let url = inner.repos.remote_url(&source, &gh.api(&gh_config));
         // 不和取消賽跑：中途被殺掉的 git 會留下 lock 檔（工作目錄本身是做好才改名的）。
         let prepared = async {
@@ -1239,6 +1259,7 @@ impl Worker {
         }
         {
             let mut txn = inner.hub.begin().await?;
+            tasks::set_task_base(txn.conn(), task.id, &checkout.base).await?;
             tasks::set_task_work(
                 txn.conn(),
                 task.id,
@@ -2008,15 +2029,38 @@ async fn render_prompt(
             "- 這是快速修改：最多改 {QUICK_MAX_FILES} 個檔案、{QUICK_MAX_LINES} 行，而且不需要設計決定；超過時用 escalate。\n"
         ));
     }
+    let local = task
+        .repo
+        .as_deref()
+        .and_then(|r| r.strip_prefix("local:"))
+        .map(str::to_string);
     out.push_str(&format!(
-        "\n# 工作位置\n\n- repo：{}\n- 分支：{}（從 {} 開出來的，已經切好）\n",
-        task.repo.as_deref().unwrap_or(""),
+        "\n# 工作位置\n\n- {}：{}\n- 分支：{}（從 {} 開出來的，已經切好）\n",
+        if local.is_some() {
+            "本機資料夾（沒有 remote、PR 與 CI）"
+        } else {
+            "repo"
+        },
+        local
+            .as_deref()
+            .unwrap_or(task.repo.as_deref().unwrap_or("")),
         checkout.branch,
         checkout.base
     ));
+    if local.is_some() {
+        out.push_str(
+            "- 工作目錄是平台自己的副本，不是你資料夾裡的即時檔案。commit 之後用 open_pr 記下變更，\
+             再直接 request_approval：核准後平台把分支套用進你的資料夾。\n",
+        );
+    }
     if let Some(pr) = &task.pr {
+        let what = if pr.starts_with("local:") {
+            "已經記下變更（等核准）"
+        } else {
+            "已經開了 PR"
+        };
         out.push_str(&format!(
-            "- 已經開了 PR：{pr}{}\n",
+            "- {what}：{pr}{}\n",
             task.pr_url
                 .as_deref()
                 .map(|u| format!("（{u}）"))

@@ -42,12 +42,16 @@ pub struct Applied {
     pub why: Option<WhyView>,
     /// 這個 project 監看的 repo 換了（`ProjectRepos`）。
     pub repos_changed: Option<ProjectId>,
+    /// 這個 project 的工作資料夾換了（`ProjectWorkdir`）。
+    pub workdir_changed: Option<ProjectId>,
     /// 要不要彈桌面通知的事（新的核准、需要你處理的任務、Goal 完成）。快照不產生通知。
     pub notices: Vec<Notice>,
     /// 通知設定有變（`Notifications` 事件或快照）。
     pub notifications_changed: bool,
     /// USER.md 有變（`UserMd` 事件或快照）。
     pub user_md_changed: bool,
+    /// `Error`：服務拒絕了指令；app 用它把錯誤顯示在對應的對話框。
+    pub error: Option<String>,
 }
 
 /// 一則可能要推播的事。點通知（或之後回到視窗）時開 `item`，沒有就開 project。
@@ -114,6 +118,16 @@ fn approval_facts(a: &ApprovalView) -> Vec<String> {
         ApprovalActionView::DeleteBranch { repo, branch } => {
             vec![repo.clone(), format!("刪除分支 {branch}")]
         }
+        ApprovalActionView::ApplyChanges {
+            path,
+            branch,
+            base,
+            sha,
+        } => vec![
+            format!("本機資料夾 {path}"),
+            format!("{branch} → {base}"),
+            format!("套用 {}（fast-forward）", &sha[..sha.len().min(7)]),
+        ],
         ApprovalActionView::CreateListener { summary, .. } => vec![summary.clone()],
         ApprovalActionView::EditUserMd { base_rev, .. } => {
             vec![format!("修改 USER.md（目前 v{base_rev}）")]
@@ -246,6 +260,7 @@ impl Sync {
                 .collect(),
             memory: p.memory,
             repos: p.repos,
+            workdir: p.workdir,
             merge_method: p.merge_method,
         }
     }
@@ -714,13 +729,24 @@ impl Sync {
                 }
                 out.repos_changed = Some(project);
             }
+            ServerEvent::ProjectWorkdir {
+                project, workdir, ..
+            } => {
+                if let Some(p) = store.project_mut(instance, project) {
+                    p.workdir = workdir;
+                }
+                out.workdir_changed = Some(project);
+            }
             ServerEvent::GithubTest { request, result } => {
                 out.github_test = Some((request, result));
             }
             ServerEvent::Why { why } => out.why = why,
             // 成本報表與單價表是設定視窗的面板，桌面版下一輪才顯示；先不影響連線狀態。
             ServerEvent::CostReport { .. } | ServerEvent::Pricing { .. } => {}
-            ServerEvent::Error { message } => out.toast = Some(message),
+            ServerEvent::Error { message } => {
+                out.toast = Some(message.clone());
+                out.error = Some(message);
+            }
             // 任務的變化隨 `GoalChanged` 整個 Goal 送來。
             ServerEvent::TaskChanged { .. } => {}
         }
@@ -910,6 +936,7 @@ mod tests {
                     goals: vec![],
                     artifacts: vec![],
                     repos: vec![],
+                    workdir: None,
                     merge_method: Default::default(),
                 }],
                 model_auth: auth,

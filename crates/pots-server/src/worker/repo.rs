@@ -42,19 +42,40 @@ pub const COMMIT_EMAIL: &str = "pots-worker@users.noreply.github.com";
 pub enum RepoSource {
     /// `github.com/owner/repo`。
     Github { repo: String },
+    /// 本機的 git repo（絕對路徑）；沒有 remote、沒有 PR 與 CI，核准後由平台套用到資料夾。
+    Local { path: String },
 }
 
 impl RepoSource {
-    /// 依 project 設定的 repo 字串（`github.com/owner/repo`）判斷來源；之後的 GitLab 與本機
-    /// repo 在這裡分流。
+    /// 依 project 設定的工作資料夾（`github.com/owner/repo` 或 `local:/abs/path`）判斷來源；
+    /// 之後的 GitLab 在這裡分流。
     pub fn parse(repo: &str) -> Result<Self, String> {
+        if let Some(path) = repo.trim().strip_prefix("local:") {
+            let path = path.trim();
+            if !std::path::Path::new(path).is_absolute() {
+                return Err(format!("本機工作資料夾要是絕對路徑：{path}"));
+            }
+            return Ok(Self::Local {
+                path: path.to_string(),
+            });
+        }
         let repo = crate::watcher::event::normalize_repo(repo)?;
         Ok(Self::Github { repo })
     }
 
-    pub fn key(&self) -> &str {
+    /// 任務與事件記的 key：`github.com/owner/repo` 或 `local:/abs/path`。
+    pub fn key(&self) -> String {
         match self {
-            Self::Github { repo } => repo,
+            Self::Github { repo } => repo.clone(),
+            Self::Local { path } => format!("local:{path}"),
+        }
+    }
+
+    /// 本機資料夾：沒有 remote，不能 push、沒有 PR 與 CI。
+    pub fn local_path(&self) -> Option<&str> {
+        match self {
+            Self::Local { path } => Some(path),
+            Self::Github { .. } => None,
         }
     }
 }
@@ -192,6 +213,12 @@ impl Repos {
     fn mirror_dir(&self, source: &RepoSource) -> PathBuf {
         match source {
             RepoSource::Github { repo } => self.data_dir.join("repos").join(format!("{repo}.git")),
+            // 本機路徑不能直接當目錄名（有 `/` 與長度限制）：用在資料目錄裡的穩定雜湊。
+            RepoSource::Local { path } => self
+                .data_dir
+                .join("repos")
+                .join("local")
+                .join(format!("{}.git", path_key(path))),
         }
     }
 
@@ -199,10 +226,12 @@ impl Repos {
         self.data_dir.join("worktrees").join(task.to_string())
     }
 
-    /// git 的 remote URL。`api` 是 GitHub API base：`https://api.github.com` → `https://github.com`，
-    /// GitHub Enterprise 的 `https://host/api/v3` → `https://host`。
+    /// git 的 remote。GitHub 是 URL（`api` 是 GitHub API base：`https://api.github.com` →
+    /// `https://github.com`，GitHub Enterprise 的 `https://host/api/v3` → `https://host`）；
+    /// 本機資料夾就是那個絕對路徑（git 的 local transport）。
     pub fn remote_url(&self, source: &RepoSource, api: &str) -> String {
         match source {
+            RepoSource::Local { path } => path.clone(),
             RepoSource::Github { repo } => {
                 let path = repo_path(repo);
                 let base = match &self.git_base {
@@ -235,7 +264,7 @@ impl Repos {
         url: &str,
         token: Option<&str>,
     ) -> Result<(PathBuf, String), RepoError> {
-        let lock = self.lock(source.key());
+        let lock = self.lock(&source.key());
         let _guard = lock.lock().await;
         let mirror = self.mirror_dir(source);
         let auth = token.map(Self::auth_header);
@@ -272,13 +301,48 @@ impl Repos {
         run(c).await?;
         let mut c = git(Some(&mirror), auth.as_deref());
         c.args(["ls-remote", "--symref", "origin", "HEAD"]);
-        let out = run(c).await?;
-        let base = out
-            .lines()
-            .find_map(|l| l.strip_prefix("ref: refs/heads/"))
-            .and_then(|l| l.split_whitespace().next())
-            .map(str::to_string)
-            .ok_or_else(|| RepoError::Git("找不到 repo 的預設分支（是空的 repo 嗎？）".into()))?;
+        let base = match run(c).await {
+            Ok(out) => out
+                .lines()
+                .find_map(|l| l.strip_prefix("ref: refs/heads/"))
+                .and_then(|l| l.split_whitespace().next().map(str::to_string)),
+            // 本機資料夾的 HEAD 可能是還沒有 commit 的分支：`ls-remote` 不會回它。
+            Err(_) if source.local_path().is_some() => None,
+            Err(e) => return Err(e),
+        };
+        let base = match base {
+            Some(b) => b,
+            None => {
+                let path = source.local_path().ok_or_else(|| {
+                    RepoError::Git("找不到 repo 的預設分支（是空的 repo 嗎？）".into())
+                })?;
+                let branch = crate::workdir::git(
+                    Path::new(path),
+                    &["symbolic-ref", "--short", "-q", "HEAD"],
+                )
+                .await
+                .map_err(RepoError::Git)?;
+                let branch = branch.trim().to_string();
+                if branch.is_empty() {
+                    return Err(RepoError::Git(format!(
+                        "{path} 不在任何分支上（detached HEAD）：請先切到一個分支"
+                    )));
+                }
+                branch
+            }
+        };
+        let mut c = git(Some(&mirror), None);
+        c.args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/origin/{base}"),
+        ]);
+        if run(c).await.is_err() {
+            return Err(RepoError::Git(format!(
+                "找不到分支 {base} 的 commit（是空的 repo 嗎？先 commit 一次再試）"
+            )));
+        }
         Ok((mirror, base))
     }
 
@@ -300,7 +364,7 @@ impl Repos {
                 base: base.to_string(),
             });
         }
-        let lock = self.lock(source.key());
+        let lock = self.lock(&source.key());
         let _guard = lock.lock().await;
         // 在暫存目錄做好再改名：中斷（取消、關閉）時不會留下做到一半、之後又被沿用的目錄。
         let tmp = dir.with_extension("partial");
@@ -380,7 +444,7 @@ impl Repos {
                 .await
                 .map_err(|e| RepoError::Git(format!("複製 bundle 失敗：{e}")))??;
         }
-        let lock = self.lock(source.key());
+        let lock = self.lock(&source.key());
         let _guard = lock.lock().await;
         let reference = task_ref(task);
         let mut c = git(Some(mirror), None);
@@ -428,6 +492,18 @@ impl Repos {
         })
     }
 
+    /// 鏡像的位置（核准後把本機資料夾的分支套用過來時用）。
+    pub fn mirror(&self, source: &RepoSource) -> PathBuf {
+        self.mirror_dir(source)
+    }
+
+    /// 任務分支在鏡像裡的 commit；還沒有任務分支時是錯誤。
+    pub async fn task_sha(&self, mirror: &Path, task: TaskId) -> Result<String, RepoError> {
+        let mut c = git(Some(mirror), None);
+        c.args(["rev-parse", "--verify", "--quiet", &task_ref(task)]);
+        Ok(run(c).await?.trim().to_string())
+    }
+
     /// 基準分支之後有沒有 commit。
     pub async fn ahead(
         &self,
@@ -444,7 +520,8 @@ impl Repos {
         Ok(run(c).await?.trim().parse().unwrap_or(0))
     }
 
-    /// 把任務分支推到 remote（強制更新：只會是平台開的 `pots/` 分支）。
+    /// 把任務分支推到 remote（強制更新：只會是平台開的 `pots/` 分支）。本機資料夾沒有 remote：
+    /// 分支留在鏡像裡，核准後由平台套用（[`crate::approvals`]）。
     pub async fn push(
         &self,
         source: &RepoSource,
@@ -454,7 +531,10 @@ impl Repos {
         checkout: &Checkout,
         task: TaskId,
     ) -> Result<(), RepoError> {
-        let lock = self.lock(source.key());
+        if source.local_path().is_some() {
+            return Err(RepoError::Git("本機資料夾沒有 remote，不用 push".into()));
+        }
+        let lock = self.lock(&source.key());
         let _guard = lock.lock().await;
         let auth = token.map(Self::auth_header);
         let mut c = git(Some(mirror), auth.as_deref());
@@ -465,6 +545,14 @@ impl Repos {
         ));
         run(c).await.map(|_| ())
     }
+}
+
+/// 本機資料夾在資料目錄裡的穩定名字（同一個路徑永遠是同一個鏡像）。
+fn path_key(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(path.as_bytes());
+    hex::encode(&h.finalize()[..16])
 }
 
 /// bundle 最大多大。

@@ -644,6 +644,10 @@ async fn drive_loop(
         instructions.push_str("\n\n# Project 指示\n\n");
         instructions.push_str(project.instructions.trim());
     }
+    instructions.push_str(&format!(
+        "\n\n# 工作資料夾\n\n{}",
+        crate::workdir::describe(project.workdir.as_ref())
+    ));
     instructions.push_str(&tail);
     let overseer = project.id == crate::store::OVERSIGHT_PROJECT_ID;
     if overseer {

@@ -4,7 +4,7 @@
 use pots_proto::{
     AgentState, ArtifactId, ArtifactKind, Author, Card, ClientCommand, ItemId, Msg, MsgStatus,
     ProjectId, ProjectSnapshot, SendMode, ServerEvent, StreamItemKind, StreamItemView, StreamScope,
-    TaskId, Timestamp, TraceStepView, WhyView,
+    TaskId, Timestamp, TraceStepView, WhyView, WorkDir,
 };
 use tokio::sync::mpsc;
 
@@ -111,7 +111,10 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
         | ClientCommand::SetPrice { .. }
         | ClientCommand::DeletePrice { .. }
         | ClientCommand::RefreshPricing => Err("這個指令要直接回覆".into()),
-        ClientCommand::CreateProject { name } => create_project(app, name).await,
+        ClientCommand::CreateProject { name, workdir } => create_project(app, name, workdir).await,
+        ClientCommand::SetProjectWorkdir { project, workdir } => {
+            set_project_workdir(app, project, workdir).await
+        }
         ClientCommand::Send {
             project,
             id,
@@ -498,7 +501,7 @@ fn internal(e: crate::Error) -> String {
     "伺服器內部錯誤".into()
 }
 
-async fn create_project(app: &App, name: String) -> Result<(), String> {
+async fn create_project(app: &App, name: String, workdir: Option<WorkDir>) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("project 名稱不能是空的".into());
@@ -506,11 +509,17 @@ async fn create_project(app: &App, name: String) -> Result<(), String> {
     if name.chars().count() > MAX_PROJECT_NAME {
         return Err(format!("project 名稱最多 {MAX_PROJECT_NAME} 個字"));
     }
+    // 先驗證工作資料夾：設定錯的資料夾比沒有設定更糟，而且失敗時不應該留下一個空 project。
+    let workdir = match workdir {
+        Some(d) => Some(crate::workdir::normalize(d, app.watcher.data_dir())?),
+        None => None,
+    };
     let row = ProjectRow {
         id: ProjectId::new(),
         name,
         instructions: String::new(),
         agent_name: app.agent_name.clone(),
+        workdir,
         created_at: Timestamp::now(),
     };
     let result: Result<(), crate::Error> = async {
@@ -526,11 +535,41 @@ async fn create_project(app: &App, name: String) -> Result<(), String> {
             goals: Vec::new(),
             artifacts: Vec::new(),
             repos: Vec::new(),
+            workdir: row.workdir.clone(),
             merge_method: Default::default(),
         };
         txn.push(|seq| ServerEvent::ProjectAdded { seq, project })
             .await?;
         crate::user_md::ensure_project_notes(&mut txn, row.id).await?;
+        txn.commit().await
+    }
+    .await;
+    result.map_err(internal)
+}
+
+/// 設定或清除工作資料夾。和 `CreateProject` 走同一份驗證；清空之後任務只記在任務樹上、不派工。
+async fn set_project_workdir(
+    app: &App,
+    project: ProjectId,
+    workdir: Option<WorkDir>,
+) -> Result<(), String> {
+    if !owns(app, project).await.map_err(internal)? {
+        return Err("找不到這個 project".into());
+    }
+    let workdir = match workdir {
+        Some(d) => Some(crate::workdir::normalize(d, app.watcher.data_dir())?),
+        None => None,
+    };
+    let result: Result<(), crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        Store::set_workdir(txn.conn(), project, workdir.as_ref()).await?;
+        let event = workdir.clone();
+        txn.push(|seq| ServerEvent::ProjectWorkdir {
+            seq,
+            project,
+            workdir: event,
+        })
+        .await?;
         txn.commit().await
     }
     .await;

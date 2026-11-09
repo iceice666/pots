@@ -161,9 +161,11 @@ pub struct TaskRow {
     pub summary: String,
     pub assignee: String,
     pub state: TaskState,
-    /// `github.com/owner/repo`；建立時決定。
+    /// `github.com/owner/repo` 或 `local:/abs/path`；建立時決定。
     pub repo: Option<String>,
     pub branch: Option<String>,
+    /// 任務分支從哪個分支開出來（`checkout.base`）。
+    pub base: Option<String>,
     /// `github.com/owner/repo#42`。
     pub pr: Option<String>,
     pub pr_url: Option<String>,
@@ -185,6 +187,7 @@ impl TaskRow {
             state: TaskState::Planned,
             repo: None,
             branch: None,
+            base: None,
             pr: None,
             pr_url: None,
             progress: String::new(),
@@ -384,8 +387,8 @@ pub async fn add_task_spent(
 
 macro_rules! task_columns {
     () => {
-        "id, goal_id, parent_id, title, summary, assignee, state, repo, branch, pr, pr_url, \
-         progress, started_at, finished_at"
+        "id, goal_id, parent_id, title, summary, assignee, state, repo, branch, base_branch, \
+         pr, pr_url, progress, started_at, finished_at"
     };
 }
 
@@ -404,6 +407,7 @@ fn task_from_row(row: &SqliteRow) -> Result<TaskRow, Error> {
         state: serde_json::from_str(&state)?,
         repo: row.try_get("repo")?,
         branch: row.try_get("branch")?,
+        base: row.try_get("base_branch")?,
         pr: row.try_get("pr")?,
         pr_url: row.try_get("pr_url")?,
         progress: row.try_get("progress")?,
@@ -626,7 +630,8 @@ pub async fn set_task_work(
     conn: &mut SqliteConnection,
     id: TaskId,
     branch: Option<&str>,
-    pr: Option<(&str, &str)>,
+    // `(change, url)`；本機資料夾沒有 PR 網址。`change` 是 `github.com/o/r#42` 或 `local:/path`。
+    pr: Option<(&str, Option<&str>)>,
     progress: Option<&str>,
 ) -> Result<(), Error> {
     sqlx::query(
@@ -635,12 +640,27 @@ pub async fn set_task_work(
     )
     .bind(branch)
     .bind(pr.map(|p| p.0))
-    .bind(pr.map(|p| p.1))
+    .bind(pr.and_then(|p| p.1))
     .bind(progress)
     .bind(Timestamp::now().0)
     .bind(id.to_string())
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+/// 記下任務分支的基準分支（`checkout.base`）；本機資料夾套用時要確認你的資料夾還在那個分支。
+pub async fn set_task_base(
+    conn: &mut SqliteConnection,
+    id: TaskId,
+    base: &str,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE tasks SET base_branch = ?, updated_at = ? WHERE id = ?")
+        .bind(base)
+        .bind(Timestamp::now().0)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
     Ok(())
 }
 

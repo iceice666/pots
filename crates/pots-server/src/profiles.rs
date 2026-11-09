@@ -51,6 +51,8 @@ pub enum ToolName {
     ReadTeam,
     /// 申請 merge 任務的 PR（worker、Planner；你核准後由平台 merge）。
     RequestApproval,
+    /// 設定 project 的工作資料夾（對話 agent；使用者說「我們在哪個資料夾工作」時）。
+    SetWorkdir,
     /// 提案修改 USER.md（對話 agent；你核准後寫入）。
     ProposeUserMdEdit,
     /// 提案修改 Project Notes（對話 agent、Planner；你核准後寫入）。
@@ -87,6 +89,7 @@ impl ToolName {
             Self::PostToTeam => "post_to_team",
             Self::ReadTeam => "read_team",
             Self::RequestApproval => "request_approval",
+            Self::SetWorkdir => "set_workdir",
             Self::ProposeUserMdEdit => "propose_user_md_edit",
             Self::ProposeProjectNote => "propose_project_note",
             Self::EditFile => "edit_file",
@@ -168,6 +171,8 @@ const CHAT_RULES: Rules = Rules {
         ToolName::RunSubagent,
         ToolName::ProposeUserMdEdit,
         ToolName::ProposeProjectNote,
+        // 使用者說「我們在哪個資料夾工作」時由對話 agent 設定。
+        ToolName::SetWorkdir,
     ],
     kinds: &[ArtifactKind::Spec, ArtifactKind::Report],
 };

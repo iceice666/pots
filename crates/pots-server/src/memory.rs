@@ -1198,6 +1198,7 @@ mod db_tests {
                 name: "記憶".into(),
                 instructions: String::new(),
                 agent_name: "Pots".into(),
+                workdir: None,
                 created_at: Timestamp::now(),
             },
         )

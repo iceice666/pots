@@ -64,6 +64,7 @@ fn main() {
                 i += 1;
                 conn.send(ClientCommand::CreateProject {
                     name: script[i].clone(),
+                    workdir: None,
                 });
             }
             "send" => {

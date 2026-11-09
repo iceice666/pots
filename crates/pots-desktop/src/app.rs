@@ -1032,9 +1032,13 @@ impl PotsApp {
         };
         live.creating = Some(name.clone());
         let instance = live.instance;
-        self.store
-            .outbox
-            .push((instance, ClientCommand::CreateProject { name }));
+        self.store.outbox.push((
+            instance,
+            ClientCommand::CreateProject {
+                name,
+                workdir: None,
+            },
+        ));
         cx.notify();
     }
 
