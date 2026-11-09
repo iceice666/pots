@@ -168,6 +168,7 @@ pub fn placeholder_instance(id: InstanceId, name: &str) -> InstanceView {
         listeners: vec![],
         automation_pause: None,
         pauses: vec![],
+        custom_kinds: vec![],
         sources: vec![],
         github: GithubView::default(),
         worker: WorkerSettingsView::default(),
@@ -372,6 +373,7 @@ impl Sync {
                 p
             })
             .collect();
+        view.custom_kinds = automation.custom_kinds.clone();
         view.sources = automation
             .sources
             .into_iter()

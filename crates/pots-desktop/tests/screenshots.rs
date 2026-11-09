@@ -500,6 +500,12 @@ mod shots {
             app.new_listener(window, cx);
         });
         s.shot("20-live-new-listener");
+        // 外部來源的表單（RSS／探測／狀態頁／通用 webhook）。
+        s.update(|app, window, cx| {
+            app.new_source(window, cx);
+        });
+        s.shot("20a-live-new-source");
+        s.update(|app, _, cx| app.cancel_source_form(cx));
         s.update(|app, _, cx| app.save_listener_form(cx));
         s.wait_until("listener 已建立", |app| {
             app.current_instance().listeners.len() == 1 && app.listener_form.is_none()

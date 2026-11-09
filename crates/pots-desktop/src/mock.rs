@@ -1221,6 +1221,7 @@ pub fn store() -> Store {
                 account: Some("you@example.com".into()),
             },
             pauses: vec![],
+            custom_kinds: vec![],
             sources: vec![],
             github: GithubView::default(),
             worker: mock_worker(
@@ -1259,6 +1260,7 @@ pub fn store() -> Store {
                 account: Some("you@example.com".into()),
             },
             pauses: vec![],
+            custom_kinds: vec![],
             sources: vec![],
             github: GithubView::default(),
             worker: mock_worker(WorkerBackendKind::Builtin, "/var/lib/pots"),

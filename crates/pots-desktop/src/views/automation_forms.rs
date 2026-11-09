@@ -12,13 +12,14 @@ use gpui_kit::{
     IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, px, relative,
 };
+use pots_proto::{SourceDraft, SourceKind, TrustLevel, WebhookMapping};
 
 use super::panel::{panel_frame, white_box};
 use super::settings::{card, detail_row, field};
 use super::widgets::*;
 use crate::app::{
     GithubEditor, GithubTest, ListenerActionKind, ListenerForm, NotificationEditor, Panel, PotsApp,
-    RepoEditor, UserMdEditor, WorkerEditor,
+    RepoEditor, SourceEditor, UserMdEditor, WorkerEditor,
 };
 use crate::model::*;
 use crate::sync::{Applied, month_day_time};
@@ -64,11 +65,11 @@ fn comma_list(text: &str) -> Vec<String> {
 }
 
 /// 這些事件有沒有這個欄位（沒有的欄位當條件永遠不會符合）。
-fn kinds_have_field(kinds: &[&str], field: &str) -> bool {
+fn kinds_have_field(kinds: &[String], field: &str) -> bool {
     kinds.iter().any(|k| match field {
-        "label" => *k == "issue.labeled",
-        "branch" | "conclusion" => *k == "ci.finished",
-        "author" => *k != "ci.finished",
+        "label" => k == "issue.labeled",
+        "branch" | "conclusion" => k == "ci.finished",
+        "author" => k != "ci.finished",
         _ => false,
     })
 }
@@ -114,6 +115,7 @@ pub(crate) struct Forms<'a> {
     pub github: &'a mut Option<GithubEditor>,
     pub worker: &'a mut Option<WorkerEditor>,
     pub listener: &'a mut Option<ListenerForm>,
+    pub source: &'a mut Option<SourceEditor>,
     pub repo: &'a mut Option<RepoEditor>,
     pub notifications: &'a mut Option<NotificationEditor>,
     pub user_md: &'a mut Option<UserMdEditor>,
@@ -162,6 +164,12 @@ impl Forms<'_> {
             r.saving = false;
             r.error = Some("連線中斷，請再儲存一次".into());
         }
+        if let Some(s) = self.source
+            && s.saving
+        {
+            s.saving = false;
+            s.error = Some("連線中斷，請再儲存一次".into());
+        }
     }
 
     /// 服務拒絕了正在儲存的表單：原因放進表單，回傳 `None`；不是表單的錯誤原樣回傳。
@@ -208,6 +216,13 @@ impl Forms<'_> {
             r.error = Some(toast);
             return None;
         }
+        if let Some(s) = self.source
+            && s.saving
+        {
+            s.saving = false;
+            s.error = Some(toast);
+            return None;
+        }
         Some(toast)
     }
 
@@ -251,6 +266,13 @@ impl Forms<'_> {
             && applied.repos_changed == Some(r.project)
         {
             *self.repo = None;
+        }
+        // 來源清單有變（儲存成功）就收起表單。
+        if applied.automation_changed && self.source.as_ref().is_some_and(|e| e.saving) {
+            *self.source = None;
+            if *self.panel == Some(Panel::NewSource) {
+                *self.panel = None;
+            }
         }
     }
 }
@@ -497,7 +519,7 @@ impl PotsApp {
             .or_else(|| self.current_instance().projects.first().map(|p| p.id));
         self.listener_form = Some(ListenerForm {
             project,
-            kinds: vec!["issue.labeled"],
+            kinds: vec!["issue.labeled".to_string()],
             action: ListenerActionKind::CreateGoal,
             label: input("agent".into(), "例如 agent", false, window, cx),
             author: input(String::new(), "GitHub 帳號，逗號分開", false, window, cx),
@@ -527,9 +549,9 @@ impl PotsApp {
         cx.notify();
     }
 
-    pub fn toggle_listener_kind(&mut self, kind: &'static str, cx: &mut Context<Self>) {
+    pub fn toggle_listener_kind(&mut self, kind: String, cx: &mut Context<Self>) {
         if let Some(f) = &mut self.listener_form {
-            if let Some(i) = f.kinds.iter().position(|k| *k == kind) {
+            if let Some(i) = f.kinds.iter().position(|k| k == &kind) {
                 f.kinds.remove(i);
             } else {
                 f.kinds.push(kind);
@@ -638,19 +660,26 @@ impl PotsApp {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.set_listener_project(id, cx)))
             }));
-        let kinds = div()
-            .flex()
-            .flex_wrap()
-            .gap(px(6.))
-            .children(EVENT_KINDS.iter().map(|(k, label)| {
-                let k: &'static str = k;
-                chip(
-                    SharedString::from(format!("listener-kind-{k}")),
-                    label,
-                    f.kinds.contains(&k),
+        let kinds = div().flex().flex_wrap().gap(px(6.)).children(
+            EVENT_KINDS
+                .iter()
+                .map(|(k, label)| ((*k).to_string(), (*label).to_string()))
+                .chain(
+                    inst.custom_kinds
+                        .iter()
+                        .filter(|k| !EVENT_KINDS.iter().any(|(n, _)| n == k))
+                        .map(|k| (k.clone(), k.clone())),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_listener_kind(k, cx)))
-            }));
+                .map(|(k, label)| {
+                    let id = format!("listener-kind-{k}");
+                    let value = k.clone();
+                    chip(SharedString::from(id), &label, f.kinds.contains(&k)).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.toggle_listener_kind(value.clone(), cx)
+                        }),
+                    )
+                }),
+        );
         let actions = div().flex().gap(px(6.)).children(
             [
                 (ListenerActionKind::CreateGoal, "開 Goal"),
@@ -760,6 +789,415 @@ impl PotsApp {
                                 cx.listener(|this, _, _, cx| this.cancel_listener_form(cx)),
                             ),
                         ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    // ---- 外部來源 -------------------------------------------------------------
+
+    pub fn new_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_source_form(None, window, cx);
+    }
+
+    pub fn edit_source(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let source = self
+            .current_instance()
+            .sources
+            .iter()
+            .find(|s| s.id == id)
+            .cloned();
+        self.open_source_form(source.as_ref(), window, cx);
+    }
+
+    fn open_source_form(
+        &mut self,
+        editing: Option<&SourceView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = editing
+            .and_then(|s| SourceKind::parse(&s.kind_id))
+            .unwrap_or(SourceKind::Rss);
+        let mapping = editing.map(|s| s.mapping.clone()).unwrap_or_default();
+        let kept = editing.is_some();
+        self.source_editor = Some(SourceEditor {
+            editing: editing.map(|s| s.id.clone()),
+            kind,
+            trust: editing.map(|s| s.trust).unwrap_or(TrustLevel::Public),
+            id: input(
+                editing.map(|s| s.id.clone()).unwrap_or_default(),
+                "例如 rss:notes",
+                false,
+                window,
+                cx,
+            ),
+            name: input(
+                editing.map(|s| s.name.clone()).unwrap_or_default(),
+                "畫面上顯示的名稱",
+                false,
+                window,
+                cx,
+            ),
+            url: input(
+                editing.and_then(|s| s.url.clone()).unwrap_or_default(),
+                "https://example.com/feed.xml",
+                false,
+                window,
+                cx,
+            ),
+            interval: input(
+                String::new(),
+                &format!("留空是 {} 秒", kind.default_interval_secs()),
+                false,
+                window,
+                cx,
+            ),
+            secret: input(
+                String::new(),
+                if kept {
+                    "留空沿用已存的 secret"
+                } else {
+                    "至少 16 個字元；對方用它算簽章"
+                },
+                true,
+                window,
+                cx,
+            ),
+            map_kind: input(mapping.kind.clone(), "/type", false, window, cx),
+            map_resource: input(mapping.resource.clone(), "/id", false, window, cx),
+            map_summary: input(mapping.summary.clone(), "/title", false, window, cx),
+            map_dedupe: input(
+                mapping.dedupe.clone(),
+                "/id（留空用整個 body）",
+                false,
+                window,
+                cx,
+            ),
+            map_body: input(
+                mapping.body.clone(),
+                "/body（沒有就留空）",
+                false,
+                window,
+                cx,
+            ),
+            enabled: editing.map(|s| s.enabled).unwrap_or(true),
+            saving: false,
+            error: None,
+        });
+        self.panel = Some(Panel::NewSource);
+        cx.notify();
+    }
+
+    pub fn cancel_source_form(&mut self, cx: &mut Context<Self>) {
+        self.source_editor = None;
+        if self.panel == Some(Panel::NewSource) {
+            self.panel = None;
+        }
+        cx.notify();
+    }
+
+    pub fn set_source_kind(&mut self, kind: SourceKind, cx: &mut Context<Self>) {
+        if let Some(f) = &mut self.source_editor {
+            f.kind = kind;
+            if kind == SourceKind::Webhook {
+                f.trust = TrustLevel::Members;
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn set_source_trust(&mut self, trust: TrustLevel, cx: &mut Context<Self>) {
+        if let Some(f) = &mut self.source_editor {
+            f.trust = trust;
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_source_enabled(&mut self, cx: &mut Context<Self>) {
+        if let Some(f) = &mut self.source_editor {
+            f.enabled = !f.enabled;
+        }
+        cx.notify();
+    }
+
+    fn source_draft(&self, cx: &App) -> Result<SourceDraft, String> {
+        let f = self.source_editor.as_ref().ok_or("沒有表單")?;
+        let id = value(&f.id, cx).to_ascii_lowercase();
+        if id.is_empty() {
+            return Err("要填來源 id（例如 rss:notes）".into());
+        }
+        if f.editing.as_ref().is_some_and(|old| old != &id) {
+            return Err("來源 id 不能改；要換 id 請刪除後重新建立".into());
+        }
+        let name = value(&f.name, cx);
+        if name.is_empty() {
+            return Err("要填名稱".into());
+        }
+        let interval = match value(&f.interval, cx) {
+            v if v.is_empty() => None,
+            v => Some(
+                v.parse::<u32>()
+                    .map_err(|_| "輪詢間隔要是秒數".to_string())?,
+            ),
+        };
+        let url = value(&f.url, cx);
+        if f.kind != SourceKind::Webhook && url.is_empty() {
+            return Err("要填 URL".into());
+        }
+        let secret = if f.kind == SourceKind::Webhook {
+            let typed = value(&f.secret, cx);
+            if typed.is_empty() && f.editing.is_none() {
+                return Err("通用 webhook 需要一個 secret".into());
+            }
+            (!typed.is_empty()).then_some(typed)
+        } else {
+            None
+        };
+        Ok(SourceDraft {
+            id,
+            kind: f.kind,
+            name,
+            url: (f.kind != SourceKind::Webhook).then_some(url),
+            interval_secs: interval,
+            trust: f.trust,
+            secret,
+            mapping: WebhookMapping {
+                kind: value(&f.map_kind, cx),
+                resource: value(&f.map_resource, cx),
+                summary: value(&f.map_summary, cx),
+                dedupe: value(&f.map_dedupe, cx),
+                body: value(&f.map_body, cx),
+            },
+            enabled: f.enabled,
+        })
+    }
+
+    pub fn save_source_form(&mut self, cx: &mut Context<Self>) {
+        let draft = self.source_draft(cx);
+        let Some(f) = &mut self.source_editor else {
+            return;
+        };
+        let draft = match draft {
+            Ok(d) => d,
+            Err(e) => {
+                f.error = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        f.error = None;
+        let sent = self.settings_command(ClientCommand::SaveSource { draft }, "儲存來源", cx);
+        if let Some(f) = &mut self.source_editor {
+            f.saving = sent;
+        }
+        cx.notify();
+    }
+
+    pub fn delete_source(&mut self, id: String, cx: &mut Context<Self>) {
+        self.settings_command(ClientCommand::DeleteSource { id }, "刪除來源", cx);
+    }
+
+    pub fn toggle_source(&mut self, id: String, enabled: bool, cx: &mut Context<Self>) {
+        self.settings_command(
+            ClientCommand::SetSourceEnabled { id, enabled },
+            "切換來源",
+            cx,
+        );
+    }
+
+    pub(crate) fn render_source_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let f = self.source_editor.as_ref()?;
+        let kinds = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(6.))
+            .children(SourceKind::ALL.iter().map(|k| {
+                let k = *k;
+                chip(
+                    SharedString::from(format!("source-kind-{}", k.as_str())),
+                    k.label(),
+                    f.kind == k,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_source_kind(k, cx)))
+            }));
+        let trusts = div().flex().flex_wrap().gap(px(6.)).children(
+            [
+                (TrustLevel::Owned, "Owned（自己的系統）"),
+                (TrustLevel::Members, "Members（可信的服務）"),
+                (TrustLevel::Public, "Public（任何人都能寫）"),
+            ]
+            .into_iter()
+            .map(|(t, label)| {
+                chip(
+                    SharedString::from(format!("source-trust-{t:?}")),
+                    label,
+                    f.trust == t,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_source_trust(t, cx)))
+            }),
+        );
+        let enabled = chip(
+            SharedString::from("source-enabled"),
+            if f.enabled { "啟用" } else { "停用" },
+            f.enabled,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_source_enabled(cx)));
+        let url_fields = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(field(
+                "URL",
+                Some(match f.kind {
+                    SourceKind::Rss => "RSS 或 Atom 的網址",
+                    SourceKind::Probe => "定時 GET 這個網址，2xx／3xx 算正常",
+                    _ => "statuspage.io 的 summary.json，或 RSS／Atom 形式的狀態頁",
+                }),
+                Input::new(&f.url).into_any_element(),
+            ))
+            .child(field(
+                "輪詢間隔",
+                Some("秒，30 到 3600；留空用預設值"),
+                Input::new(&f.interval).into_any_element(),
+            ));
+        let webhook_fields = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(field(
+                "Secret",
+                Some("對方用 HMAC-SHA256 算 `X-Pots-Signature`"),
+                Input::new(&f.secret).into_any_element(),
+            ))
+            .child(div().flex().gap(px(8.)).child(div().flex_1().child(field(
+                "種類",
+                Some("JSON pointer"),
+                Input::new(&f.map_kind).into_any_element(),
+            ))))
+            .child(field(
+                "資源鍵",
+                Some("同一個資源的事件會回到同一個 Goal"),
+                Input::new(&f.map_resource).into_any_element(),
+            ))
+            .child(field(
+                "摘要",
+                Some("平台產生、agent 可信的部分"),
+                Input::new(&f.map_summary).into_any_element(),
+            ))
+            .child(field(
+                "去重",
+                Some("同一個值只算一次；留空用整個 body 的雜湊"),
+                Input::new(&f.map_dedupe).into_any_element(),
+            ))
+            .child(field(
+                "內文",
+                Some("他人寫的內容，送進 agent 時會標成不可信"),
+                Input::new(&f.map_body).into_any_element(),
+            ))
+            .when_some(f.editing.as_ref(), |d, id| {
+                d.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::text_muted())
+                        .child(format!("POST /webhooks/source/{id}")),
+                )
+            });
+        let body = div()
+            .id("source-form-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(20.))
+            .pb(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                white_box()
+                    .gap(px(8.))
+                    .child(section_label("種類"))
+                    .child(kinds),
+            )
+            .child(
+                white_box()
+                    .gap(px(8.))
+                    .child(section_label("名稱"))
+                    .child(field(
+                        "ID",
+                        Some("小寫英文、數字與 `-`、`_`、`.`、`:`；建立後不能改"),
+                        Input::new(&f.id).into_any_element(),
+                    ))
+                    .child(field(
+                        "顯示名稱",
+                        None,
+                        Input::new(&f.name).into_any_element(),
+                    )),
+            )
+            .child(
+                white_box()
+                    .gap(px(8.))
+                    .child(section_label(if f.kind == SourceKind::Webhook {
+                        "Webhook"
+                    } else {
+                        "輪詢"
+                    }))
+                    .when(f.kind == SourceKind::Webhook, |d| d.child(webhook_fields))
+                    .when(f.kind != SourceKind::Webhook, |d| d.child(url_fields)),
+            )
+            .child(
+                white_box()
+                    .gap(px(8.))
+                    .child(section_label("信任等級"))
+                    .child(trusts)
+                    .child(enabled),
+            )
+            .when_some(f.error.as_deref(), |d, m| d.child(error_note(m)));
+        Some(
+            panel_frame()
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .px(px(20.))
+                        .pt(px(16.))
+                        .pb(px(12.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(17.))
+                                .font_weight(FontWeight::BOLD)
+                                .child(if f.editing.is_some() {
+                                    "修改外部來源"
+                                } else {
+                                    "新增外部來源"
+                                }),
+                        )
+                        .child(self.close_button(cx)),
+                )
+                .child(body)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(20.))
+                        .py(px(16.))
+                        .border_t_1()
+                        .border_color(theme::border())
+                        .child(
+                            primary_button(
+                                "source-save",
+                                if f.saving { "儲存中…" } else { "儲存" },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.save_source_form(cx))),
+                        )
+                        .child(
+                            link_button("source-cancel", "取消").on_click(
+                                cx.listener(|this, _, _, cx| this.cancel_source_form(cx)),
+                            ),
+                        )
+                        .into_any_element(),
                 )
                 .into_any_element(),
         )
@@ -987,12 +1425,9 @@ impl PotsApp {
         cx.notify();
     }
 
-    /// 自動化頁的「外部來源」區塊。
+    /// 自動化頁的「外部來源」區塊：健康狀態、編輯與啟停。
     pub(crate) fn render_sources(&self, cx: &mut Context<Self>) -> Option<Div> {
         let inst = self.current_instance();
-        if inst.sources.is_empty() {
-            return None;
-        }
         let rows = inst.sources.iter().map(|s| {
             let (text, color) = match &s.health {
                 SourceHealth::Unknown => ("還沒收過事件".to_string(), theme::text_muted()),
@@ -1006,6 +1441,56 @@ impl PotsApp {
                     format!("異常（{} 起）：{message}", month_day_time(*since)),
                     theme::danger(),
                 ),
+            };
+            let github = s.kind_id == "github";
+            let id = s.id.clone();
+            let detail = match (github, &s.url) {
+                (true, _) => String::new(),
+                (false, _) if s.kind_id == "webhook" => {
+                    format!("POST /webhooks/source/{}", s.id)
+                }
+                (false, Some(url)) => url.clone(),
+                (false, None) => String::new(),
+            };
+            let actions = div().flex().flex_none().items_center().gap(px(6.));
+            let actions = if github {
+                actions.child(
+                    link_button("sources-settings", "到設定修改")
+                        .text_size(px(13.))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_settings(crate::app::SettingsTab::Github, cx)
+                        })),
+                )
+            } else {
+                let edit = id.clone();
+                let toggle = id.clone();
+                let enabled = s.enabled;
+                let remove = id.clone();
+                actions
+                    .child(
+                        link_button(SharedString::from(format!("source-edit-{id}")), "編輯")
+                            .text_size(px(13.))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_source(edit.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        link_button(
+                            SharedString::from(format!("source-toggle-{id}")),
+                            if enabled { "停用" } else { "啟用" },
+                        )
+                        .text_size(px(13.))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_source(toggle.clone(), !enabled, cx)
+                        })),
+                    )
+                    .child(
+                        link_button(SharedString::from(format!("source-delete-{id}")), "刪除")
+                            .text_size(px(13.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete_source(remove.clone(), cx)
+                            })),
+                    )
             };
             div()
                 .flex()
@@ -1030,7 +1515,24 @@ impl PotsApp {
                         .text_color(theme::text_muted())
                         .child(s.ingest.clone()),
                 )
-                .child(div().flex_1().min_w_0().text_color(color).child(text))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .text_color(color)
+                        .child(text)
+                        .when(!detail.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme::text_muted())
+                                    .child(detail),
+                            )
+                        }),
+                )
+                .child(actions)
         });
         let no_token = inst.github.token_hint.is_none();
         Some(
@@ -1045,11 +1547,9 @@ impl PotsApp {
                         .pb(px(10.))
                         .child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child("外部來源"))
                         .child(
-                            link_button("sources-settings", "到設定修改")
+                            link_button("source-new", "新增來源")
                                 .text_size(px(13.))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.open_settings(crate::app::SettingsTab::Github, cx)
-                                })),
+                                .on_click(cx.listener(|this, _, window, cx| this.new_source(window, cx))),
                         ),
                 )
                 .child(

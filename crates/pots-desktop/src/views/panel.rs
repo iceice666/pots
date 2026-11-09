@@ -194,6 +194,7 @@ impl PotsApp {
                 Some(self.render_listener_panel(l, cx).into_any_element())
             }
             Panel::NewListener => self.render_listener_form(cx),
+            Panel::NewSource => self.render_source_form(cx),
         }
     }
 

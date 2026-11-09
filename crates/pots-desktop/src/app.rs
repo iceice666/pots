@@ -159,8 +159,8 @@ pub struct RejectDialog {
 /// 右欄「新增 listener」表單。
 pub struct ListenerForm {
     pub project: Option<ProjectId>,
-    /// 選了哪些事件種類（`EVENT_KINDS` 的名稱）。
-    pub kinds: Vec<&'static str>,
+    /// 選了哪些事件種類（`EVENT_KINDS` 或通用 webhook 的自訂種類）。
+    pub kinds: Vec<String>,
     pub action: ListenerActionKind,
     pub label: Entity<InputState>,
     pub author: Entity<InputState>,
@@ -179,6 +179,29 @@ pub enum ListenerActionKind {
     CreateGoal,
     QuickFix,
     NotifyChat,
+}
+
+/// 自動化頁正在新增或修改的外部來源。
+pub struct SourceEditor {
+    /// 修改時的原本 id；新增時是 `None`。
+    pub editing: Option<String>,
+    pub kind: SourceKind,
+    pub trust: TrustLevel,
+    pub id: Entity<InputState>,
+    pub name: Entity<InputState>,
+    pub url: Entity<InputState>,
+    /// 輪詢間隔（秒）；留空用種類的預設值。
+    pub interval: Entity<InputState>,
+    /// webhook 的 secret；修改時留空表示沿用已存的。
+    pub secret: Entity<InputState>,
+    pub map_kind: Entity<InputState>,
+    pub map_resource: Entity<InputState>,
+    pub map_summary: Entity<InputState>,
+    pub map_dedupe: Entity<InputState>,
+    pub map_body: Entity<InputState>,
+    pub enabled: bool,
+    pub saving: bool,
+    pub error: Option<String>,
 }
 
 /// 頻道「自動化」分頁正在改的監看 repo。
@@ -287,6 +310,8 @@ pub enum Panel {
     Listener(ListenerId),
     /// 新增 listener 的表單（[`PotsApp::listener_form`]）。
     NewListener,
+    /// 新增或修改外部來源的表單（[`PotsApp::source_editor`]）。
+    NewSource,
 }
 
 /// 右欄正在編輯的 artifact：每個 `##` 區段一個編輯器。
@@ -399,6 +424,7 @@ pub struct PotsApp {
     /// 設定視窗「Worker」類別剛複製了哪一段指令（按鈕顯示「已複製」）。
     pub copied: Option<&'static str>,
     pub listener_form: Option<ListenerForm>,
+    pub source_editor: Option<SourceEditor>,
     pub repo_editor: Option<RepoEditor>,
     pub notification_editor: Option<NotificationEditor>,
     pub user_md_editor: Option<UserMdEditor>,
@@ -519,6 +545,7 @@ impl PotsApp {
             worker_editor: None,
             copied: None,
             listener_form: None,
+            source_editor: None,
             repo_editor: None,
             notification_editor: None,
             user_md_editor: None,
@@ -645,6 +672,7 @@ impl PotsApp {
                     github: &mut self.github_editor,
                     worker: &mut self.worker_editor,
                     listener: &mut self.listener_form,
+                    source: &mut self.source_editor,
                     repo: &mut self.repo_editor,
                     notifications: &mut self.notification_editor,
                     user_md: &mut self.user_md_editor,
@@ -674,6 +702,7 @@ impl PotsApp {
                         github: &mut self.github_editor,
                         worker: &mut self.worker_editor,
                         listener: &mut self.listener_form,
+                        source: &mut self.source_editor,
                         repo: &mut self.repo_editor,
                         notifications: &mut self.notification_editor,
                         user_md: &mut self.user_md_editor,
@@ -868,6 +897,7 @@ impl PotsApp {
             github: &mut self.github_editor,
             worker: &mut self.worker_editor,
             listener: &mut self.listener_form,
+            source: &mut self.source_editor,
             repo: &mut self.repo_editor,
             notifications: &mut self.notification_editor,
             user_md: &mut self.user_md_editor,
