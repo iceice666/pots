@@ -147,6 +147,41 @@ impl PotsApp {
                 .min_h_0()
                 .flex()
                 .flex_col()
+                // onboarding 沒做完：worker 不會派工，與其等 agent 報錯，不如在這裡說清楚。
+                .when(p.workdir.is_none(), |d| {
+                    let project = p.id;
+                    d.child(
+                        div()
+                            .mx(px(24.))
+                            .mt(px(12.))
+                            .p(px(10.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(theme::warn_border())
+                            .bg(theme::warn_soft())
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_size(px(13.))
+                            .child(icon(IconName::Info, 14., theme::warn_text()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_color(theme::warn_text())
+                                    .child(
+                                        "這個 project 還沒有工作資料夾：worker 不會派工。\
+                                         告訴 agent「我們用這個 repo」或指定本機資料夾，也可以直接設定。",
+                                    ),
+                            )
+                            .child(
+                                link_button("workdir-set", "設定").on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.edit_workdir(project, window, cx)
+                                    }),
+                                ),
+                            ),
+                    )
+                })
                 .child(self.render_project_stream(p, cx))
                 .child(self.render_composer(p, window, cx))
                 .into_any_element(),

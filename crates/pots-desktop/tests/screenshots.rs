@@ -343,17 +343,14 @@ mod shots {
         });
         s.shot("13-live-settings");
 
-        s.update(|app, _, cx| {
-            let instance = app.instance;
-            app.store.outbox.push((
-                instance,
-                ClientCommand::CreateProject {
-                    name: "pots".into(),
-                    workdir: None,
-                },
-            ));
-            cx.notify();
+        // onboarding：新增專案精靈（名稱 + 工作資料夾；這裡留白，之後由頻道提示補設定）。
+        s.update(|app, window, cx| {
+            app.begin_new_project(window, cx);
+            let name = app.workdir_dialog.as_ref().expect("精靈").name.clone();
+            name.update(cx, |state, cx| state.set_value("pots", window, cx));
         });
+        s.shot("12d-live-new-project");
+        s.update(|app, _, cx| app.submit_workdir_dialog(cx));
         s.wait_until("建立 project", |app| {
             !app.current_instance().projects.is_empty()
         });

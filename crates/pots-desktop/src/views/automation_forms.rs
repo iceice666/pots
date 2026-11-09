@@ -1265,7 +1265,50 @@ impl PotsApp {
         let paused = inst.project_paused(project).is_some();
         let all_paused = inst.pauses.iter().any(|p| p.project.is_none());
         let editing = self.repo_editor.as_ref().filter(|r| r.project == project);
-        let mut b = white_box().gap(px(8.)).child(
+        let local = matches!(p.workdir, Some(WorkDir::Local { .. }));
+        let mut b = white_box()
+            .gap(px(8.))
+            // 工作資料夾是「worker 在哪裡改」，和下面的「監看的 repo」（事件來源）分開。
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .flex_wrap()
+                    .child(section_label("工作資料夾").flex_1())
+                    .child(match &p.workdir {
+                        Some(dir) => tag(
+                            dir.label(),
+                            theme::text(),
+                            theme::subtle_bg(),
+                        )
+                        .into_any_element(),
+                        None => div()
+                            .text_size(px(13.))
+                            .text_color(theme::warn_text())
+                            .child("還沒有設定：worker 不會派工")
+                            .into_any_element(),
+                    })
+                    .child(
+                        link_button("workdir-edit", "設定")
+                            .text_size(px(13.))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_workdir(project, window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::text_muted())
+                    .child(if local {
+                        "本機資料夾：worker 在任務分支上改，核准後平台把分支 fast-forward 套用進去；沒有 PR 與 CI。"
+                    } else {
+                        "worker 在任務分支上改、開 PR、等 CI，核准後 merge。"
+                    }),
+            )
+            .child(div().h(px(1.)).bg(theme::border()))
+            .child(
             div()
                 .flex()
                 .items_center()
@@ -1354,6 +1397,10 @@ impl PotsApp {
             }
         }
         // 你核准 merge 後平台用的方式（agent 申請時可以另外指定，核准卡片上看得到）。
+        // 本機資料夾只有 fast-forward，沒有 merge 方式可選。
+        if local {
+            return b;
+        }
         b.child(
             div()
                 .flex()

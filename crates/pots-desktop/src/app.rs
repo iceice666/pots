@@ -158,6 +158,42 @@ pub struct RejectDialog {
     _subscription: Subscription,
 }
 
+/// 新增專案／設定工作資料夾的同一個對話框。`project` 是 `None` 時建立新專案。
+pub struct WorkdirDialog {
+    pub project: Option<ProjectId>,
+    pub name: Entity<InputState>,
+    /// GitHub repo 或本機資料夾的絕對路徑。
+    pub target: Entity<InputState>,
+    pub kind: WorkdirKind,
+    /// 服務拒絕的原因（例如資料夾不是 git repo）。
+    pub error: Option<String>,
+    /// 已送出、等服務回覆。
+    pub pending: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkdirKind {
+    Github,
+    Local,
+}
+
+impl WorkdirKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Github => "GitHub repo",
+            Self::Local => "本機資料夾",
+        }
+    }
+
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::Github => "owner/repo 或 github.com/owner/repo",
+            Self::Local => "本機 git repo 的絕對路徑，例如 /Users/me/code/app",
+        }
+    }
+}
+
 /// 右欄「新增 listener」表單。
 pub struct ListenerForm {
     pub project: Option<ProjectId>,
@@ -497,8 +533,8 @@ pub struct PotsApp {
     /// 最後一則送出的通知：視窗在之後幾分鐘內被叫到前景時開啟它。
     pub last_notice: Option<(Notice, Instant)>,
     pub(crate) next_test_request: u64,
-    /// 左欄「新增專案」的輸入框；`None` 時顯示按鈕。
-    pub new_project: Option<(Entity<InputState>, Subscription)>,
+    /// 新增專案／設定工作資料夾的對話框。
+    pub workdir_dialog: Option<WorkdirDialog>,
     pub stream_scroll: ScrollHandle,
     pub overseer_scroll: ScrollHandle,
     pub automations_scroll: ScrollHandle,
@@ -601,7 +637,7 @@ impl PotsApp {
             goal_note,
             worker_note,
             overseer_input,
-            new_project: None,
+            workdir_dialog: None,
             settings: None,
             provider_editor: None,
             memory_model_editor: None,
@@ -860,6 +896,23 @@ impl PotsApp {
                         Err(message) => editor.test = ProviderTest::Err(message),
                     }
                 }
+                // 建立／設定工作資料夾被拒絕：錯誤留在對話框裡（不要只彈一下就消失的 toast）。
+                if let Some(message) = applied.error.clone()
+                    && let Some(d) = &mut self.workdir_dialog
+                    && d.pending
+                {
+                    d.pending = false;
+                    d.error = Some(message);
+                    live.creating = None;
+                }
+                if let Some(p) = applied.workdir_changed
+                    && self
+                        .workdir_dialog
+                        .as_ref()
+                        .is_some_and(|d| d.project == Some(p))
+                {
+                    self.workdir_dialog = None;
+                }
                 let created = applied.project_added.filter(|p| {
                     let name = self
                         .store
@@ -879,6 +932,7 @@ impl PotsApp {
                 let instance = live.instance;
                 if let Some(p) = created {
                     live.creating = None;
+                    self.workdir_dialog = None;
                     self.open_project(instance, p, window, cx);
                 } else if current_missing
                     || (applied.rekeyed.is_some()
@@ -1002,43 +1056,153 @@ impl PotsApp {
         }
     }
 
-    /// 左欄「新增專案」：顯示輸入框。
+    /// 左欄「新增專案」：打開 onboarding 對話框（名稱 + 工作資料夾）。
     pub fn begin_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("專案名稱，Enter 建立"));
-        input.update(cx, |s, cx| s.focus(window, cx));
-        let sub = cx.subscribe(&input, |this, input, ev: &InputEvent, cx| match ev {
-            InputEvent::PressEnter { .. } => {
-                let name = input.read(cx).value().trim().to_string();
-                this.new_project = None;
-                if !name.is_empty() {
-                    this.create_project(name, cx);
+        if self.live.is_none() {
+            self.notify_unimplemented("新增專案", cx);
+            return;
+        }
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("專案名稱"));
+        let target =
+            cx.new(|cx| InputState::new(window, cx).placeholder(WorkdirKind::Github.placeholder()));
+        name.update(cx, |s, cx| s.focus(window, cx));
+        let mut subs = Vec::new();
+        for input in [&name, &target] {
+            subs.push(cx.subscribe(input, |this, _, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.submit_workdir_dialog(cx);
                 }
-                cx.notify();
-            }
-            InputEvent::Blur => {
-                this.new_project = None;
-                cx.notify();
-            }
-            _ => {}
+            }));
+        }
+        self.workdir_dialog = Some(WorkdirDialog {
+            project: None,
+            name,
+            target,
+            kind: WorkdirKind::Github,
+            error: None,
+            pending: false,
+            _subscriptions: subs,
         });
-        self.new_project = Some((input, sub));
         cx.notify();
     }
 
-    fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
+    /// 已有 project 的工作資料夾：同一個對話框，少了名稱欄位。
+    pub fn edit_workdir(
+        &mut self,
+        project: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(p) = self.store.project(self.instance, project) else {
+            return;
+        };
+        let (kind, target) = match &p.workdir {
+            Some(WorkDir::Github { repo }) => (
+                WorkdirKind::Github,
+                repo.strip_prefix("github.com/").unwrap_or(repo).to_string(),
+            ),
+            Some(WorkDir::Local { path }) => (WorkdirKind::Local, path.clone()),
+            None => (WorkdirKind::Github, String::new()),
+        };
+        let name = cx.new(|cx| InputState::new(window, cx));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(kind.placeholder()));
+        if !target.is_empty() {
+            input.update(cx, |s, cx| s.set_value(target.clone(), window, cx));
+        }
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe(&input, |this, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.submit_workdir_dialog(cx);
+            }
+        });
+        self.workdir_dialog = Some(WorkdirDialog {
+            project: Some(project),
+            name,
+            target: input,
+            kind,
+            error: None,
+            pending: false,
+            _subscriptions: vec![sub],
+        });
+        cx.notify();
+    }
+
+    pub fn close_workdir_dialog(&mut self, cx: &mut Context<Self>) {
+        self.workdir_dialog = None;
+        cx.notify();
+    }
+
+    pub fn set_workdir_kind(
+        &mut self,
+        kind: WorkdirKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(d) = &mut self.workdir_dialog {
+            d.kind = kind;
+            d.error = None;
+            let target = d.target.clone();
+            let placeholder = kind.placeholder();
+            target.update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+            target.update(cx, |s, cx| s.focus(window, cx));
+            cx.notify();
+        }
+    }
+
+    /// 「稍後再設定」：工作資料夾留白就建立（agent 之後可以問，或你自己在自動化分頁補）。
+    pub fn skip_workdir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = &self.workdir_dialog {
+            let target = d.target.clone();
+            target.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        self.submit_workdir_dialog(cx);
+    }
+
+    /// 「建立」或「儲存」：工作資料夾留白表示稍後再設定（建立時）。
+    pub fn submit_workdir_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.workdir_dialog else {
+            return;
+        };
+        if dialog.pending {
+            return;
+        }
         let Some(live) = &mut self.live else {
             self.notify_unimplemented("新增專案", cx);
             return;
         };
-        live.creating = Some(name.clone());
+        let name = dialog.name.read(cx).value().trim().to_string();
+        let target = dialog.target.read(cx).value().trim().to_string();
+        let workdir = if target.is_empty() {
+            None
+        } else {
+            Some(match dialog.kind {
+                WorkdirKind::Github => WorkDir::Github { repo: target },
+                WorkdirKind::Local => WorkDir::Local { path: target },
+            })
+        };
         let instance = live.instance;
-        self.store.outbox.push((
-            instance,
-            ClientCommand::CreateProject {
-                name,
-                workdir: None,
-            },
-        ));
+        dialog.error = None;
+        dialog.pending = true;
+        match dialog.project {
+            Some(project) => {
+                self.store.outbox.push((
+                    instance,
+                    ClientCommand::SetProjectWorkdir { project, workdir },
+                ));
+            }
+            None => {
+                if name.is_empty() {
+                    dialog.pending = false;
+                    dialog.error = Some("專案名稱不能是空的".into());
+                    cx.notify();
+                    return;
+                }
+                live.creating = Some(name.clone());
+                self.store
+                    .outbox
+                    .push((instance, ClientCommand::CreateProject { name, workdir }));
+            }
+        }
         cx.notify();
     }
 
@@ -2275,6 +2439,7 @@ impl Render for PotsApp {
             .children(panel)
             .children(self.render_settings_dialog(cx))
             .children(self.render_reject_dialog(cx))
+            .children(self.render_workdir_dialog(cx))
             .children(self.render_why_dialog(cx))
             .children(self.render_toast(cx))
     }
