@@ -24,7 +24,7 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
   - **ChatGPT 方案**：按「登入」開瀏覽器授權，再「設為使用中」。模型留空就用帳號清單的第一個。
   - **OpenAI 相容 API**：base URL 到 `/v1` 為止（OpenAI、OpenRouter、Ollama 的 `http://localhost:11434/v1` 等），本機服務可以不填 key。
   - **Anthropic 相容 API**：base URL 例如 `https://api.anthropic.com`，需要 key。
-  「測試連線」會列出可用的模型，點一個填入。API key 只送給本機服務、存在資料目錄，畫面只顯示末四碼。
+  「測試連線」會列出可用的模型，用下拉選單搜尋後選一個填入模型欄。API key 只送給本機服務、存在資料目錄，畫面只顯示末四碼。
 - 左欄「新增專案」建立 project，之後就能在頻道對話。斷線時自動重連，重連後補上錯過的事件。
 
 ### Live 模式目前有的

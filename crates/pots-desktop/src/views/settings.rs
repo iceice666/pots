@@ -12,6 +12,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
+use gpui_kit::component::select::Select;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -22,9 +23,6 @@ use super::widgets::{icon, link_button, primary_button, secondary_button, tag};
 use crate::app::{MemoryModelEditor, PotsApp, ProviderEditor, ProviderTest, SettingsTab};
 use crate::model::*;
 use crate::theme;
-
-/// 「測試連線」最多列出幾個模型，太多時只顯示前面的。
-const MAX_MODEL_CHIPS: usize = 40;
 
 pub(super) fn field(label: &str, hint: Option<&str>, input: AnyElement) -> Div {
     div()
@@ -214,6 +212,7 @@ impl PotsApp {
                     .id("settings-scroll")
                     .flex_1()
                     .min_h_0()
+                    .track_scroll(&self.settings_scroll)
                     .overflow_y_scroll()
                     .px(px(28.))
                     .pb(px(24.))
@@ -865,29 +864,15 @@ impl PotsApp {
                         .child(message.clone()),
                 );
             }
+            ProviderTest::Ok(models) if models.is_empty() => {
+                form = form.child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(theme::text_muted())
+                        .child("沒有回報任何模型，直接在上面填模型 ID。"),
+                );
+            }
             ProviderTest::Ok(models) => {
-                let mut chips = div().flex().flex_wrap().gap(px(6.));
-                for (i, m) in models.iter().take(MAX_MODEL_CHIPS).enumerate() {
-                    let model = m.id.clone();
-                    chips = chips.child(
-                        div()
-                            .id(SharedString::from(format!("model-chip-{i}")))
-                            .cursor_pointer()
-                            .px(px(8.))
-                            .py(px(3.))
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(theme::border_strong())
-                            .bg(theme::white())
-                            .text_size(px(12.))
-                            .hover(|s| s.bg(theme::accent_soft()))
-                            .child(m.display_name.clone())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.pick_model(model.clone(), window, cx)
-                            })),
-                    );
-                }
-                let more = models.len().saturating_sub(MAX_MODEL_CHIPS);
                 form = form.child(
                     div()
                         .flex()
@@ -902,24 +887,27 @@ impl PotsApp {
                                 .text_color(theme::ok())
                                 .child(icon(IconName::CircleCheck, 14., theme::ok()))
                                 .child(if kind.preset().is_some() {
-                                    format!("內建清單，{} 個模型，點一個填入", models.len())
+                                    format!("內建清單，{} 個模型，可以搜尋", models.len())
                                 } else {
-                                    format!("連線成功，{} 個模型，點一個填入", models.len())
+                                    format!("連線成功，{} 個模型，可以搜尋", models.len())
                                 }),
                         )
-                        .child(chips)
-                        .when(more > 0, |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme::text_muted())
-                                    .child(if kind.preset().is_some() {
-                                        format!("還有 {more} 個沒列出；也可以在模型欄輸入完整 ID")
-                                    } else {
-                                        format!("還有 {more} 個沒列出，直接輸入模型 ID")
-                                    }),
-                            )
-                        }),
+                        .child(
+                            Select::new(&editor.model_picker)
+                                .id("provider-model-picker")
+                                .placeholder("從清單選一個模型")
+                                .accessibility_label("模型")
+                                .search_placeholder("搜尋模型 ID 或名稱")
+                                .menu_max_h(px(280.))
+                                .empty(|_, _| {
+                                    div()
+                                        .px(px(10.))
+                                        .py(px(6.))
+                                        .text_size(px(13.))
+                                        .text_color(theme::text_muted())
+                                        .child("沒有符合的模型，可以直接在上面填 ID")
+                                }),
+                        ),
                 );
             }
         }

@@ -91,6 +91,13 @@ mod shots {
                 .expect("update window");
         }
 
+        /// 直接對視窗送事件；點擊的 listener 會自己更新 `PotsApp`，不能再包一層 `update`。
+        fn act(&mut self, f: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::App)) {
+            self.cx
+                .update_window(self.window, |_, window, cx| f(window, cx))
+                .expect("update window");
+        }
+
         fn view_settings_closed(&mut self) -> bool {
             let view = self.view.clone();
             self.cx.update(|cx| view.read(cx).settings.is_none())
@@ -309,6 +316,22 @@ mod shots {
         });
         s.update(|app, window, cx| app.pick_model("gpt-4.1".into(), window, cx));
         s.shot("12-live-settings-editor");
+
+        // 模型的清單是下拉選單（含搜尋列）：捲到看得見的地方、打開再截一張。
+        s.update(|app, _, cx| {
+            app.settings_scroll.scroll_to_bottom();
+            cx.notify();
+        });
+        s.act(|window, cx| window.render_frame(cx));
+        s.act(|window, cx| window.click("provider-model-picker", cx));
+        // 下拉選單的進場動畫 150ms，跑完才截，不然只拍到全透明的一張。
+        s.cx.advance_clock(std::time::Duration::from_millis(200));
+        s.act(|window, cx| window.render_frame(cx));
+        s.shot("12b-live-settings-model-menu");
+
+        // 搜尋列：打字就篩選清單。
+        s.act(|window, cx| window.input("mini", cx));
+        s.shot("12c-live-settings-model-search");
 
         s.update(|app, _, cx| app.save_provider(cx));
         s.wait_until("儲存並設為使用中", |app| {

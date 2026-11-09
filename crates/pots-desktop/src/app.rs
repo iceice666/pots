@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Render, ScrollHandle, Styled as _, Subscription,
-    Window, div,
+    IntoElement, KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _,
+    Subscription, Window, div, px,
 };
 
 use markdown_editor::{BlockEditorEvent, BlockEditorState};
@@ -258,6 +260,8 @@ pub struct ProviderEditor {
     /// 遮蔽輸入；修改時留空表示沿用已存的 key。
     pub api_key: Entity<InputState>,
     pub model: Entity<InputState>,
+    /// 「測試連線」列出的模型，用下拉選單挑（選單裡有搜尋列）。
+    pub model_picker: Entity<SelectState<SearchableVec<ModelChoice>>>,
     /// 每次請求額外送出的 header；空白列在送出時略過。
     pub headers: Vec<ProviderHeaderRow>,
     pub test: ProviderTest,
@@ -265,12 +269,63 @@ pub struct ProviderEditor {
     pub saving: bool,
     /// 服務拒絕儲存的原因，顯示在表單裡，打過的內容不會不見。
     pub error: Option<String>,
+    /// 模型欄改了，下拉選單的選取也跟著對齊。
+    _model_picker_sync: Subscription,
+    /// 下拉選單選了模型，填回模型欄。
+    _model_input_sync: Subscription,
 }
 
 /// provider 表單裡的一列 header。
 pub struct ProviderHeaderRow {
     pub name: Entity<InputState>,
     pub value: Entity<InputState>,
+}
+
+/// 「選模型」下拉選單的一列：值是模型 ID，列上顯示名稱（不同時附上 ID）。
+#[derive(Clone)]
+pub struct ModelChoice {
+    pub id: String,
+    pub name: String,
+}
+
+impl SearchableListItem for ModelChoice {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        if self.name.is_empty() {
+            SharedString::from(self.id.clone())
+        } else {
+            SharedString::from(self.name.clone())
+        }
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(self.title())
+            .when(self.name != self.id, |d| {
+                d.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::text_muted())
+                        .child(self.id.clone()),
+                )
+            })
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+
+    /// ID 或顯示名稱都搜得到，貼上完整 ID 也能找到那一列。
+    fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || self.id.to_lowercase().contains(&query)
+            || self.name.to_lowercase().contains(&query)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -447,6 +502,8 @@ pub struct PotsApp {
     pub stream_scroll: ScrollHandle,
     pub overseer_scroll: ScrollHandle,
     pub automations_scroll: ScrollHandle,
+    /// 設定視窗內容的捲動位置；換分頁時回到最上面。
+    pub settings_scroll: ScrollHandle,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -564,6 +621,7 @@ impl PotsApp {
             stream_scroll: ScrollHandle::new(),
             overseer_scroll: ScrollHandle::new(),
             automations_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
             focus,
             _subscriptions: subscriptions,
         };
@@ -782,10 +840,25 @@ impl PotsApp {
                     && let Some(editor) = &mut self.provider_editor
                     && editor.test == ProviderTest::Running(request)
                 {
-                    editor.test = match result {
-                        Ok(models) => ProviderTest::Ok(models),
-                        Err(message) => ProviderTest::Err(message),
-                    };
+                    match result {
+                        Ok(models) => {
+                            let choices = models
+                                .iter()
+                                .map(|m| ModelChoice {
+                                    id: m.id.clone(),
+                                    name: m.display_name.clone(),
+                                })
+                                .collect::<Vec<_>>();
+                            let model = editor.model.read(cx).value().trim().to_string();
+                            let picker = editor.model_picker.clone();
+                            picker.update(cx, |select, cx| {
+                                select.set_items(SearchableVec::new(choices), window, cx);
+                                select.set_selected_value(&model, window, cx);
+                            });
+                            editor.test = ProviderTest::Ok(models);
+                        }
+                        Err(message) => editor.test = ProviderTest::Err(message),
+                    }
                 }
                 let created = applied.project_added.filter(|p| {
                     let name = self
@@ -970,6 +1043,9 @@ impl PotsApp {
     /// 開啟設定視窗（目前實例的設定）。已經開著時切到指定類別。
     pub fn open_settings(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
         self.settings = Some(tab);
+        // 每個分頁從頭開始，不會停在上一頁的捲動位置。
+        self.settings_scroll
+            .set_offset(gpui_kit::point(px(0.), px(0.)));
         cx.notify();
     }
 
@@ -1212,17 +1288,53 @@ impl PotsApp {
                 })
                 .unwrap_or_default(),
         };
+        let model_input = input(model, model_placeholder, false, window, cx);
+        // 清單等「測試連線」回來才有；選單裡有搜尋列，按一下才展開。
+        let model_picker = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(Vec::new()), None, window, cx).searchable(true)
+        });
+        // 模型欄改了（例如貼上完整模型 ID），下拉選單的選取也跟著對齊。
+        let model_picker_sync = cx.subscribe_in(
+            &model_input,
+            window,
+            |this, _, ev: &InputEvent, window, cx| {
+                if !matches!(ev, InputEvent::Change) {
+                    return;
+                }
+                let Some(editor) = &this.provider_editor else {
+                    return;
+                };
+                let model = editor.model.read(cx).value().trim().to_string();
+                let picker = editor.model_picker.clone();
+                picker.update(cx, |select, cx| {
+                    select.set_selected_value(&model, window, cx)
+                });
+            },
+        );
+        // 下拉選單選了模型就填回模型欄。
+        let model_input_sync = cx.subscribe_in(
+            &model_picker,
+            window,
+            |this, _, ev: &SelectEvent<SearchableVec<ModelChoice>>, window, cx| {
+                if let SelectEvent::Confirm(Some(model)) = ev {
+                    this.pick_model(model.clone(), window, cx);
+                }
+            },
+        );
         self.provider_editor = Some(ProviderEditor {
             id,
             kind,
             name: input(name, "名稱", false, window, cx),
             base_url: input(base_url, kind.default_base_url(), false, window, cx),
             api_key: input(String::new(), key_placeholder, true, window, cx),
-            model: input(model, model_placeholder, false, window, cx),
+            model: model_input,
+            model_picker,
             headers,
             test: ProviderTest::Idle,
             saving: false,
             error: None,
+            _model_picker_sync: model_picker_sync,
+            _model_input_sync: model_input_sync,
         });
         cx.notify();
     }
@@ -1332,7 +1444,11 @@ impl PotsApp {
         if let Some(editor) = &self.provider_editor {
             editor
                 .model
-                .update(cx, |s, cx| s.set_value(model, window, cx));
+                .update(cx, |s, cx| s.set_value(model.clone(), window, cx));
+            // `set_value` 不發 `InputEvent`，下拉選單的選取要自己對齊。
+            editor.model_picker.update(cx, |select, cx| {
+                select.set_selected_value(&model, window, cx)
+            });
         }
         cx.notify();
     }
