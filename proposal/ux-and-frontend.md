@@ -26,7 +26,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 ## 桌面客戶端現況
 
-桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）；M4 接上 Goal 面板的任務狀態（執行中、需要決定、完成、失敗）、指派、分支與 PR 連結、worker 的最後一句進度、「重試」、Team 分頁、快速修改的標籤，以及設定的「Worker」類別（後端、執行環境、image、Claude Code 的登入指令）；M5 接上 Inbox 與對話裡的核准卡片（核准、拒絕附理由、看 PR 與提案的 diff）、「需要你處理」的任務、系統通知、設定的「通知」（靜音時段）與「USER.md」類別，以及頻道「自動化」分頁的 merge 方式。M6a 接上總管（live 的全域對話、專案概況與記憶）、每一則 agent 訊息的「為什麼這樣回答」面板（觸發來源、記憶版本、模型、用量與工具順序）、真實的 Goal 預算百分比，以及服務產生的「你不在期間」摘要卡片。`--mock` 模式用假資料展示其他畫面：實例直列、任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
+桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）；M4 接上 Goal 面板的任務狀態（執行中、需要決定、完成、失敗）、指派、分支與 PR 連結、worker 的最後一句進度、「重試」、Team 分頁、快速修改的標籤，以及設定的「Worker」類別（後端、執行環境、image、Claude Code 的登入指令）；M5 接上 Inbox 與對話裡的核准卡片（核准、拒絕附理由、看 PR 與提案的 diff）、「需要你處理」的任務、系統通知、設定的「通知」（靜音時段）與「USER.md」類別，以及頻道「自動化」分頁的 merge 方式。M6a 接上總管（live 的全域對話、專案概況與記憶）、每一則 agent 訊息的「為什麼這樣回答」面板（觸發來源、記憶版本、模型、用量與工具順序）、真實的 Goal 預算百分比，以及服務產生的「你不在期間」摘要卡片。M9 接上 project onboarding 與工作資料夾（進行中）：新增專案改成精靈（名稱加上 GitHub repo 或本機 git repo 的絕對路徑，先驗證再建立，也可以「稍後再設定」），沒設定時頻道顯示提示，按「設定」在同一個對話框補上，自動化分頁也能改；設定後對話 agent 也知道工作資料夾，使用者也可以直接請它用 `set_workdir` 設定。`--mock` 模式用假資料展示其他畫面：實例直列、任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
 
 下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
 
@@ -44,6 +44,7 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 | --- | --- | --- | --- |
 | 實例直列 | 最左側窄欄，只連一個實例時隱藏 | Projects 分頁頂端的切換器，只連一個實例時隱藏 | 全域 Inbox、各實例圖示（待處理徽章、離線警示）、加入實例 |
 | 左欄 | 目前實例 | 底部分頁「Projects」 | 頂端是實例名稱與形態，點下去是實例選單；接著是總管、這個實例的 Inbox、專案列表、自動化（排程、Listener）與電腦，最下方是「設定」。每個 project 一列，標示待核准數、「需要你」或未讀；已移交的 project 顯示新位置 |
+| 新增專案 | 左欄的「新增專案」打開精靈 | 尚未接上 | 名稱、工作資料夾（GitHub repo、本機 git repo 的絕對路徑，或「稍後再設定」）；建立前驗證，失敗不留半個 project。沒設定時 project 顯示提示 |
 | 對話流 | 中欄，project 頻道的「對話」分頁 | 點進 project | 連續對話 + 內嵌卡片，頂端顯示 agent 狀態、本週預算與「停止」 |
 
 | 區塊 | 桌面 | 手機 | 內容 |
@@ -63,11 +64,14 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 
 ```rust
 pub enum StreamScope { Project(ProjectId), Overseer, Task(TaskId) } // 事件屬於哪條對話流
+/// project 的工作資料夾：程式碼在哪、worker 在哪裡改（每個 project 一個）。
+pub enum WorkDir { Github { repo: String }, Local { path: String } }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum ServerEvent {
     Snapshot      { seq: u64, instance: InstanceSnapshot },              // 整份替換
     ProjectAdded  { seq: u64, project: ProjectSnapshot },
+    ProjectWorkdir { seq: u64, project: ProjectId, workdir: Option<WorkDir> }, // 工作資料夾整份替換
     Item          { seq: u64, scope: StreamScope, item: StreamItemView },
     Delta         { scope: StreamScope, item_id: ItemId, text: String },  // 不記日誌
     StreamingText { scope: StreamScope, item_id: ItemId, text: String },  // 不記日誌
@@ -90,7 +94,8 @@ pub enum ServerEvent {
 #[serde(tag = "t")]
 pub enum ClientCommand {
     Resume           { last_seq: u64 },   // 連線後的第一個指令
-    CreateProject    { name: String },
+    CreateProject    { name: String, workdir: Option<WorkDir> }, // 建立前驗證；不帶也能建立
+    SetProjectWorkdir { project: ProjectId, workdir: Option<WorkDir> }, // None 清除
     Send             { project: ProjectId, id: ItemId, text: String, mode: SendMode }, // Queue | Steer
     Stop             { project: ProjectId },
     Decide           { approval: ApprovalId, approve: bool, note: Option<String> },
@@ -117,6 +122,8 @@ pub enum ClientCommand {
 - 記憶：快照裡每個 project 帶著 `MemoryView`；Observer、Reflector 或你的修改讓記憶變了就送一筆 `Memory` 整份替換。觀察的修改被拒絕時，除了 `Error` 也重送一次目前的 `Memory`，客戶端先改的內容會被蓋回去。
 
 - 任務樹與 artifact：快照裡每個 project 帶著所有 Goal（含任務樹與 Brief 全文）與 artifact；任何變化都送一筆 `GoalChanged` 或 `ArtifactChanged` 整筆替換，客戶端不用自己拼狀態。Planner 的里程碑是對話流裡的 `Card::Milestone`。`SaveArtifact` 被拒絕（同一段兩邊都改過）時只回 `Error`，草稿留在客戶端；`Cancel { task }` 取消一個還沒結束的任務。
+
+- 工作資料夾：快照的 `ProjectSnapshot` 帶 `workdir`；建立、設定或 agent 的 `set_workdir` 成功後送一筆 `ProjectWorkdir` 整份替換。自動化分頁的 `ProjectRepos` 只影響監看，不影響 worker 在哪工作。本機資料夾的核准是 `ApplyChanges`（路徑、分支、sha），核准後平台才 fast-forward 套用。
 
 - 核准：快照帶著還沒決定與最近有變化的核准（`ApprovalView`：具體動作、hash、狀態、理由與結果），之後每次變化送一筆 `ApprovalChanged` 整筆替換；`Decide { approval, approve, note }` 核准或拒絕，已決定或逾時時回 `Error` 並重送目前的狀態。通知設定、USER.md 與 project 的 merge 方式也在快照裡，改了分別送 `Notifications`、`UserMd`、`ProjectMergeMethod`。
 

@@ -4,7 +4,7 @@
 
 ## MVP 里程碑
 
-M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種形態並存。桌面版是長期支援的形態，M8 之後仍要通過同一套整合測試（見[部署形態](deployment.md)）。依序建置，每個里程碑結束時都是可以自己天天用的版本。M4 結束時應該能跑通「一句話 → PR → CI → 自動修 → 請求核准 merge」（實際範圍見 M4 的狀態：自動修與核准卡片延後到 M5 完成）。
+M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種形態並存，M9 回到桌面版的 onboarding 與本機工作資料夾。桌面版是長期支援的形態，M8 之後仍要通過同一套整合測試（見[部署形態](deployment.md)）。依序建置，每個里程碑結束時都是可以自己天天用的版本。M4 結束時應該能跑通「一句話 → PR → CI → 自動修 → 請求核准 merge」（實際範圍見 M4 的狀態：自動修與核准卡片延後到 M5 完成）。
 
 1. M0 骨架：axum + sqlx + WebSocket，`instance`、`projects` 與 `stream_items`，GPUI 桌面客戶端的對話頁；桌面 app 以子行程啟動並管理內嵌服務（loopback、啟動 token、`Host`／`Origin` 檢查、資料目錄鎖）。對話 agent 用統一的 run_agent 與 chat profile 串流回覆，先用完整原始歷史，不做記憶。接 ChatGPT Plan provider：官方 SIWC 授權、Responses 串流與 `pots-llm` 的 provider 介面及共用 loop；驗收工具呼叫／結果往返、多輪歷史、重啟與並行 refresh、撤銷及額度不足，API fallback 必須事先授權。
 
@@ -53,6 +53,10 @@ M0 到 M7 都在桌面版上開發與驗收，M8 加入多設備版，讓兩種�
    - SQLite 加 passkey 的輕量多設備版能在手機上完成核准。
    - 桌面版預設組合的整合測試全部通過。
 
+11. M9 project onboarding 與本機工作資料夾（進行中）：新增 project 時一併指定工作資料夾（`WorkDir`，每個 project 最多一個，未設定時不派工），和自動化分頁「監看的 repo」（可多個、是外部事件來源）分開。工作資料夾有 `Github { repo }`（`github.com/owner/repo`）與 `Local { path }`（本機 git repo 的絕對路徑）兩種，key 分別是 `github.com/owner/repo` 與 `local:/abs/path`。
+
+    狀態：伺服器、協定與 agent 端已實作，桌面端的精靈、頻道提示與自動化頁設定已接上，尚待整體驗證。驗證在 `crates/pots-server/src/workdir.rs`：GitHub 走 `normalize_repo`；本機要求絕對路徑、存在、是目錄、有 `.git`（目錄或 gitfile）、不能位於 Pots 資料目錄內也不能包含它，canonicalize 後才存。建立 project 前就驗證，失敗不留半個 project；DB 是 migration `0011_workdir.sql` 的 `projects.workdir_kind`（github|local，NULL 表示未設定）與 `projects.workdir`。協定 v12 新增 `CreateProject { name, workdir }`、`SetProjectWorkdir { project, workdir }`、`ServerEvent::ProjectWorkdir`，`ProjectView`／`ProjectSnapshot` 帶 `workdir`；舊的 `SetProjectRepos` 保留，只影響監看。對話 agent 多了 `set_workdir`（kind=github|local，和人類指令同一份驗證），對話、Planner 與 worker 的 instructions 都有「工作資料夾」段落；`create_task` 的舊 `repo` 參數保留，但只能是同一個資料夾。GitHub 專案的 worker 行為照舊（鏡像、任務分支、push、PR、等 CI、核准 merge）；本機資料夾由平台維護 `repos/local/<sha256 前 16 bytes>.git` 的鏡像，worker 改平台副本，`open_pr` 只 commit、打 bundle、記下 `tasks.pr = local:/path`，不 push、不開 PR、不等 CI。`request_approval` 變成一筆 `Action::ApplyChanges { path, branch, base, sha }`（`tasks.base_branch` 由 worker 準備工作目錄時記下）；核准後平台確認任務分支還是核准的 sha、你的資料夾還停在 `base` 且沒有未 commit 的修改，`git fetch <mirror> +refs/pots/tasks/<task>:refs/pots/apply/<task>` 後 `git merge --ff-only`，最後刪掉暫時 ref。不能 fast-forward 就失敗並回報原因，不會自動 merge 或解衝突，也沒有合併後刪分支的後續核准。既有 project 沒有 workdir 時不派工（任務仍在任務樹上），頻道提示與自動化分頁可以補設定；監看的 repo 不再被當成工作位置。**限制**：本機只支援 fast-forward（不 squash、不 rebase、不自動解衝突）；本機 repo 不能是 detached HEAD；沒有 CI，所以 CI 失敗自動修不適用；本機沒有沙箱（沿用現況），worker 仍需要 git；工作資料夾換掉後舊任務的核准會被拒絕，要求重新 `open_pr`。workdir 的驗證有單元測試；本機套用的端到端與桌面端畫面待驗證。實作細節見[Onboarding 與工作資料夾](onboarding.md)。
+
 M5 之前的 merge 一律由你在 GitHub 上手動完成，所以即使核准流程還沒做，前面的里程碑也是安全的。
 
 ## 已決定事項
@@ -75,6 +79,8 @@ LLM 層要用 rig 這類 agent 框架，還是自己寫？rig-core 0.46 重寫�
 整理記憶用哪個模型？→ 決定：設定視窗的「記憶」類別另選 provider 與模型（`instance_settings.memory_provider`、`memory_model`），沒設定時跟對話 agent 相同；刪掉那個 provider 時改回跟對話相同。閾值的 token 數用字元估算（CJK 一字約一個 token、其他約四個字元一個），不加 tokenizer 依賴。記憶面板可以查看、釘選、修正、刪除；修正與刪除是軟性的，舊內容保留作稽核。見[Observational Memory](memory.md)。
 
 手機客戶端與推播。候選是 gpui-mobile 共用 GPUI 介面、輕量 Web 核准頁（PWA 加 Web Push），或原生 Android。→ 決定：原生 Android（Kotlin 加 Jetpack Compose，[`android/`](../android/)），推播用 UnifiedPush，以 ntfy 當 distributor，伺服器端用 VAPID 與 RFC 8291 加密送出，不依賴 FCM；iOS 不在 v1 範圍。見[手機推播](approvals-and-notifications.md#手機推播)。
+
+工作資料夾與監看來源怎麼分？原本「監看的 repo」同時被當成 worker 的工作位置，但它的語意其實是外部事件來源，可以有多個，也可以沒有。→ 決定：每個 project 最多一個 `WorkDir`，和自動化分頁的監看 repo 分開。本機資料夾由平台維護鏡像，worker 在任務分支改平台副本；核准後才以 `git fetch` 加 `merge --ff-only` 套用，不讓 worker 直接改你的資料夾，也不自動解衝突。GitHub 專案維持 PR、CI 與 merge。既有 project 沒有 `WorkDir` 時不派工，要求使用者先設定。見[Onboarding 與工作資料夾](onboarding.md)。
 
 仍待確認：
 

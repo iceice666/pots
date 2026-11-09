@@ -41,6 +41,7 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 
 | 文件 | 內容 |
 | --- | --- |
+| [Onboarding 與工作資料夾](onboarding.md) | 新增專案精靈、工作資料夾與監看來源、本機資料夾的套用 |
 | [部署形態與多實例並存](deployment.md) | 桌面版與多設備版、後端設定、客戶端多連線、project 移交 |
 | [使用體驗與前端](ux-and-frontend.md) | 對話、狀態面板、介面配置、GPUI 客戶端與即時協定 |
 | [系統架構與資料模型](architecture.md) | 架構圖、核心型別、資料表與技術選型 |
@@ -52,7 +53,7 @@ Pots 是開源、由使用者在本機或自行管理的伺服器執行的單一
 | [外部事件與自動化](events-and-automation.md) | Connector、事件管線、喚醒、自我排程與 listener |
 | [核准流程與通知](approvals-and-notifications.md) | Approval 生命週期、核准政策與推播 |
 | [安全、預算與可觀測性](security-and-operations.md) | 身分驗證、沙箱、預算限制、trace 與成本報表 |
-| [里程碑與設計決策](roadmap-and-decisions.md) | M0–M8、已決定事項與待確認事項 |
+| [里程碑與設計決策](roadmap-and-decisions.md) | M0–M9、已決定事項與待確認事項 |
 | [參考資料](references.md) | GPUI、Mastra、Amp、官方 provider 授權文件 |
 
 建議先閱讀「使用體驗與前端」與「系統架構與資料模型」，再按主題查閱細節；實作順序與待確認事項見「里程碑與設計決策」。桌面客戶端的畫面見 [`crates/pots-desktop/`](../crates/pots-desktop/)。
