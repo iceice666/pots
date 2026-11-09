@@ -552,6 +552,16 @@ pub fn has_author_whitelist(spec: &ListenerSpec) -> bool {
     spec.fields.iter().any(|f| f.field == "author")
 }
 
+/// 通用 webhook 對應出來的自訂事件種類：英數字開頭，只含 `.`、`_`、`-`，長度 80 以內。
+pub fn is_custom_kind(k: &str) -> bool {
+    !k.is_empty()
+        && k.len() <= 80
+        && k.contains('.')
+        && !k.starts_with(['.', '_', '-'])
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// 檢查並整理 listener 的設定；不合法時回說明。
 pub fn check_spec(mut spec: ListenerSpec) -> Result<ListenerSpec, String> {
     let mut seen = HashSet::new();
@@ -560,7 +570,7 @@ pub fn check_spec(mut spec: ListenerSpec) -> Result<ListenerSpec, String> {
         return Err("至少要選一種事件".into());
     }
     for k in &spec.kinds {
-        if !pots_proto::EVENT_KINDS.iter().any(|(n, _)| n == k) {
+        if !pots_proto::EVENT_KINDS.iter().any(|(n, _)| n == k) && !is_custom_kind(k) {
             return Err(format!("不認得的事件種類：{k}"));
         }
     }
@@ -1203,6 +1213,7 @@ pub async fn view(conn: &mut SqliteConnection, now: Timestamp) -> Result<Automat
             })
             .collect(),
         sources: crate::watcher::source_views(conn).await?,
+        custom_kinds: crate::watcher::source::custom_kinds(conn).await?,
     })
 }
 

@@ -23,7 +23,9 @@ use uuid::Uuid;
 ///   `TeamPost::to`、`GoalView::quick`、快照帶 worker 設定）。
 /// - 7：核准與通知（`ApprovalChanged` 取代 `Inbox`、`Decide` 生效、`Notifications`、`UserMd`、
 ///   `ProjectMergeMethod` 與對應的指令，快照帶核准、通知設定、USER.md 與 project 的 merge 方式）。
-pub const PROTOCOL_VERSION: u32 = 9;
+/// - 10：其他 connector（`SaveSource`／`DeleteSource`、`SourceDraft`、`SourceView::url`、
+///   `AutomationView::custom_kinds`、feed／探測／狀態頁／自訂 webhook 的事件種類）。
+pub const PROTOCOL_VERSION: u32 = 10;
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -164,6 +166,9 @@ pub struct InstanceView {
     /// 外部來源與健康狀態。
     #[serde(default)]
     pub sources: Vec<SourceView>,
+    /// 通用 webhook 對應出來的自訂事件種類（listener 表單多選這些）。
+    #[serde(default)]
+    pub custom_kinds: Vec<String>,
     #[serde(default)]
     pub github: GithubView,
     /// worker 設定（設定的「Worker」類別）。
@@ -959,6 +964,13 @@ pub const EVENT_KINDS: &[(&str, &str)] = &[
     ("issue.labeled", "issue 加上 label"),
     ("issue.commented", "issue 有新留言"),
     ("ci.finished", "CI 結束"),
+    ("feed.item", "feed 有新項目"),
+    ("probe.failed", "探測失敗"),
+    ("probe.recovered", "探測恢復"),
+    ("status.incident.opened", "狀態頁 incident 開啟"),
+    ("status.incident.updated", "狀態頁 incident 更新"),
+    ("status.incident.resolved", "狀態頁 incident 解決"),
+    ("status.component.changed", "狀態頁元件狀態變化"),
 ];
 
 /// 批次暫停。
@@ -999,6 +1011,15 @@ pub struct SourceView {
     pub health: SourceHealth,
     pub last_ok: Option<Timestamp>,
     pub enabled: bool,
+    /// 輪詢的 URL；webhook 沒有。
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 種類的識別碼（`rss`、`probe`、`statuspage`、`webhook`、`github`）。
+    #[serde(default)]
+    pub kind_id: String,
+    /// 通用 webhook 的欄位對應；編輯時回填。
+    #[serde(default)]
+    pub mapping: WebhookMapping,
 }
 
 /// 自動化頁的所有資料；任一項有變就整筆替換（`ServerEvent::Automation`）。
@@ -1008,6 +1029,116 @@ pub struct AutomationView {
     pub listeners: Vec<ListenerView>,
     pub pauses: Vec<PauseView>,
     pub sources: Vec<SourceView>,
+    /// 通用 webhook 對應出來的自訂事件種類（listener 可以多選這些）。
+    #[serde(default)]
+    pub custom_kinds: Vec<String>,
+}
+
+/// 外部來源的種類（`sources.kind`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Rss,
+    Probe,
+    StatusPage,
+    Webhook,
+}
+
+impl SourceKind {
+    pub const ALL: &'static [SourceKind] = &[
+        SourceKind::Rss,
+        SourceKind::Probe,
+        SourceKind::StatusPage,
+        SourceKind::Webhook,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rss => "rss",
+            Self::Probe => "probe",
+            Self::StatusPage => "statuspage",
+            Self::Webhook => "webhook",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rss => "RSS／Atom",
+            Self::Probe => "HTTP 探測",
+            Self::StatusPage => "狀態頁",
+            Self::Webhook => "通用 webhook",
+        }
+    }
+
+    /// 預設輪詢間隔（秒）；webhook 不輪詢。
+    pub fn default_interval_secs(self) -> u32 {
+        match self {
+            Self::Rss => 300,
+            Self::Probe => 60,
+            Self::StatusPage => 60,
+            Self::Webhook => 0,
+        }
+    }
+}
+
+/// 通用 webhook 的欄位對應：用 JSON pointer 從收到的 JSON 取出事件的各部分。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookMapping {
+    /// 事件種類，例如 `/type`；取出的字串就是 listener 看到的名稱。
+    pub kind: String,
+    /// 資源鍵，例如 `/issue/id`；同一個資源的事件會回到同一個 Goal。
+    pub resource: String,
+    /// 平台產生、可信的摘要。
+    pub summary: String,
+    /// 去重用的欄位；空字串時用整個 body 的雜湊。
+    #[serde(default)]
+    pub dedupe: String,
+    /// 他人寫的內容（不可信）；空字串表示沒有。
+    #[serde(default)]
+    pub body: String,
+}
+
+impl Default for WebhookMapping {
+    fn default() -> Self {
+        Self {
+            kind: "/kind".into(),
+            resource: "/resource".into(),
+            summary: "/summary".into(),
+            dedupe: "/id".into(),
+            body: "/body".into(),
+        }
+    }
+}
+
+/// 儲存一個外部來源。新增時 `id` 是新的，編輯時是原本的 id。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceDraft {
+    /// 例如 `rss:hn`，只能是英數字、`-`、`_`、`.`、`:`。
+    pub id: String,
+    pub kind: SourceKind,
+    pub name: String,
+    /// RSS、狀態頁、探測的 URL；webhook 沒有。
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 輪詢間隔（秒）；`None` 用種類的預設值，夾在 30 到 3600。
+    #[serde(default)]
+    pub interval_secs: Option<u32>,
+    pub trust: TrustLevel,
+    /// webhook 的 secret；`None` 表示沿用已存的，空字串表示清掉。
+    #[serde(default)]
+    pub secret: Option<String>,
+    #[serde(default)]
+    pub mapping: WebhookMapping,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// GitHub 連線設定（設定視窗的「GitHub」類別）。客戶端只看得到 token 的末四碼。
@@ -2179,6 +2310,19 @@ pub enum ClientCommand {
     /// 儲存 GitHub 設定；伺服器回 `Github`。
     SaveGithub {
         draft: GithubDraft,
+    },
+    /// 新增或修改一個外部來源（RSS、探測、狀態頁、通用 webhook）；伺服器回 `Automation`。
+    SaveSource {
+        draft: SourceDraft,
+    },
+    /// 刪除一個外部來源（GitHub 不能刪）；伺服器回 `Automation`。
+    DeleteSource {
+        id: String,
+    },
+    /// 啟用或停用一個外部來源；伺服器回 `Automation`。
+    SetSourceEnabled {
+        id: String,
+        enabled: bool,
     },
     /// 用這份 token（`None` 時用已存的）查詢帳號；不儲存。伺服器回 `GithubTest`。
     TestGithub {

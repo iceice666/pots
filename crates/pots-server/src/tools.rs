@@ -139,6 +139,7 @@ impl ToolCtx {
 #[derive(Clone, Copy, Debug)]
 enum Kind {
     GetStatus,
+    GetSourceStatus,
     ListGoals,
     ReadArtifact,
     Granted(ToolName),
@@ -152,7 +153,12 @@ struct PlatformTool {
 /// 依 profile 組出這個 run 的工具。
 pub fn build(profile: &AgentProfile, ctx: Arc<ToolCtx>) -> Vec<Arc<dyn Tool>> {
     let mut out: Vec<Arc<dyn Tool>> = Vec::new();
-    for kind in [Kind::GetStatus, Kind::ListGoals, Kind::ReadArtifact] {
+    for kind in [
+        Kind::GetStatus,
+        Kind::GetSourceStatus,
+        Kind::ListGoals,
+        Kind::ReadArtifact,
+    ] {
         out.push(Arc::new(PlatformTool {
             kind,
             ctx: ctx.clone(),
@@ -338,6 +344,12 @@ pub async fn post_card(
 impl Tool for PlatformTool {
     fn spec(&self) -> ToolSpec {
         let (name, description, parameters) = match self.kind {
+            Kind::GetSourceStatus => (
+                "get_source_status",
+                "查詢外部來源（GitHub、RSS／Atom、狀態頁、HTTP 探測、通用 webhook）的健康狀態\
+                 與最近一次輪詢的進度。回應慢或收不到事件時先看這裡。",
+                object(json!({}), &[]),
+            ),
             Kind::GetStatus => (
                 "get_status",
                 match self.ctx.scope {
@@ -657,6 +669,7 @@ impl PlatformTool {
     async fn dispatch(&self, arguments: &str) -> Result<String, ToolError> {
         match self.kind {
             Kind::GetStatus => self.get_status().await,
+            Kind::GetSourceStatus => self.get_source_status().await,
             Kind::ListGoals => self.list_goals(parse(arguments)?).await,
             Kind::ReadArtifact => self.read_artifact(parse(arguments)?).await,
             Kind::Granted(ToolName::CreateGoal) => self.create_goal(parse(arguments)?).await,
@@ -851,6 +864,61 @@ impl PlatformTool {
             return Err(bad(format!("Goal「{}」已經{}", g.title, g.state.label())));
         }
         Ok(g)
+    }
+
+    async fn get_source_status(&self) -> Result<String, ToolError> {
+        let mut tx = self.ctx.store.read().await.map_err(internal)?;
+        let rows = crate::watcher::source::rows(&mut tx)
+            .await
+            .map_err(internal)?;
+        let mut out = Vec::new();
+        // GitHub 的設定不在 `source::rows`（它是特例），另外列出。
+        let github = crate::watcher::github_config(&mut tx)
+            .await
+            .map_err(internal)?;
+        out.push(json!({
+            "id": "github:personal",
+            "name": "GitHub",
+            "kind": "GitHub",
+            "url": github.api_base,
+            "state": { "login": github.login },
+        }));
+        for row in rows {
+            let health = crate::watcher::source::health(&mut tx, &row.id)
+                .await
+                .map_err(internal)?;
+            let state = match row.kind {
+                pots_proto::SourceKind::Rss => crate::watcher::feed::describe(&row, &row.cursor),
+                pots_proto::SourceKind::Probe => crate::watcher::probe::describe(&row, &row.cursor),
+                pots_proto::SourceKind::StatusPage => {
+                    crate::watcher::statuspage::describe(&row, &row.cursor)
+                }
+                pots_proto::SourceKind::Webhook => json!({
+                    "path": crate::watcher::source::webhook_path(&row.id),
+                    "kinds": row.config.observed_kinds,
+                }),
+            };
+            out.push(json!({
+                "id": row.id,
+                "name": row.name,
+                "kind": row.kind.label(),
+                "url": row.config.url,
+                "enabled": row.enabled,
+                "health": match (&health.error, health.since) {
+                    (Some(message), since) => json!({
+                        "state": "error",
+                        "message": message,
+                        "since": since.map(|t| t.0),
+                    }),
+                    (None, _) => json!({
+                        "state": "ok",
+                        "last_ok": health.last_ok.map(|t| t.0),
+                    }),
+                },
+                "state": state,
+            }));
+        }
+        Ok(json!({ "sources": out }).to_string())
     }
 
     async fn get_status(&self) -> Result<String, ToolError> {

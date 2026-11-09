@@ -41,6 +41,8 @@ libc = "0.2"
 rmcp = { version = "3.9", default-features = false, features = ["server", "transport-streamable-http-server", "client", "transport-streamable-http-client-reqwest"] }
 # GitHub REST（輪詢與補漏）；與 pots-llm 用同一個 HTTP client。
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json"] }
+# RSS／Atom 解析（`watcher/feed.rs`）；只收事件的欄位，不做完整的 XML 處理。
+quick-xml = "0.41"
 serde.workspace = true
 serde_json.workspace = true
 # artifact 的版本 diff（proposal/architecture.md#crate-選型）。

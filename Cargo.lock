@@ -5941,6 +5941,7 @@ dependencies = [
  "opentelemetry_sdk",
  "pots-llm",
  "pots-proto",
+ "quick-xml",
  "reqwest",
  "rmcp",
  "serde",

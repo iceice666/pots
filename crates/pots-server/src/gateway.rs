@@ -89,12 +89,23 @@ pub(crate) fn router(app: Arc<App>, guard_state: Arc<Guard>) -> Router {
         .merge(
             Router::new()
                 .route("/webhooks/github", post(github_webhook))
+                .route("/webhooks/source/{id}", post(source_webhook))
                 .with_state(app),
         )
 }
 
 async fn github_webhook(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
     let (status, text) = app.watcher.github_webhook(&headers, &body).await;
+    (status, text).into_response()
+}
+
+async fn source_webhook(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let (status, text) = crate::watcher::source_webhook(&app.watcher, &id, &headers, &body).await;
     (status, text).into_response()
 }
 

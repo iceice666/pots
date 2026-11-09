@@ -37,11 +37,24 @@ pub enum EventKind {
         sha: String,
         conclusion: String,
     },
+    /// RSS／Atom 的新項目。
+    FeedItem,
+    /// HTTP 探測連續失敗（見 `probe.rs` 的防抖）。
+    ProbeFailed,
+    ProbeRecovered,
+    StatusIncidentOpened,
+    StatusIncidentUpdated,
+    StatusIncidentResolved,
+    StatusComponentChanged,
+    /// 通用 webhook 依設定對應出來的自訂種類。
+    Custom {
+        name: String,
+    },
 }
 
 impl EventKind {
     /// listener 與 `WaitCond::Resource` 用的名稱（`pots_proto::EVENT_KINDS`）。
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Self::ChangeOpened => "change.opened",
             Self::ChangeReviewed { .. } => "change.reviewed",
@@ -51,6 +64,14 @@ impl EventKind {
             Self::IssueLabeled { .. } => "issue.labeled",
             Self::IssueCommented => "issue.commented",
             Self::CiFinished { .. } => "ci.finished",
+            Self::FeedItem => "feed.item",
+            Self::ProbeFailed => "probe.failed",
+            Self::ProbeRecovered => "probe.recovered",
+            Self::StatusIncidentOpened => "status.incident.opened",
+            Self::StatusIncidentUpdated => "status.incident.updated",
+            Self::StatusIncidentResolved => "status.incident.resolved",
+            Self::StatusComponentChanged => "status.component.changed",
+            Self::Custom { name } => name,
         }
     }
 }
@@ -58,9 +79,16 @@ impl EventKind {
 /// 某種事件最多可能是哪個信任等級（listener 的預設值依此決定）。
 pub fn kind_trust(name: &str) -> TrustLevel {
     match name {
-        "ci.finished" => TrustLevel::Owned,
-        "issue.labeled" | "change.merged" => TrustLevel::Members,
-        _ => TrustLevel::Public,
+        "ci.finished" | "probe.failed" | "probe.recovered" => TrustLevel::Owned,
+        "issue.labeled"
+        | "change.merged"
+        | "status.incident.opened"
+        | "status.incident.updated"
+        | "status.incident.resolved"
+        | "status.component.changed" => TrustLevel::Members,
+        // 自訂 webhook 種類的實際信任等級看來源設定（`ExternalEvent::trust`）。
+        _ if pots_proto::EVENT_KINDS.iter().any(|(k, _)| *k == name) => TrustLevel::Public,
+        _ => TrustLevel::Members,
     }
 }
 

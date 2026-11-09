@@ -14,7 +14,12 @@
 //! 排程與 listener 的時間都用 [`Clock`]，測試可以撥時間。
 
 pub mod event;
+pub mod feed;
 pub mod github;
+pub mod probe;
+pub mod source;
+pub mod statuspage;
+pub mod webhook;
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -23,7 +28,7 @@ use std::time::Duration;
 use axum::http::{HeaderMap, StatusCode};
 use pots_proto::{
     Card, GithubDraft, GithubView, ItemId, ListenerActionSpec, ProjectId, ServerEvent,
-    SourceHealth, SourceView, Timestamp, TrustLevel,
+    SourceHealth, SourceKind, SourceView, Timestamp, TrustLevel,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -141,6 +146,10 @@ struct After {
 struct Inner {
     hub: Arc<Hub>,
     store: Store,
+    /// 來源 secret 所在的資料目錄（`auth/sources/`）。
+    data_dir: std::path::PathBuf,
+    /// 輪詢 RSS、狀態頁與探測用的 HTTP client。
+    http: reqwest::Client,
     planner: Planner,
     runs: Runs,
     /// 總管對話用的 Runs（`bind_overseer` 設定）；全域排程觸發時用。
@@ -168,10 +177,17 @@ impl Watcher {
         config: WatcherConfig,
     ) -> Self {
         let github = Github::load(data_dir, config.github_api.clone());
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .user_agent(concat!("pots/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("HTTP client");
         Self {
             inner: Arc::new(Inner {
                 hub,
                 store,
+                data_dir: data_dir.to_path_buf(),
+                http,
                 planner,
                 runs,
                 overseer_runs: std::sync::Mutex::new(None),
@@ -196,6 +212,10 @@ impl Watcher {
 
     pub fn github(&self) -> &Github {
         &self.inner.github
+    }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.inner.data_dir
     }
 
     /// 建立來源列並記一筆目前的 GitHub 設定（啟動時呼叫）。
@@ -278,6 +298,87 @@ impl Watcher {
     /// 一輪輪詢。打 API 的部分在關閉時直接放棄；寫入（事件處理、進度與健康狀態）不中斷，
     /// 免得 `LogTxn` 停在一半（記憶體裡的序號會落後資料庫）。
     async fn poll_once(&self) -> Result<(), Error> {
+        self.poll_github_once().await?;
+        self.poll_sources_once().await
+    }
+
+    /// 其他來源（RSS、探測、狀態頁）的一輪輪詢；每個來源照自己的間隔。
+    async fn poll_sources_once(&self) -> Result<(), Error> {
+        let rows = {
+            let mut conn = self.inner.store.acquire().await?;
+            source::rows(&mut conn).await?
+        };
+        for row in rows {
+            if !row.enabled || row.kind == SourceKind::Webhook {
+                continue;
+            }
+            let last = row
+                .cursor
+                .get("last_poll")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            if last != 0 && self.now().0 - last < row.interval().as_secs() as i64 {
+                continue;
+            }
+            let (events, cursor, error) = tokio::select! {
+                () = self.inner.shutdown.cancelled() => return Ok(()),
+                out = self.run_connector(&row) => out,
+            };
+            // 先處理事件再存進度：中途失敗時下一輪會再拿到（處理過的靠去重略過）。
+            let ingested = self.ingest(events).await;
+            let mut txn = self.inner.hub.begin().await?;
+            if ingested {
+                source::set_cursor(txn.conn(), &row.id, &cursor).await?;
+            }
+            if source::record_health(txn.conn(), &row.id, self.now(), error).await? {
+                automation::push(&mut txn, self.now()).await?;
+            }
+            txn.commit().await?;
+        }
+        Ok(())
+    }
+
+    /// 打一個來源，回傳事件、新的進度與錯誤（錯誤只影響健康狀態）。
+    async fn run_connector(
+        &self,
+        row: &source::SourceRow,
+    ) -> (Vec<ExternalEvent>, serde_json::Value, Option<String>) {
+        let (events, cursor, error): (Vec<ExternalEvent>, serde_json::Value, Option<String>) =
+            match row.kind {
+                SourceKind::Rss => {
+                    let cursor = serde_json::from_value(row.cursor.clone()).unwrap_or_default();
+                    let out = feed::poll(&self.inner.http, row, cursor, self.clock()).await;
+                    (
+                        out.events,
+                        serde_json::to_value(&out.cursor).unwrap_or_default(),
+                        out.error,
+                    )
+                }
+                SourceKind::Probe => {
+                    let cursor = serde_json::from_value(row.cursor.clone()).unwrap_or_default();
+                    let out = probe::poll(&self.inner.http, row, cursor, self.clock()).await;
+                    (
+                        out.events,
+                        serde_json::to_value(&out.cursor).unwrap_or_default(),
+                        out.error,
+                    )
+                }
+                SourceKind::StatusPage => {
+                    let cursor = serde_json::from_value(row.cursor.clone()).unwrap_or_default();
+                    let out = statuspage::poll(&self.inner.http, row, cursor, self.clock()).await;
+                    (
+                        out.events,
+                        serde_json::to_value(&out.cursor).unwrap_or_default(),
+                        out.error,
+                    )
+                }
+                // webhook 不輪詢；GitHub 走 `poll_github_once`。
+                SourceKind::Webhook => (vec![], row.cursor.clone(), None),
+            };
+        (events, cursor, error)
+    }
+
+    async fn poll_github_once(&self) -> Result<(), Error> {
         let fetched = tokio::select! {
             () = self.inner.shutdown.cancelled() => return Ok(()),
             f = self.fetch() => f?,
@@ -677,8 +778,13 @@ impl Watcher {
         }
 
         // 2. 還沒有對象的 project 才看 listener。
-        if fresh && let Some(repo) = ev.repo() {
-            let projects = automation::projects_watching(txn.conn(), repo).await?;
+        if fresh {
+            // GitHub 的事件只給監看這個 repo 的 project；其他來源（feed、探測、狀態頁、
+            // 通用 webhook）沒有 repo，就讓所有 project 的 listener 依種類、資源與欄位比對。
+            let projects = match ev.repo() {
+                Some(repo) => automation::projects_watching(txn.conn(), repo).await?,
+                None => all_projects(txn.conn()).await?,
+            };
             let mut fired = false;
             for l in automation::listeners(txn.conn()).await? {
                 if l.state != ListenerDbState::Active
@@ -1453,13 +1559,37 @@ async fn waiting_resources(conn: &mut SqliteConnection) -> Result<Vec<(String, T
 
 /// 自動化頁的來源清單。
 pub async fn source_views(conn: &mut SqliteConnection) -> Result<Vec<SourceView>, Error> {
+    // GitHub 的資料列自己組（設定在 `github_config`），其他來源由 `source::view_of` 組。
     let rows = sqlx::query(
-        "SELECT id, kind, name, trust, ingest, health, enabled FROM sources ORDER BY id",
+        "SELECT id, kind, name, trust, ingest, health, enabled, config, cursor FROM sources ORDER BY id",
     )
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await?;
     let mut out = Vec::new();
     for row in &rows {
+        let kind: String = row.try_get("kind")?;
+        if let Some(parsed) = SourceKind::parse(&kind) {
+            let id: String = row.try_get("id")?;
+            let config: String = row.try_get("config")?;
+            let trust: String = row.try_get("trust")?;
+            let cursor: String = row.try_get("cursor")?;
+            let row = source::SourceRow {
+                id: id.clone(),
+                kind: parsed,
+                name: row.try_get("name")?,
+                config: serde_json::from_str(&config).unwrap_or_default(),
+                trust: match trust.as_str() {
+                    "owned" => TrustLevel::Owned,
+                    "public" => TrustLevel::Public,
+                    _ => TrustLevel::Members,
+                },
+                cursor: serde_json::from_str(&cursor).unwrap_or_default(),
+                enabled: row.try_get::<i64, _>("enabled")? != 0,
+            };
+            let health = source::health(conn, &id).await?;
+            out.push(source::view_of(&row, &health));
+            continue;
+        }
         let health: String = row.try_get("health")?;
         let health: Health = serde_json::from_str(&health).unwrap_or_default();
         let trust: String = row.try_get("trust")?;
@@ -1467,7 +1597,7 @@ pub async fn source_views(conn: &mut SqliteConnection) -> Result<Vec<SourceView>
         let ingest: Vec<Ingest> = serde_json::from_str(&ingest).unwrap_or_default();
         out.push(SourceView {
             id: row.try_get("id")?,
-            kind: match row.try_get::<String, _>("kind")?.as_str() {
+            kind: match kind.as_str() {
                 "github" => "GitHub".into(),
                 k => k.to_string(),
             },
@@ -1496,9 +1626,20 @@ pub async fn source_views(conn: &mut SqliteConnection) -> Result<Vec<SourceView>
             },
             last_ok: health.last_ok,
             enabled: row.try_get::<i64, _>("enabled")? != 0,
+            url: None,
+            kind_id: "github".into(),
+            mapping: Default::default(),
         });
     }
     Ok(out)
+}
+
+/// 所有 project 的 ID（非 GitHub 來源的 listener 比對用）。
+async fn all_projects(conn: &mut SqliteConnection) -> Result<Vec<ProjectId>, Error> {
+    let rows = sqlx::query_scalar::<_, String>("SELECT id FROM projects ORDER BY created_at")
+        .fetch_all(conn)
+        .await?;
+    rows.into_iter().map(parse_id).collect()
 }
 
 /// 設定視窗的 GitHub 設定：儲存後記一筆 `Github`，並馬上輪詢一次。
@@ -1571,4 +1712,76 @@ pub async fn test_github(
         }
     }
     ServerEvent::GithubTest { request, result }
+}
+
+/// `POST /webhooks/source/<id>`：驗簽後把 JSON 依設定對應成事件。
+pub async fn source_webhook(
+    watcher: &Watcher,
+    id: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> (StatusCode, String) {
+    let row = match watcher.inner.store.acquire().await {
+        Ok(mut conn) => match source::row(&mut conn, id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return (StatusCode::NOT_FOUND, "找不到這個來源".into()),
+            Err(e) => {
+                tracing::error!(error = %e, %id, "無法讀取來源");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "伺服器內部錯誤".into());
+            }
+        },
+        Err(e) => {
+            tracing::error!(error = %e, "無法連上資料庫");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "伺服器內部錯誤".into());
+        }
+    };
+    if row.kind != SourceKind::Webhook || !row.enabled {
+        return (StatusCode::NOT_FOUND, "找不到這個來源".into());
+    }
+    let Some(secret) = source::read_secret(&watcher.inner.data_dir, &row.id) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "這個來源沒有 secret，先到自動化頁設定".into(),
+        );
+    };
+    let signature = headers
+        .get("x-pots-signature")
+        .or_else(|| headers.get("x-hub-signature-256"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if signature.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "缺少 X-Pots-Signature".into());
+    }
+    if let Err(e) = webhook::verify(&secret, body, signature) {
+        tracing::warn!(%id, error = %e, "webhook 驗簽失敗");
+        return (StatusCode::UNAUTHORIZED, e);
+    }
+    let ev = match webhook::normalize(&row, body, watcher.now()) {
+        Ok(ev) => ev,
+        Err(e) => return (StatusCode::BAD_REQUEST, e),
+    };
+    let kind = ev.kind.name().to_string();
+    if !watcher.ingest(vec![ev]).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "無法處理事件".into());
+    }
+    // 記下看過的自訂事件種類，listener 表單才列得出來。
+    let recorded: Result<(), Error> = async {
+        let mut txn = watcher.inner.hub.begin().await?;
+        if let Some(mut fresh) = source::row(txn.conn(), &row.id).await?
+            && source::observe_kind(&mut fresh.config, &kind)
+        {
+            sqlx::query("UPDATE sources SET config = ? WHERE id = ?")
+                .bind(serde_json::to_string(&fresh.config)?)
+                .bind(&row.id)
+                .execute(txn.conn())
+                .await?;
+            automation::push(&mut txn, watcher.now()).await?;
+        }
+        txn.commit().await
+    }
+    .await;
+    if let Err(e) = recorded {
+        tracing::warn!(error = %e, %id, "無法記下自訂事件種類");
+    }
+    (StatusCode::ACCEPTED, "ok".into())
 }

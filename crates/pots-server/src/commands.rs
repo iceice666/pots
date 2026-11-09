@@ -189,6 +189,24 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             crate::watcher::save_github(&app.watcher, &app.hub, draft).await
         }
         ClientCommand::TestGithub { .. } => unreachable!("在 handle 處理"),
+        ClientCommand::SaveSource { draft } => save_source(app, draft).await,
+        ClientCommand::DeleteSource { id } => delete_source(app, &id).await,
+        ClientCommand::SetSourceEnabled { id, enabled } => {
+            automation_edit(app, |conn, now| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE sources SET enabled = ?, updated_at = ? WHERE id = ? AND kind != 'github'",
+                    )
+                    .bind(i64::from(enabled))
+                    .bind(now.0)
+                    .bind(&id)
+                    .execute(conn)
+                    .await?;
+                    Ok(Ok(()))
+                })
+            })
+            .await
+        }
         ClientCommand::SetProjectRepos { project, repos } => {
             set_project_repos(app, project, repos).await
         }
@@ -1057,4 +1075,35 @@ async fn send(
     }
     .await;
     inserted.map_err(internal)?
+}
+
+/// 新增或修改一個來源；成功後馬上輪詢一次（新來源的進度是空的）。
+async fn save_source(app: &App, draft: pots_proto::SourceDraft) -> Result<(), String> {
+    let dir = app.watcher.data_dir().to_path_buf();
+    let result = automation_edit(app, |conn, now| {
+        Box::pin(async move {
+            match crate::watcher::source::save(conn, &dir, &draft, now).await {
+                Ok(()) => Ok(Ok(())),
+                Err(e) => Ok(Err(e)),
+            }
+        })
+    })
+    .await;
+    if result.is_ok() {
+        app.watcher.poll_now();
+    }
+    result
+}
+
+async fn delete_source(app: &App, id: &str) -> Result<(), String> {
+    let path = app.watcher.data_dir().to_path_buf();
+    let id = id.to_string();
+    automation_edit(app, |conn, _| {
+        Box::pin(async move {
+            Ok(crate::watcher::source::delete(conn, &path, &id)
+                .await
+                .map_err(internal))
+        })
+    })
+    .await
 }
