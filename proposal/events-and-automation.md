@@ -230,3 +230,17 @@ pub struct Listener {
 
 - 白名單寄件者寄來的特定主旨郵件 → NotifyChat，由對話 agent 讀信後建議要不要開 Goal。
 
+
+### M6b 的實作
+
+M6b 的 connector 依上面的設計實作在 `crates/pots-server/src/watcher/`：通用來源層是 `source.rs`（資料列、秘密檔、健康狀態），各 connector 是 `feed.rs`（RSS／Atom）、`probe.rs`、`statuspage.rs` 與 `webhook.rs`，輪詢與 webhook 入口在 `mod.rs`；協定 v10，桌面版的自動化頁可以新增、修改、啟停與刪除來源。GitLab 與 IMAP 郵件還沒做（見下面）。
+
+- **來源資料列。** 非 GitHub 的來源共用 `sources`：`config` 放非秘密設定（URL、間隔、webhook 的欄位對應與看過的自訂種類），`cursor` 放各 connector 的輪詢進度，`health` 放最近一次的成功與錯誤。secret 存在資料目錄的 `auth/sources/<hex(id)>.json`（`0600`，原子寫入），客戶端看不到。來源 id 只能用小寫英文、數字與 `-`、`_`、`.`、`:`，`github:` 開頭保留給 GitHub。輪詢間隔夾在 30 到 3600 秒，Webhook 不輪詢。
+- **RSS／Atom。** 每 `interval_secs` 拉一次，帶 `If-None-Match`／`If-Modified-Since`，`304` 不算失敗。第一次輪詢只記下看過的項目（最多 500 筆），之後每個新項目發一則 `feed.item`，資源鍵是 `feed:<source>:<entry id>`，`dedupe_key` 相同；沒有 guid／id 的項目用標題與時間算一個穩定的雜湊。標題放進摘要（平台產生的部分只有「哪個 feed、第幾則」），內文放進不可信的 `body`。信任等級預設 Public。
+- **HTTP 探測。** 定時 GET，2xx／3xx 算正常。連續 3 次失敗才發 `probe.failed`，連續 2 次成功才發 `probe.recovered`；次數存在 `cursor`，重啟後接續，不會重設。這兩種事件的信任等級固定是 Owned（自己的探測結果）。目前只看狀態碼，沒有延遲門檻；失敗時把最後的錯誤字串寫進健康狀態。
+- **狀態頁。** 先試 statuspage.io 的 `summary.json`：incident 初次出現發 `status.incident.opened`、狀態或 `updated_at` 改變發 `status.incident.updated`、變成 resolved／completed／postmortem 發 `status.incident.resolved`；同一個 incident 五分鐘內的多次更新合併成一則（解決一定發）。元件狀態變化發 `status.component.changed`。第一次輪詢只記現況，不把舊 incident 倒出來。不是 JSON 時改用 RSS／Atom：新項目當 incident，標題或內容有 resolved／completed／已解決／恢復正常時當成解決（盡力而為）。
+- **通用 webhook。** 每個來源一個 `POST /webhooks/source/<id>`，不經本機 token 與 `Host` 檢查（和 GitHub webhook 一樣），用來源的 secret 驗 `X-Pots-Signature: sha256=<hex>`（也接受 `X-Hub-Signature-256`）。設定的 JSON pointer 取出種類、資源鍵、摘要、去重與內文；沒有去重欄位時用整個 body 的雜湊。種類至少兩段（例如 `alert.triggered`），第一次看到時記進來源的設定，listener 表單才列得出來。來源預設信任等級是 Members，可以在表單改成 Public（Public 的事件要有作者白名單才能自動開工，webhook 沒有作者欄位，所以只會通知對話）。
+- **路由。** 非 GitHub 的事件沒有 repo：等待中的任務與 listener 開的 Goal 照 `resource_key` 比對；listener 則對所有 project 比對種類、資源 glob 與欄位，所以這類 listener 最好設定資源條件（例如 `feed:rss:notes*`），不然每個 project 的 listener 都會收到。事件種類、欄位與信任等級的規則和 GitHub 相同。
+- **健康狀態與工具。** 每個來源有自己的健康狀態：第一次成功、第一次失敗與恢復都會推一筆 `Automation`，自動化頁顯示「正常（時間）」或「異常（起）：訊息」。對話 agent、Planner 與總管多了 `get_source_status`，可以看所有來源的進度（RSS 看過幾則、探測目前是否正常、狀態頁有幾個未解決 incident、webhook 看過哪些種類）。GitHub 的異常通知照舊貼在監看 repo 的 project 對話；其他來源目前只在自動化頁顯示，不推播。
+- **還沒做。** GitLab（MR／issue／pipeline 與 `X-Gitlab-Token`）、IMAP 郵件（IDLE、`search_mail`／`read_mail`）、第三方監測服務；探測的延遲門檻與 `get_source_status` 以外的唯讀工具。通用 webhook 需要公開網址或 tunnel，桌面版沒有公開網址時收不到。
+- **驗證。** `tests/connectors.rs` 以假的 HTTP 上游與手動時鐘驗證：RSS 第一次輪詢只記快照、之後新項目觸發 listener、同一則不重複、feed 壞掉時來源變異常；探測連續 3 次失敗才發、連續 2 次成功才恢復；狀態頁的 incident 更新合併、元件變化與解決；通用 webhook 驗簽失敗拒絕、簽章正確才收、去重與自訂種類出現在 listener 選項。桌面版的來源表單以截圖流程檢查；對真的 feed、狀態頁與 webhook 待使用者手動驗證。
