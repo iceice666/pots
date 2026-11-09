@@ -10,6 +10,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::provider::{
     Item, LlmError, ModelProvider, ModelRequest, StreamEvent, ToolCall, ToolSpec, Usage,
@@ -168,8 +169,10 @@ pub async fn run(
             input: state.history.clone(),
             tools: specs.clone(),
         };
-        let (items, usage) =
-            stream_turn(config.provider.as_ref(), request, &state.events, &cancel).await?;
+        let turn_span = tracing::info_span!("model.turn", turn, model = %config.model);
+        let (items, usage) = stream_turn(config.provider.as_ref(), request, &state.events, &cancel)
+            .instrument(turn_span)
+            .await?;
         state.usage += usage;
         config.hook.after_turn(turn, usage).await;
         let calls: Vec<ToolCall> = items
@@ -313,6 +316,7 @@ impl From<LlmError> for Cancelled {
 }
 
 /// 處理單一工具呼叫，回傳（要送回模型的結果，是否結束本輪）。只會因取消而失敗。
+#[tracing::instrument(name = "tool.call", skip_all, fields(tool = %call.name))]
 async fn handle_call(
     config: &RunConfig,
     tools: &HashMap<String, Arc<dyn Tool>>,

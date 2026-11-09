@@ -674,13 +674,74 @@ impl Store {
         Ok(())
     }
 
-    /// 記下 run 用的模型（「為什麼」面板）。
-    pub async fn set_run_model(store: &Store, id: Uuid, model: &str) -> Result<(), Error> {
-        sqlx::query("UPDATE agent_runs SET model = ? WHERE id = ?")
-            .bind(model)
+    /// 記下 run 用的模型與成本維度（「為什麼」面板與成本報表）。
+    pub async fn set_run_meta(
+        store: &Store,
+        id: Uuid,
+        meta: &crate::budget::RunMeta,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "UPDATE agent_runs SET model = ?, provider = ?, billing = ?, pricing_provider = ?, \
+             runtime = ? WHERE id = ?",
+        )
+        .bind(&meta.model)
+        .bind(&meta.provider)
+        .bind(&meta.billing)
+        .bind(&meta.pricing_provider)
+        .bind(&meta.runtime)
+        .bind(id.to_string())
+        .execute(&store.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 加上 CLI 回報的費用（同一個 run 可能重試多次，累加）。
+    pub async fn add_run_cost(
+        conn: &mut SqliteConnection,
+        id: Uuid,
+        cost: f64,
+    ) -> Result<(), Error> {
+        if !cost.is_finite() || cost < 0.0 {
+            return Ok(());
+        }
+        sqlx::query("UPDATE agent_runs SET cost_usd = COALESCE(cost_usd, 0) + ? WHERE id = ?")
+            .bind(cost)
             .bind(id.to_string())
-            .execute(&store.pool)
+            .execute(conn)
             .await?;
+        Ok(())
+    }
+
+    /// Observer／Reflector 的一次呼叫：寫成一列已結束的 run，成本報表才能分開算 OM 開銷。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn record_om_run(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        agent: &str,
+        route: &crate::providers::Route,
+        usage: pots_llm::provider::Usage,
+        started: Timestamp,
+        finished: Timestamp,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "INSERT INTO agent_runs (id, project_id, agent, trigger, state, started_at, finished_at, \
+             model, provider, billing, pricing_provider, runtime, input_tokens, output_tokens) \
+             VALUES (?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?, 'builtin', ?, ?)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(project.to_string())
+        .bind(agent)
+        .bind(r#"{"kind":"om"}"#)
+        .bind(started.0)
+        .bind(finished.0)
+        .bind(&route.model)
+        .bind(&route.label)
+        .bind(route.billing)
+        .bind(&route.pricing_provider)
+        .bind(usage.input_tokens as i64)
+        .bind(usage.output_tokens as i64)
+        .execute(conn)
+        .await?;
         Ok(())
     }
 

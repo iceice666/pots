@@ -374,6 +374,11 @@ impl Reply {
 }
 
 /// chat profile 的 run：歷史是 Observational Memory 的記憶區塊加上未觀察的原始尾巴。
+#[tracing::instrument(
+    name = "agent.run",
+    skip_all,
+    fields(agent = "chat", project = %project, run = tracing::field::Empty, model = tracing::field::Empty)
+)]
 async fn run_chat(
     inner: &Arc<Inner>,
     project: ProjectId,
@@ -385,6 +390,7 @@ async fn run_chat(
         return Err(Error::Corrupt(format!("找不到 project {project}")));
     };
     let run_id = Uuid::now_v7();
+    tracing::Span::current().record("run", tracing::field::display(run_id));
     let mut reply = Reply {
         project,
         id: ItemId::new(),
@@ -623,6 +629,7 @@ async fn drive_loop(
         .await
         .map_err(RunError::Server)?;
     let history = close_dangling_calls(history);
+    tracing::Span::current().record("model", tracing::field::display(&route.model));
 
     let profile = &inner.profile;
     let (head, tail) = {
@@ -708,7 +715,7 @@ async fn drive_loop(
         project.id,
         None,
         None,
-        route.model.clone(),
+        route.meta("builtin"),
     )
     .await
     .map_err(RunError::Server)?;

@@ -628,6 +628,11 @@ impl Sync {
                     }
                 }
             }
+            ServerEvent::GoalArchived { project, goal, .. } => {
+                if let Some(p) = store.project_mut(instance, project) {
+                    p.goals.retain(|g| g.id != goal);
+                }
+            }
             ServerEvent::ApprovalChanged { approval, .. } => {
                 let a = *approval;
                 let (project, title, reason, id) =
@@ -711,6 +716,8 @@ impl Sync {
                 out.github_test = Some((request, result));
             }
             ServerEvent::Why { why } => out.why = why,
+            // 成本報表與單價表是設定視窗的面板，桌面版下一輪才顯示；先不影響連線狀態。
+            ServerEvent::CostReport { .. } | ServerEvent::Pricing { .. } => {}
             ServerEvent::Error { message } => out.toast = Some(message),
             // 任務的變化隨 `GoalChanged` 整個 Goal 送來。
             ServerEvent::TaskChanged { .. } => {}

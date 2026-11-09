@@ -74,17 +74,103 @@ pub fn run_blocking(data_dir: &Path) -> Result<(), Error> {
     let model = std::env::var("POTS_CHAT_MODEL")
         .ok()
         .filter(|m| !m.trim().is_empty());
-    runtime.block_on(run(Config::desktop(data_dir), model))
+    let result = runtime.block_on(run(Config::desktop(data_dir), model));
+    shutdown_tracing();
+    result
 }
 
 /// 日誌寫到 stderr（桌面 app 把它導到資料目錄的 `server.log`）。`RUST_LOG` 可調整等級。
+///
+/// 設定 `OTEL_EXPORTER_OTLP_ENDPOINT`（或 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`）時，
+/// 另外把 span 以 OTLP/HTTP 送到收集器；服務名稱預設 `pots`，可用 `OTEL_SERVICE_NAME`
+/// 覆寫。沒有設定時只寫 stderr，和平常一樣。`shutdown_tracing` 會把佇列中的 span 送完。
 pub fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    // 只初始化一次；重複呼叫（例如測試）不會換掉全域 subscriber。
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if ONCE.set(()).is_err() {
+        return;
+    }
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    if !otlp_configured() {
+        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        return;
+    }
+    match otlp_layer() {
+        Ok(provider) => {
+            use opentelemetry::trace::TracerProvider as _;
+            use tracing_subscriber::layer::SubscriberExt as _;
+            use tracing_subscriber::util::SubscriberInitExt as _;
+            let tracer = provider.tracer("pots");
+            let layer = tracing_opentelemetry::layer().with_tracer(tracer);
+            let fmt = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+            let init = tracing_subscriber::registry()
+                .with(filter)
+                .with(fmt)
+                .with(layer)
+                .try_init();
+            if init.is_err() {
+                let _ = provider.shutdown();
+                return;
+            }
+            *tracer_provider()
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+                .unwrap() = Some(provider);
+        }
+        Err(e) => {
+            eprintln!("OpenTelemetry 初始化失敗，只寫 stderr：{e}");
+            let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        }
+    }
+}
+
+/// 把尚未送出的 span 送完。程式結束前呼叫；沒有啟用 OpenTelemetry 時什麼都不做。
+pub fn shutdown_tracing() {
+    if let Some(provider) = tracer_provider().get()
+        && let Some(provider) = provider.lock().unwrap().take()
+    {
+        let _ = provider.shutdown();
+    }
+}
+
+fn tracer_provider() -> &'static std::sync::OnceLock<
+    std::sync::Mutex<Option<opentelemetry_sdk::trace::SdkTracerProvider>>,
+> {
+    static PROVIDER: std::sync::OnceLock<
+        std::sync::Mutex<Option<opentelemetry_sdk::trace::SdkTracerProvider>>,
+    > = std::sync::OnceLock::new();
+    &PROVIDER
+}
+
+fn otlp_configured() -> bool {
+    [
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ]
+    .iter()
+    .any(|key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()))
+}
+
+/// 建立 OTLP/HTTP 的 tracer provider；端點、標頭與時限都照 OpenTelemetry 的環境變數。
+fn otlp_layer() -> Result<opentelemetry_sdk::trace::SdkTracerProvider, String> {
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let service = std::env::var("OTEL_SERVICE_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "pots".into());
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name(service)
+                .build(),
         )
-        .try_init();
+        .build();
+    Ok(provider)
 }
 
 // ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ use uuid::Uuid;
 ///   `TeamPost::to`、`GoalView::quick`、快照帶 worker 設定）。
 /// - 7：核准與通知（`ApprovalChanged` 取代 `Inbox`、`Decide` 生效、`Notifications`、`UserMd`、
 ///   `ProjectMergeMethod` 與對應的指令，快照帶核准、通知設定、USER.md 與 project 的 merge 方式）。
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 macro_rules! id_type {
     ($($name:ident),* $(,)?) => {$(
@@ -1424,6 +1424,122 @@ pub struct TraceStepView {
     pub detail: String,
 }
 
+/// 成本報表的分類：主要工作或 Observational Memory 的開銷。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CostCategory {
+    Work,
+    Om,
+}
+
+impl CostCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Work => "主要工作",
+            Self::Om => "記憶整理",
+        }
+    }
+}
+
+/// 費用屬於哪一種帳：訂閱用量、API 金額或 CLI 回報的估計。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Billing {
+    Subscription,
+    Api,
+    Cli,
+    /// 舊的 run 沒有記錄 provider。
+    Unknown,
+}
+
+impl Billing {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Subscription => "訂閱",
+            Self::Api => "API",
+            Self::Cli => "CLI",
+            Self::Unknown => "未知",
+        }
+    }
+}
+
+/// 成本報表的一列：同一個 project、Goal、agent、provider／runtime 與模型的彙總。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CostRow {
+    pub project: ProjectId,
+    pub project_name: String,
+    pub goal: Option<GoalId>,
+    pub goal_title: Option<String>,
+    /// `chat`、`planner`、`worker`、`observer`、`reflector` 等。
+    pub agent: String,
+    pub category: CostCategory,
+    pub provider: String,
+    pub billing: Billing,
+    pub runtime: String,
+    pub model: String,
+    pub runs: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// 已結束的 run 是實際時間；還在跑的是到報表產生為止。
+    pub duration_secs: u64,
+    /// CLI 回報的費用（Claude Code 的 `total_cost_usd`）；不是帳單。
+    pub reported_cost_usd: Option<f64>,
+    /// 依單價表算出的估計金額；沒有單價或訂閱用量時是 `None`。
+    pub estimated_cost_usd: Option<f64>,
+    /// 有單價可算的 token 數與沒有單價的 token 數。
+    pub priced_tokens: u64,
+    pub unpriced_tokens: u64,
+}
+
+/// 成本報表的總計。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CostTotals {
+    pub runs: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub duration_secs: u64,
+    pub reported_cost_usd: f64,
+    pub estimated_cost_usd: f64,
+    pub priced_tokens: u64,
+    pub unpriced_tokens: u64,
+    /// 依計費方式分開的 token（訂閱用量與 API 金額分帳）。
+    pub subscription_tokens: u64,
+    pub api_tokens: u64,
+    pub cli_tokens: u64,
+    /// OM 與主要工作分開。
+    pub om_tokens: u64,
+    pub work_tokens: u64,
+}
+
+/// 單價表的摘要（明細用 `SetPrice`／`DeletePrice` 維護）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PricingInfo {
+    /// `models.dev` 或 `manual`；空表示還沒有任何單價。
+    pub source: String,
+    pub models: u64,
+    pub updated_at: Option<Timestamp>,
+}
+
+/// 一筆單價：每 100 萬 token 的美元單價。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelPrice {
+    /// models.dev 的 provider 鍵，例如 `openai`、`anthropic`；`*` 是所有 provider 的後備值。
+    pub provider: String,
+    pub model: String,
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+    pub cache_read_per_mtok: Option<f64>,
+}
+
+/// 成本報表。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CostReport {
+    pub since: Timestamp,
+    pub until: Timestamp,
+    pub generated_at: Timestamp,
+    pub rows: Vec<CostRow>,
+    pub totals: CostTotals,
+    pub pricing: PricingInfo,
+}
+
 /// 一則 agent 訊息為什麼這樣回答。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WhyView {
@@ -1771,6 +1887,14 @@ pub enum ServerEvent {
     Why {
         why: Option<WhyView>,
     },
+    /// 成本報表；只回給問的連線，不記日誌。
+    CostReport {
+        report: CostReport,
+    },
+    /// 單價表的摘要；只回給問的連線，不記日誌。
+    Pricing {
+        info: PricingInfo,
+    },
     AgentState {
         seq: u64,
         project: ProjectId,
@@ -1821,6 +1945,12 @@ pub enum ServerEvent {
         seq: u64,
         project: ProjectId,
         goal: GoalView,
+    },
+    /// Goal 被封存：從 project 列表移除；成本報表仍算得到。
+    GoalArchived {
+        seq: u64,
+        project: ProjectId,
+        goal: GoalId,
     },
     /// Artifact 新增或有變，整筆替換。
     ArtifactChanged {
@@ -1894,6 +2024,7 @@ impl ServerEvent {
             | Self::Providers { seq, .. }
             | Self::Memory { seq, .. }
             | Self::GoalChanged { seq, .. }
+            | Self::GoalArchived { seq, .. }
             | Self::ArtifactChanged { seq, .. }
             | Self::Automation { seq, .. }
             | Self::Github { seq, .. }
@@ -1906,6 +2037,8 @@ impl ServerEvent {
             | Self::LoginUrl { .. }
             | Self::ProviderTest { .. }
             | Self::Why { .. }
+            | Self::CostReport { .. }
+            | Self::Pricing { .. }
             | Self::Error { .. } => None,
         }
     }
@@ -1947,6 +2080,25 @@ pub enum ClientCommand {
     Why {
         item: ItemId,
     },
+    /// 成本報表：依 project、Goal、agent、provider／runtime 彙總；`project` 不給就是全部。
+    CostReport {
+        project: Option<ProjectId>,
+        since: Option<Timestamp>,
+        until: Option<Timestamp>,
+    },
+    /// 新增或覆寫一筆單價。
+    SetPrice {
+        price: ModelPrice,
+    },
+    /// 刪除一筆單價。
+    DeletePrice {
+        provider: String,
+        model: String,
+    },
+    /// 從 models.dev 重新抓單價表（不快取整份 JSON，只留模型的價錢）。
+    RefreshPricing,
+    /// 單價表的摘要。
+    Pricing,
     /// 核准或拒絕（可以附一句理由，拒絕的理由會帶給 agent）。伺服器回 `ApprovalChanged`；
     /// 已經決定過、逾時時回 `Error`。
     Decide {

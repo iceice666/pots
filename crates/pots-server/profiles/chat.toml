@@ -5,7 +5,7 @@ name = "chat"
 memory = "om"
 max_turns = 8
 # 唯讀基礎集（get_status、list_goals、read_artifact）一律都有，這裡只列額外授權的工具。
-tools = ["create_goal", "steer_goal", "cancel_goal", "quick_fix", "write_artifact", "schedule", "create_listener", "run_subagent", "propose_user_md_edit", "propose_project_note"]
+tools = ["create_goal", "steer_goal", "cancel_goal", "archive_goal", "quick_fix", "write_artifact", "schedule", "create_listener", "run_subagent", "propose_user_md_edit", "propose_project_note"]
 # write_artifact 可以寫的種類。
 artifact_kinds = ["Spec"]
 role_prompt = """

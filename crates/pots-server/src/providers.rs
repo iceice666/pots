@@ -374,6 +374,56 @@ pub(crate) struct Route {
     pub id: ProviderId,
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
+    /// 成本報表顯示的 provider 名稱，例如「ChatGPT」「OpenAI」。
+    pub label: String,
+    /// `subscription`、`api` 或 `cli`。
+    pub billing: &'static str,
+    /// models.dev 的 provider 鍵（單價表用）。
+    pub pricing_provider: String,
+}
+
+impl Route {
+    /// 記進 `agent_runs` 的用量與成本維度。
+    pub fn meta(&self, runtime: &str) -> crate::budget::RunMeta {
+        crate::budget::RunMeta {
+            model: self.model.clone(),
+            provider: self.label.clone(),
+            billing: self.billing.into(),
+            pricing_provider: self.pricing_provider.clone(),
+            runtime: runtime.into(),
+        }
+    }
+}
+
+/// 依 base URL 猜 models.dev 的 provider 鍵；不認得時用 API 種類的預設值。
+/// 單價只是估計，使用者可以在單價表覆寫。
+fn pricing_provider(kind: ProviderKind, base_url: &str) -> String {
+    let host = Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase));
+    let known = match host.as_deref() {
+        Some("api.openai.com") => Some("openai"),
+        Some("api.anthropic.com") => Some("anthropic"),
+        Some("openrouter.ai") => Some("openrouter"),
+        Some("api.deepseek.com") => Some("deepseek"),
+        Some("generativelanguage.googleapis.com") => Some("google"),
+        Some("api.mistral.ai") => Some("mistral"),
+        Some("api.x.ai") => Some("xai"),
+        Some("api.groq.com") => Some("groq"),
+        Some("api.together.xyz") => Some("togetherai"),
+        Some("api.fireworks.ai") => Some("fireworks-ai"),
+        Some("api.cerebras.ai") => Some("cerebras"),
+        Some("api.cohere.com") => Some("cohere"),
+        Some("api.perplexity.ai") => Some("perplexity"),
+        Some("api.minimax.io") => Some("minimax"),
+        Some("api.z.ai") => Some("zai"),
+        _ => None,
+    };
+    known.map(str::to_string).unwrap_or_else(|| match kind {
+        ProviderKind::OpenAiCompatible => "openai".into(),
+        ProviderKind::AnthropicCompatible => "anthropic".into(),
+        ProviderKind::ChatGpt => "chatgpt".into(),
+    })
 }
 
 /// 依使用中的 provider 決定 run 的 [`Route`]。
@@ -435,6 +485,9 @@ impl ProviderRouter {
                 id,
                 provider: self.chatgpt.clone(),
                 model,
+                label: "ChatGPT".into(),
+                billing: "subscription",
+                pricing_provider: "chatgpt".into(),
             });
         }
         let entry = state.entry(id).ok_or(LlmError::NotConfigured)?;
@@ -446,10 +499,14 @@ impl ProviderRouter {
         if model.is_empty() {
             return Err(LlmError::Unsupported("請在設定選擇模型".into()));
         }
+        let pricing_provider = pricing_provider(entry.row.kind, &entry.row.base_url);
         Ok(Route {
             id,
             provider: entry.built.clone()?,
             model,
+            label: entry.row.name.clone(),
+            billing: "api",
+            pricing_provider,
         })
     }
 }

@@ -30,6 +30,19 @@ pub(crate) async fn handle(app: &App, text: &str, reply: &mpsc::Sender<ServerEve
             });
             return;
         }
+        Ok(ClientCommand::RefreshPricing) => {
+            // 抓 models.dev 要幾秒，另開 task，不擋住這條連線之後的指令。
+            let store = app.store.clone();
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let ev = match crate::cost::refresh_pricing(&store).await {
+                    Ok(info) => ServerEvent::Pricing { info },
+                    Err(message) => ServerEvent::Error { message },
+                };
+                let _ = reply.send(ev).await;
+            });
+            return;
+        }
         Ok(ClientCommand::TestGithub { request, draft }) => {
             let watcher = app.watcher.clone();
             let hub = app.hub.clone();
@@ -69,6 +82,23 @@ async fn run(app: &App, cmd: ClientCommand) -> Result<Option<ServerEvent>, Strin
     if let ClientCommand::Why { item } = cmd {
         return why(app, item).await.map(Some);
     }
+    if let ClientCommand::CostReport {
+        project,
+        since,
+        until,
+    } = cmd
+    {
+        return cost_report(app, project, since, until).await.map(Some);
+    }
+    if let ClientCommand::Pricing = cmd {
+        return pricing(app).await.map(Some);
+    }
+    if let ClientCommand::SetPrice { price } = cmd {
+        return set_price(app, price).await.map(Some);
+    }
+    if let ClientCommand::DeletePrice { provider, model } = cmd {
+        return delete_price(app, provider, model).await.map(Some);
+    }
     run_logged(app, cmd).await.map(|()| None)
 }
 
@@ -76,6 +106,11 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
     match cmd {
         ClientCommand::Resume { .. } => Err("這條連線已經 Resume 過".into()),
         ClientCommand::Why { .. } => Err("這個指令要直接回覆".into()),
+        ClientCommand::CostReport { .. }
+        | ClientCommand::Pricing
+        | ClientCommand::SetPrice { .. }
+        | ClientCommand::DeletePrice { .. }
+        | ClientCommand::RefreshPricing => Err("這個指令要直接回覆".into()),
         ClientCommand::CreateProject { name } => create_project(app, name).await,
         ClientCommand::Send {
             project,
@@ -649,6 +684,55 @@ async fn send_overseer(app: &App, id: ItemId, text: String) -> Result<(), String
     }
     .await;
     inserted.map_err(internal)?
+}
+
+/// 成本報表；只回給問的連線。
+async fn cost_report(
+    app: &App,
+    project: Option<ProjectId>,
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+) -> Result<ServerEvent, String> {
+    let now = Timestamp::now();
+    let until = until.unwrap_or(now);
+    let since = since.unwrap_or(Timestamp(until.0 - crate::cost::DEFAULT_REPORT_SECS));
+    if since.0 >= until.0 {
+        return Err("報表的開始時間要早於結束時間".into());
+    }
+    if until.0.saturating_sub(since.0) > 366 * 24 * 3600 {
+        return Err("報表區間最多一年".into());
+    }
+    if let Some(project) = project
+        && app
+            .store
+            .project(project)
+            .await
+            .map_err(internal)?
+            .is_none()
+    {
+        return Err("找不到這個 project".into());
+    }
+    let report = crate::cost::report(&app.store, project, since, until)
+        .await
+        .map_err(internal)?;
+    Ok(ServerEvent::CostReport { report })
+}
+
+async fn pricing(app: &App) -> Result<ServerEvent, String> {
+    let info = crate::cost::pricing_info(&app.store)
+        .await
+        .map_err(internal)?;
+    Ok(ServerEvent::Pricing { info })
+}
+
+async fn set_price(app: &App, price: pots_proto::ModelPrice) -> Result<ServerEvent, String> {
+    crate::cost::set_price(&app.store, &price).await?;
+    pricing(app).await
+}
+
+async fn delete_price(app: &App, provider: String, model: String) -> Result<ServerEvent, String> {
+    crate::cost::delete_price(&app.store, &provider, &model).await?;
+    pricing(app).await
 }
 
 /// 一則 agent 訊息為什麼這樣回答：觸發來源、當下的記憶版本、模型與工具順序。

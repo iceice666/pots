@@ -14,6 +14,7 @@ use pots_llm::agent::{self, RunConfig, ToolError};
 use pots_llm::{Item, LlmError};
 use pots_proto::Timestamp;
 use tokio::sync::Notify;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::code::{self, CodeAccess};
@@ -71,7 +72,8 @@ pub async fn run(
                 let ctx = ctx.clone();
                 let profile = profile.clone();
                 let provider = route.provider.clone();
-                let model = route.model.clone();
+                let meta = route.meta("builtin");
+                let model_name = meta.model.clone();
                 async move {
                     let run_id = Uuid::now_v7();
                     let budget = match crate::budget::for_run(
@@ -85,7 +87,7 @@ pub async fn run(
                             Scope::Task { task, .. } => Some(task),
                             _ => None,
                         },
-                        model.clone(),
+                        meta,
                     )
                     .await
                     {
@@ -125,10 +127,9 @@ pub async fn run(
                         None => instructions
                             .push_str("\n\n這次沒有可以讀的程式碼，只能用平台狀態的工具。"),
                     }
-                    let model_name = model.clone();
                     let config = RunConfig {
                         provider,
-                        model,
+                        model: model_name.clone(),
                         instructions: Some(instructions),
                         tools: crate::tools::build(&profile, sub.clone()),
                         hook: Arc::new(sub.gate()),
@@ -141,6 +142,14 @@ pub async fn run(
                     }
                     let (events, rx) = tokio::sync::mpsc::unbounded_channel();
                     drop(rx);
+                    let span = tracing::info_span!(
+                        "agent.run",
+                        agent = %profile.name,
+                        project = %ctx.project,
+                        run = %run_id,
+                        parent = %ctx.run_id,
+                        model = %model_name,
+                    );
                     let result = agent::run(
                         &config,
                         vec![Item::User {
@@ -149,6 +158,7 @@ pub async fn run(
                         events,
                         sub.cancel.clone(),
                     )
+                    .instrument(span)
                     .await;
                     let (state, error, text) = match result {
                         Ok(r) => {

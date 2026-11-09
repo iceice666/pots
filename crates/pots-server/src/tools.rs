@@ -408,6 +408,11 @@ impl Tool for PlatformTool {
                     &["goal_id", "reason"],
                 ),
             ),
+            Kind::Granted(ToolName::ArchiveGoal) => (
+                "archive_goal",
+                "封存一個已結束的 Goal（已完成或已取消）：從 project 列表與快照移除，歷史與成本報表仍保留。",
+                object(json!({"goal_id": {"type": "string"}}), &["goal_id"]),
+            ),
             Kind::Granted(ToolName::WriteArtifact) => {
                 let kinds: Vec<&str> = self
                     .ctx
@@ -657,6 +662,7 @@ impl PlatformTool {
             Kind::Granted(ToolName::CreateGoal) => self.create_goal(parse(arguments)?).await,
             Kind::Granted(ToolName::SteerGoal) => self.steer_goal(parse(arguments)?).await,
             Kind::Granted(ToolName::CancelGoal) => self.cancel_goal(parse(arguments)?).await,
+            Kind::Granted(ToolName::ArchiveGoal) => self.archive_goal(parse(arguments)?).await,
             Kind::Granted(ToolName::WriteArtifact) => self.write_artifact(parse(arguments)?).await,
             Kind::Granted(ToolName::CreateTask) => self.create_task(parse(arguments)?).await,
             Kind::Granted(ToolName::CancelTask) => self.cancel_task(parse(arguments)?).await,
@@ -756,6 +762,12 @@ struct SteerGoalArgs {
 struct CancelGoalArgs {
     goal_id: String,
     reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveGoalArgs {
+    goal_id: String,
 }
 
 #[derive(Deserialize)]
@@ -1218,6 +1230,44 @@ impl PlatformTool {
         Ok(json!({"cancelled": g.id.to_string(), "tasks_cancelled": cancelled}).to_string())
     }
 
+    async fn archive_goal(&self, args: ArchiveGoalArgs) -> Result<String, ToolError> {
+        let ctx = &self.ctx;
+        if !matches!(ctx.scope, Scope::Project | Scope::Global) {
+            return Err(bad("只有對話 agent 或總管可以封存 Goal"));
+        }
+        let goal: GoalId = parse_id("goal_id", &args.goal_id)?;
+        let mut txn = ctx.hub.begin().await.map_err(internal)?;
+        let g = tasks::goal(txn.conn(), goal)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| bad(format!("找不到 Goal {goal}")))?;
+        if ctx.scope != Scope::Global && g.project != ctx.project {
+            return Err(bad("只能封存這個 project 的 Goal"));
+        }
+        if g.state.is_active() {
+            return Err(bad("只能封存已結束的 Goal；先完成或取消它"));
+        }
+        if g.archived_at.is_some() {
+            return Ok(json!({
+                "archived": goal.to_string(),
+                "note": "這個 Goal 已經封存了。",
+            })
+            .to_string());
+        }
+        tasks::set_goal_archived(txn.conn(), goal, ctx.clock.now())
+            .await
+            .map_err(internal)?;
+        txn.push(|seq| ServerEvent::GoalArchived {
+            seq,
+            project: g.project,
+            goal,
+        })
+        .await
+        .map_err(internal)?;
+        txn.commit().await.map_err(internal)?;
+        Ok(json!({"archived": goal.to_string()}).to_string())
+    }
+
     async fn write_artifact(&self, args: WriteArtifactArgs) -> Result<String, ToolError> {
         let ctx = &self.ctx;
         let mut txn = ctx.hub.begin().await.map_err(internal)?;
@@ -1619,6 +1669,7 @@ pub(crate) async fn open_goal_with_brief(
         state: GoalState::Active,
         planner_note: "等待 Planner…".into(),
         created_at: Timestamp::now(),
+        archived_at: None,
     };
     let brief = ArtifactRow {
         id: ArtifactId::new(),

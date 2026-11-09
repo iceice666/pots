@@ -15,6 +15,7 @@ mod automation;
 mod budget;
 mod commands;
 pub mod config;
+pub mod cost;
 mod datadir;
 mod gateway;
 mod hub;

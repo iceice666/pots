@@ -67,7 +67,7 @@ async fn main() -> ExitCode {
         .ok()
         .filter(|m| !m.trim().is_empty());
     let config = Config::desktop(&args.data_dir).with_port(args.port);
-    match pots_server::service::run(config, model).await {
+    let code = match pots_server::service::run(config, model).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(Error::AlreadyRunning(info)) => {
             match info {
@@ -83,5 +83,7 @@ async fn main() -> ExitCode {
             eprintln!("Pots 服務失敗：{e}");
             ExitCode::FAILURE
         }
-    }
+    };
+    pots_server::service::shutdown_tracing();
+    code
 }

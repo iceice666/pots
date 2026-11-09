@@ -29,6 +29,8 @@ pub enum ToolName {
     CreateGoal,
     SteerGoal,
     CancelGoal,
+    /// 封存一個已結束的 Goal（從 project 列表與快照移除，資料仍留著）。
+    ArchiveGoal,
     WriteArtifact,
     CreateTask,
     CancelTask,
@@ -69,6 +71,7 @@ impl ToolName {
             Self::CreateGoal => "create_goal",
             Self::SteerGoal => "steer_goal",
             Self::CancelGoal => "cancel_goal",
+            Self::ArchiveGoal => "archive_goal",
             Self::WriteArtifact => "write_artifact",
             Self::CreateTask => "create_task",
             Self::CancelTask => "cancel_task",
@@ -154,6 +157,7 @@ const CHAT_RULES: Rules = Rules {
         ToolName::CreateGoal,
         ToolName::SteerGoal,
         ToolName::CancelGoal,
+        ToolName::ArchiveGoal,
         ToolName::WriteArtifact,
         ToolName::Schedule,
         ToolName::CreateListener,
@@ -232,6 +236,7 @@ const GLOBAL_RULES: Rules = Rules {
     tools: &[
         ToolName::CreateGoal,
         ToolName::CancelGoal,
+        ToolName::ArchiveGoal,
         ToolName::Schedule,
         ToolName::PauseAutomations,
         ToolName::ResumeAutomations,

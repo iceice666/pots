@@ -50,6 +50,37 @@ impl TurnStop {
     }
 }
 
+/// 記進 `agent_runs` 的模型、provider 與 runtime 維度（成本報表用）。
+#[derive(Clone, Debug)]
+pub struct RunMeta {
+    pub model: String,
+    /// 顯示名稱，例如「ChatGPT」「OpenAI」「Claude Code」。
+    pub provider: String,
+    /// `subscription`、`api` 或 `cli`。
+    pub billing: String,
+    /// models.dev 的 provider 鍵（單價表用）。
+    pub pricing_provider: String,
+    /// `builtin` 或 `claude_code`。
+    pub runtime: String,
+}
+
+impl RunMeta {
+    /// Claude Code 由 CLI 回報費用，沒有 provider 的 token 用量。
+    pub fn claude_code(model: &str) -> Self {
+        Self {
+            model: if model.trim().is_empty() {
+                "claude-code".into()
+            } else {
+                model.to_string()
+            },
+            provider: "Claude Code".into(),
+            billing: "cli".into(),
+            pricing_provider: "anthropic".into(),
+            runtime: "claude_code".into(),
+        }
+    }
+}
+
 /// 一次 run 的預算與 trace。`limit` 是這個 run 開始時剩下的 token（`None` 表示不限）。
 pub struct Budget {
     store: Store,
@@ -81,10 +112,10 @@ impl Budget {
         project: ProjectId,
         goal: Option<GoalId>,
         task: Option<TaskId>,
-        model: String,
+        meta: RunMeta,
     ) -> Result<Arc<Self>, Error> {
-        // 「為什麼」面板要知道這個 run 用的模型。
-        Store::set_run_model(&store, run, &model).await?;
+        // 「為什麼」面板要知道這個 run 用的模型；成本報表要 provider 與 runtime。
+        Store::set_run_meta(&store, run, &meta).await?;
         Ok(Arc::new(Self {
             store,
             hub,
@@ -93,7 +124,7 @@ impl Budget {
             project,
             goal,
             task,
-            model,
+            model: meta.model,
             exhausted: AtomicBool::new(false),
             traced: AtomicU64::new(0),
         }))
@@ -550,7 +581,7 @@ pub async fn for_run(
     project: ProjectId,
     goal: Option<GoalId>,
     task: Option<TaskId>,
-    model: impl Into<String>,
+    meta: RunMeta,
 ) -> Result<Arc<Budget>, Error> {
     Budget::new(
         store.clone(),
@@ -560,7 +591,7 @@ pub async fn for_run(
         project,
         goal,
         task,
-        model.into(),
+        meta,
     )
     .await
 }

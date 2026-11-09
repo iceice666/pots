@@ -1100,6 +1100,11 @@ impl Worker {
         }
     }
 
+    #[tracing::instrument(
+        name = "agent.run",
+        skip_all,
+        fields(agent = "worker", project = %job.project, run = %job.run, goal = %job.goal, task = %job.task, model = tracing::field::Empty)
+    )]
     async fn execute(&self, job: Job) {
         let inner = &self.inner;
         let beat = CancellationToken::new();
@@ -1333,7 +1338,7 @@ impl Worker {
         task: &TaskRow,
         work: Arc<WorkCtx>,
         code: bool,
-        model: &str,
+        meta: crate::budget::RunMeta,
     ) -> Result<Arc<ToolCtx>, Error> {
         let inner = &self.inner;
         let code: Option<Arc<dyn code::CodeAccess>> = code.then(|| {
@@ -1350,7 +1355,7 @@ impl Worker {
             job.project,
             Some(job.goal),
             Some(task.id),
-            model,
+            meta,
         )
         .await?;
         Ok(Arc::new(ToolCtx {
@@ -1399,7 +1404,9 @@ impl Worker {
                 )));
             }
         };
-        let ctx = self.tool_ctx(job, task, work, true, &route.model).await?;
+        tracing::Span::current().record("model", tracing::field::display(&route.model));
+        let meta = route.meta("builtin");
+        let ctx = self.tool_ctx(job, task, work, true, meta).await?;
         let config = RunConfig {
             provider: route.provider,
             model: route.model,
@@ -1469,7 +1476,16 @@ impl Worker {
                 ToolName::EditFile | ToolName::Run | ToolName::RunSubagent
             )
         });
-        let ctx = self.tool_ctx(job, task, work, false, "claude-code").await?;
+        let meta = crate::budget::RunMeta::claude_code(&settings.claude_model);
+        tracing::Span::current().record(
+            "model",
+            tracing::field::display(if settings.claude_model.is_empty() {
+                "claude-code"
+            } else {
+                settings.claude_model.as_str()
+            }),
+        );
+        let ctx = self.tool_ctx(job, task, work, false, meta).await?;
         let tools = crate::tools::build(&profile, ctx.clone());
         let allowed: Vec<String> = tools
             .iter()
@@ -1597,6 +1613,12 @@ impl Worker {
             };
             let outcome = claude::run(run, tx, job.cancel.clone()).await;
             let _ = progress.await;
+            // Claude Code 回報整個行程的累計成本（不是帳單）；重試時累加。
+            if let Some(cost) = outcome.cost_usd {
+                let mut tx = inner.store.begin().await?;
+                Store::add_run_cost(&mut tx, job.run, cost).await?;
+                tx.commit().await?;
+            }
             if let Some(id) = &outcome.session_id
                 && *id != session_id
             {

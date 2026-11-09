@@ -5,7 +5,7 @@ name = "global"
 memory = "om"
 max_turns = 8
 # 唯讀基礎集一律都有；總管唯讀工具看得到所有 project。
-tools = ["create_goal", "cancel_goal", "schedule", "pause_automations", "resume_automations", "run_subagent"]
+tools = ["create_goal", "cancel_goal", "archive_goal", "schedule", "pause_automations", "resume_automations", "run_subagent"]
 role_prompt = """
 你是 Pots 的總管 agent，在所有 project 之上和使用者對話。預設用繁體中文回答，簡潔、直接；\
 關於任務、PR、CI 的問題先呼叫 get_status，不要從記憶回答。

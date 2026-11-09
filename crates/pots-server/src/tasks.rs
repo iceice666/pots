@@ -148,6 +148,8 @@ pub struct GoalRow {
     pub state: GoalState,
     pub planner_note: String,
     pub created_at: Timestamp,
+    /// 封存的 Goal 不出現在 project 列表與快照；成本報表仍算得到。
+    pub archived_at: Option<Timestamp>,
 }
 
 #[derive(Clone, Debug)]
@@ -202,7 +204,7 @@ fn goal_state_columns(state: &GoalState) -> (&'static str, Option<&str>) {
 
 macro_rules! goal_columns {
     () => {
-        "id, project_id, title, state, outcome, planner_note, created_at"
+        "id, project_id, title, state, outcome, planner_note, created_at, archived_at"
     };
 }
 
@@ -223,6 +225,7 @@ fn goal_from_row(row: &SqliteRow) -> Result<GoalRow, Error> {
         state,
         planner_note: row.try_get("planner_note")?,
         created_at: Timestamp(row.try_get("created_at")?),
+        archived_at: row.try_get::<Option<i64>, _>("archived_at")?.map(Timestamp),
     })
 }
 
@@ -269,12 +272,28 @@ pub async fn goals(conn: &mut SqliteConnection, project: ProjectId) -> Result<Ve
     let rows = sqlx::query(concat!(
         "SELECT ",
         goal_columns!(),
-        " FROM goals WHERE project_id = ? ORDER BY created_at, id"
+        " FROM goals WHERE project_id = ? AND archived_at IS NULL ORDER BY created_at, id"
     ))
     .bind(project.to_string())
     .fetch_all(conn)
     .await?;
     rows.iter().map(goal_from_row).collect()
+}
+
+/// 封存一個已結束的 Goal：從 project 列表與快照消失，但資料與成本仍留著。
+/// 呼叫端在同一個 transaction 裡記一筆 `GoalArchived`。
+pub async fn set_goal_archived(
+    conn: &mut SqliteConnection,
+    id: GoalId,
+    at: Timestamp,
+) -> Result<(), Error> {
+    sqlx::query("UPDATE goals SET archived_at = ?, updated_at = ? WHERE id = ?")
+        .bind(at.0)
+        .bind(at.0)
+        .bind(id.to_string())
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 pub async fn set_goal_state(
@@ -714,13 +733,16 @@ pub async fn reset_ci_failures(conn: &mut SqliteConnection, id: TaskId) -> Resul
     Ok(())
 }
 
-/// 記一筆 `GoalChanged`（Goal 不存在就不記）。任務已經不在等的核准在這裡撤回
+/// 記一筆 `GoalChanged`（Goal 不存在或已封存就不記）。任務已經不在等的核准在這裡撤回
 ///（任務狀態改了之後一定會記一筆 `GoalChanged`）。
 pub async fn push_goal(txn: &mut LogTxn<'_>, id: GoalId) -> Result<(), Error> {
     crate::approvals::sync_goal(txn, id).await?;
     let Some(g) = goal(txn.conn(), id).await? else {
         return Ok(());
     };
+    if g.archived_at.is_some() {
+        return Ok(());
+    }
     let view = goal_view(txn.conn(), &g).await?;
     let project = g.project;
     txn.push(|seq| ServerEvent::GoalChanged {

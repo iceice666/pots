@@ -492,6 +492,11 @@ impl Planner {
         }
     }
 
+    #[tracing::instrument(
+        name = "agent.run",
+        skip_all,
+        fields(agent = "planner", project = %job.project, run = %job.run, goal = %job.goal, model = tracing::field::Empty)
+    )]
     async fn execute(&self, job: Job) {
         let inner = &self.inner;
         let beat = CancellationToken::new();
@@ -568,6 +573,7 @@ impl Planner {
             Ok(r) => r,
             Err(e) => return Ok(RunEnd::Llm(e)),
         };
+        tracing::Span::current().record("model", tracing::field::display(&route.model));
         let (head, tail) = {
             let mut conn = inner.store.acquire().await?;
             crate::user_md::compose(&mut conn, project.id).await?
@@ -587,7 +593,7 @@ impl Planner {
             job.project,
             Some(job.goal),
             None,
-            route.model.clone(),
+            route.meta("builtin"),
         )
         .await?;
         let ctx = Arc::new(ToolCtx {
@@ -930,6 +936,7 @@ mod tests {
                 state: GoalState::Active,
                 planner_note: String::new(),
                 created_at: Timestamp::now(),
+                archived_at: None,
             };
             tasks::insert_goal(&mut tx, &row, &Principal::Human)
                 .await

@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
+use pots_llm::provider::Usage;
 use pots_llm::{Item, LlmError, ModelRequest, StreamEvent};
 use pots_proto::{MemoryView, ObservationId, ObservationView, ProjectId, ServerEvent};
 use sqlx::sqlite::SqliteConnection;
@@ -562,6 +563,37 @@ impl Inner {
         }
     }
 
+    /// 記一筆 Observer／Reflector 的用量。沒有 run id 的整理工作也寫進 `agent_runs`，
+    /// 成本報表才區分得出 OM 開銷與主要工作。
+    async fn record_om_usage(
+        &self,
+        project: ProjectId,
+        agent: &str,
+        route: &Route,
+        usage: Usage,
+        started: Instant,
+    ) {
+        let started_at = pots_proto::Timestamp::now().0 - started.elapsed().as_secs() as i64;
+        let result: Result<(), Error> = async {
+            let mut tx = self.store.begin().await?;
+            Store::record_om_run(
+                &mut tx,
+                project,
+                agent,
+                route,
+                usage,
+                pots_proto::Timestamp(started_at),
+                pots_proto::Timestamp::now(),
+            )
+            .await?;
+            tx.commit().await.map_err(Error::from)
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(%project, error = %e, "無法記錄整理記憶的用量");
+        }
+    }
+
     /// 這個階段成功（含沒事可做）：結束冷卻；錯誤是這個階段（或不知道是誰）留下的就清掉。
     async fn succeeded(&self, project: ProjectId, stage: Stage) {
         let clear = {
@@ -590,6 +622,7 @@ impl Inner {
         cancel: &CancellationToken,
     ) -> Result<bool, OmError> {
         // 先只算總數：每次寫進 om_raw 都會叫醒，大多數時候還沒到閾值。
+        let started = Instant::now();
         let total = {
             let mut conn = self.store.acquire().await?;
             Store::om_unobserved_tokens(&mut conn, project).await?
@@ -614,9 +647,11 @@ impl Inner {
         let chunk = &rows[..cut];
         let route = self.router.resolve_memory()?;
         let input = format::observer_input(&observations, &state.current_task, chunk);
-        let output = self
+        let (output, usage) = self
             .complete(&route, format::OBSERVER_INSTRUCTIONS, input, cancel)
             .await?;
+        self.record_om_usage(project, "observer", &route, usage, started)
+            .await;
         let parsed = format::parse(&output);
         if parsed.is_empty() {
             tracing::warn!(%project, len = output.len(), "Observer 的輸出格式不對");
@@ -673,6 +708,7 @@ impl Inner {
         project: ProjectId,
         cancel: &CancellationToken,
     ) -> Result<bool, OmError> {
+        let started = Instant::now();
         let (state, observations) = {
             let mut tx = self.store.read().await?;
             let state = Store::om_state(&mut tx, project).await?;
@@ -688,9 +724,11 @@ impl Inner {
         }
         let route = self.router.resolve_memory()?;
         let input = format::reflector_input(&observations, &state.current_task);
-        let output = self
+        let (output, usage) = self
             .complete(&route, format::REFLECTOR_INSTRUCTIONS, input, cancel)
             .await?;
+        self.record_om_usage(project, "reflector", &route, usage, started)
+            .await;
         let parsed = format::parse(&output);
         // 釘選的由系統帶過去，Reflector 只重寫沒釘選的。重寫後只剩原本不到 1/20（含一條都不留，
         // 只有沒釘選的本來就很少時例外）多半是輸出被截斷或偷懶，當作格式不對，不要清掉記憶。
@@ -833,7 +871,7 @@ impl Inner {
         instructions: &str,
         input: String,
         cancel: &CancellationToken,
-    ) -> Result<String, OmError> {
+    ) -> Result<(String, Usage), OmError> {
         let request = ModelRequest {
             model: route.model.clone(),
             instructions: Some(instructions.to_string()),
@@ -861,8 +899,8 @@ impl Inner {
                         items.push_str(&text);
                     }
                     StreamEvent::ItemDone(_) => {}
-                    StreamEvent::Completed { .. } => {
-                        return Ok(if items.is_empty() { deltas } else { items });
+                    StreamEvent::Completed { usage } => {
+                        return Ok((if items.is_empty() { deltas } else { items }, usage));
                     }
                 }
             }
