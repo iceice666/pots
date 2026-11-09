@@ -51,7 +51,7 @@
 
 - 權限。 可以讀所有 project 的狀態與歷史，但核准一律仍在原 project 的核准卡片或 Inbox 完成。
 
-M6a 的實作：總管是 `kind = 'overseer'` 的內部 project（固定 ID，`Store::ensure_overseer` 在啟動時建立），共用同一套 `stream_items`、`om_raw`／`om_observations` 與 `agent_runs`，但 `list_projects` 與快照只帶 `kind = 'project'`，所以它不會出現在側欄。`profiles/global.toml` 是 `Om` 記憶的 `global` profile；`Scope::Global` 讓唯讀工具看得到所有 project，`create_goal` 多一個 `project` 參數（名稱或 ID），`cancel_goal` 可以取消任一 Goal，`pause_automations`／`resume_automations` 不給 project 就是全部，`schedule` 建 `ScheduleOwner::Global` 的排程（觸發時在同一條總管對話醒來，`post_system_trigger` 走 `StreamScope::Overseer`）。桌面端的訊息用 `ClientCommand::SendOverseer`／`StopOverseer`，事件用 `StreamScope::Overseer`，快照的 `overseer` 帶對話、各 project 概況與總管自己的記憶。`archive_goal`、跨實例總管與總管的核准代決還沒有。
+M6a 的實作：總管是 `kind = 'overseer'` 的內部 project（固定 ID，`Store::ensure_overseer` 在啟動時建立），共用同一套 `stream_items`、`om_raw`／`om_observations` 與 `agent_runs`，但 `list_projects` 與快照只帶 `kind = 'project'`，所以它不會出現在側欄。`profiles/global.toml` 是 `Om` 記憶的 `global` profile；`Scope::Global` 讓唯讀工具看得到所有 project，`create_goal` 多一個 `project` 參數（名稱或 ID），`cancel_goal` 可以取消任一 Goal，`pause_automations`／`resume_automations` 不給 project 就是全部，`schedule` 建 `ScheduleOwner::Global` 的排程（觸發時在同一條總管對話醒來，`post_system_trigger` 走 `StreamScope::Overseer`）。桌面端的訊息用 `ClientCommand::SendOverseer`／`StopOverseer`，事件用 `StreamScope::Overseer`，快照的 `overseer` 帶對話、各 project 概況與總管自己的記憶。`archive_goal` 在 M6b 補上（只能封存已結束的 Goal，總管可以封存任一 project 的 Goal）；跨實例總管與總管的核准代決還沒有。
 
 ### 平台工具
 
