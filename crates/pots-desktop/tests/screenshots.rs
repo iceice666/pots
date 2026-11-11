@@ -246,6 +246,17 @@ mod shots {
                 };
             }
             match (last_user, results) {
+                (Some(t), 0) if t.contains("問題卡片的回答") => {
+                    ScriptedTurn::reply("收到，之後的 PR 都用 squash merge。")
+                }
+                (Some(t), 0) if t.contains("問我") => ScriptedTurn::new().tool_call(
+                    "q1",
+                    "ask_user",
+                    r#"{"question":"這個 project 的 PR 要用哪種方式 merge？","options":["squash","merge commit","rebase"],"reason":"Project Notes 還沒寫，worker 申請 merge 前要知道"}"#,
+                ),
+                (Some(t), n) if n > 0 && t.contains("問我") => {
+                    ScriptedTurn::reply("我在下面發了一張問題卡片，選一個就好。")
+                }
                 (Some(t), 0) if t.contains("排程") => ScriptedTurn::new().tool_call(
                     "s1",
                     "schedule",
@@ -631,6 +642,64 @@ mod shots {
                     .is_some_and(|a| a.state == ApprovalState::Rejected)
             }) && app.current_instance().listeners.len() == 1
         });
+
+        // 對話 agent 用 ask_user 發問題卡片；選一個選項就回答，答案送回對話、agent 接著回覆。
+        s.update(|app, _, cx| {
+            let instance = app.instance;
+            let project = app.current_instance().projects[0].id;
+            app.store.send_to_project(
+                instance,
+                project,
+                "問我一下 merge 的方式".into(),
+                SendMode::Queue,
+            );
+            cx.notify();
+        });
+        s.wait_until("問題卡片", |app| {
+            app.store.inbox.iter().any(|i| {
+                i.is_open()
+                    && i.kind == pots_desktop::model::InboxKind::Question
+                    && i.actions
+                        == vec![
+                            InboxAction::Answer,
+                            InboxAction::Skip,
+                            InboxAction::OpenThread,
+                        ]
+            }) && app
+                .current_project()
+                .is_some_and(|p| p.agent_state == AgentState::Idle)
+        });
+        s.shot("24a-live-question-card");
+        s.update(|app, window, cx| {
+            let id = app
+                .store
+                .inbox
+                .iter()
+                .find(|i| i.is_open() && i.kind == pots_desktop::model::InboxKind::Question)
+                .map(|i| i.id)
+                .expect("問題");
+            app.act(id, InboxAction::Answer, window, cx);
+        });
+        s.shot("24b-live-answer-dialog");
+        s.update(|app, _, cx| {
+            let id = app.reject_dialog.as_ref().expect("回答框").id;
+            app.answer_option(id, "squash".into(), cx);
+        });
+        s.wait_until("回答後 agent 接著回覆", |app| {
+            app.store.inbox.iter().any(|i| {
+                i.approval.as_ref().is_some_and(|a| {
+                    a.action.is_question()
+                        && a.state == ApprovalState::Executed
+                        && a.note.as_deref() == Some("squash")
+                })
+            }) && app.current_project().is_some_and(|p| {
+                p.agent_state == AgentState::Idle
+                    && p.items.iter().any(|i| {
+                        matches!(&i.kind, pots_desktop::model::StreamItemKind::Agent(m) if m.text.contains("squash merge"))
+                    })
+            })
+        });
+        s.shot("24c-live-question-answered");
 
         // 設定的「通知」：開啟靜音時段。
         s.update(|app, window, cx| {

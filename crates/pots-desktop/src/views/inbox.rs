@@ -18,6 +18,7 @@ fn kind_tag(kind: InboxKind) -> Div {
         InboxKind::Approval => tag(kind.label(), theme::warn_text(), theme::warn_soft()),
         InboxKind::NeedsYou => tag(kind.label(), theme::danger(), theme::danger_soft()),
         InboxKind::Mention => tag(kind.label(), theme::accent_text(), theme::accent_soft()),
+        InboxKind::Question => tag(kind.label(), theme::accent_text(), theme::accent_soft()),
     }
 }
 
@@ -113,6 +114,12 @@ impl PotsApp {
                         "inbox-f-approval",
                         "核准",
                         InboxFilter::Kind(InboxKind::Approval),
+                        cx,
+                    ))
+                    .child(filter_tab(
+                        "inbox-f-question",
+                        "問你",
+                        InboxFilter::Kind(InboxKind::Question),
                         cx,
                     ))
                     .child(filter_tab(
@@ -264,7 +271,12 @@ impl PotsApp {
         };
 
         let footer = if open {
-            self.render_actions(item.id, &item.actions, "inbox", cx)
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .children(self.render_question_options(item, "inbox", cx))
+                .child(self.render_actions(item.id, &item.actions, "inbox", cx))
                 .into_any_element()
         } else {
             let label = match &item.decision {

@@ -484,13 +484,23 @@ impl Store {
         else {
             return false;
         };
-        item.decision = if approve {
-            Decision::Approved
-        } else {
-            Decision::Rejected
+        let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        let question = item
+            .approval
+            .as_ref()
+            .is_some_and(|a| a.action.is_question());
+        if question && approve && note.is_none() {
+            return false;
+        }
+        item.decision = match (question, approve) {
+            (true, true) => {
+                Decision::Resolved(format!("已回答：{}", note.as_deref().unwrap_or_default()))
+            }
+            (true, false) => Decision::Resolved("已略過".into()),
+            (false, true) => Decision::Approved,
+            (false, false) => Decision::Rejected,
         };
         let instance = item.instance;
-        let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
         self.outbox.push((
             instance,
             ClientCommand::Decide {
@@ -500,6 +510,11 @@ impl Store {
             },
         ));
         true
+    }
+
+    /// 回答 agent 的問題（選項或自己寫的答案）。
+    pub fn answer(&mut self, id: ApprovalId, answer: String) -> bool {
+        self.decide(id, true, Some(answer))
     }
 
     /// 處理 Inbox 項目或對話內核准卡上的按鈕。回傳是否改變了狀態。
@@ -514,7 +529,7 @@ impl Store {
         if item.approval.is_some() {
             return match action {
                 InboxAction::Approve => self.decide(id, true, None),
-                InboxAction::Reject => self.decide(id, false, None),
+                InboxAction::Reject | InboxAction::Skip => self.decide(id, false, None),
                 _ => false,
             };
         }

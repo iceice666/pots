@@ -185,11 +185,23 @@ pub struct UserMdEditor {
     pub error: Option<String>,
 }
 
-/// 拒絕核准時填理由的對話框。
+/// 拒絕核准時填理由、回答或略過 agent 的問題的對話框。
 pub struct RejectDialog {
     pub id: ApprovalId,
+    pub kind: DecideKind,
     pub input: Entity<InputState>,
     _subscription: Subscription,
+}
+
+/// [`RejectDialog`] 要做什麼。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecideKind {
+    /// 拒絕核准（理由選填）。
+    Reject,
+    /// 回答 agent 的問題：輸入框是答案。
+    Answer,
+    /// 略過 agent 的問題（理由選填）。
+    Skip,
 }
 
 /// 新增專案／設定工作資料夾的同一個對話框。`project` 是 `None` 時建立新專案。
@@ -2656,14 +2668,19 @@ impl PotsApp {
             InboxAction::EditConditions => {
                 self.notify_unimplemented(action.label(), cx);
             }
-            // 服務的核准：先問理由（選填，會轉告 agent）。
-            InboxAction::Reject
+            // 服務的核准：先問理由（選填，會轉告 agent）；問題先開回答框。
+            InboxAction::Reject | InboxAction::Answer | InboxAction::Skip
                 if self
                     .store
                     .approval(id)
                     .is_some_and(|i| i.approval.is_some() && i.is_open()) =>
             {
-                self.begin_reject(id, window, cx);
+                let kind = match action {
+                    InboxAction::Answer => DecideKind::Answer,
+                    InboxAction::Skip => DecideKind::Skip,
+                    _ => DecideKind::Reject,
+                };
+                self.begin_decide(id, kind, window, cx);
             }
             _ => {
                 self.store.act(id, action);
@@ -2672,11 +2689,19 @@ impl PotsApp {
         }
     }
 
-    pub fn begin_reject(&mut self, id: ApprovalId, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("理由（選填）：例如「請補上測試」，會轉告 agent")
-        });
+    pub fn begin_decide(
+        &mut self,
+        id: ApprovalId,
+        kind: DecideKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = match kind {
+            DecideKind::Reject => "理由（選填）：例如「請補上測試」，會轉告 agent",
+            DecideKind::Answer => "你的答案，會原文轉告 agent",
+            DecideKind::Skip => "理由（選填）：例如「你自己決定就好」，會轉告 agent",
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         input.update(cx, |s, cx| s.focus(window, cx));
         let sub = cx.subscribe(&input, |this, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
@@ -2685,6 +2710,7 @@ impl PotsApp {
         });
         self.reject_dialog = Some(RejectDialog {
             id,
+            kind,
             input,
             _subscription: sub,
         });
@@ -2696,7 +2722,25 @@ impl PotsApp {
             return;
         };
         let note = d.input.read(cx).value().trim().to_string();
-        self.store.decide(d.id, false, Some(note));
+        if d.kind == DecideKind::Answer {
+            if note.is_empty() {
+                // 答案不能是空的：對話框留著。
+                self.reject_dialog = Some(d);
+                return;
+            }
+            self.store.answer(d.id, note);
+        } else {
+            self.store.decide(d.id, false, Some(note));
+        }
+        cx.notify();
+    }
+
+    /// 選了問題的一個選項（卡片或回答框上的按鈕）。
+    pub fn answer_option(&mut self, id: ApprovalId, answer: String, cx: &mut Context<Self>) {
+        if self.reject_dialog.as_ref().is_some_and(|d| d.id == id) {
+            self.reject_dialog = None;
+        }
+        self.store.answer(id, answer);
         cx.notify();
     }
 

@@ -1,5 +1,5 @@
 //! M5 的設定與對話框：設定視窗的「通知」（桌面通知、靜音時段）與「USER.md」（跨 project 的
-//! 使用者偏好）類別，以及拒絕核准時填理由的對話框。
+//! 使用者偏好）類別，以及拒絕核准時填理由、回答 agent 問題的對話框。
 //!
 //! 儲存送 `SaveNotifications`／`SaveUserMd`；服務回 `Notifications`／`UserMd` 時收起表單，被拒絕時
 //!（`Error`）原因留在表單裡（見 `automation_forms::Forms`）。
@@ -16,7 +16,7 @@ use gpui_kit::{
 use super::automation_forms::{chip, error_note, value};
 use super::settings::{card, detail_row, field};
 use super::widgets::*;
-use crate::app::{NotificationEditor, PotsApp, UserMdEditor};
+use crate::app::{DecideKind, NotificationEditor, PotsApp, UserMdEditor};
 use crate::model::*;
 use crate::theme;
 
@@ -76,6 +76,18 @@ pub(super) fn approval_diff(item: &InboxItem) -> Option<&str> {
     match &item.approval.as_ref()?.action {
         ApprovalActionView::EditUserMd { diff, .. }
         | ApprovalActionView::EditProjectNotes { diff, .. } => Some(diff),
+        _ => None,
+    }
+}
+
+/// agent 的問題：(問題, 選項, 可不可以自己寫答案)。
+pub(super) fn question_of(item: &InboxItem) -> Option<(&str, &[String], bool)> {
+    match &item.approval.as_ref()?.action {
+        ApprovalActionView::AskUser {
+            question,
+            options,
+            allow_other,
+        } => Some((question, options, *allow_other)),
         _ => None,
     }
 }
@@ -400,11 +412,35 @@ impl PotsApp {
 
     pub(crate) fn render_reject_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let d = self.reject_dialog.as_ref()?;
-        let title = self
-            .store
-            .approval(d.id)
-            .map(|i| i.title.clone())
-            .unwrap_or_default();
+        let item = self.store.approval(d.id);
+        let title = item.map(|i| i.title.clone()).unwrap_or_default();
+        let question = item.and_then(question_of);
+        let (heading, hint, confirm) = match d.kind {
+            DecideKind::Reject => (
+                format!("拒絕：{title}"),
+                "可以附一句理由，agent 會照著改（merge 被拒絕時 worker 會被叫醒）。Enter 送出，Esc 取消。",
+                "拒絕",
+            ),
+            DecideKind::Answer => (
+                question
+                    .map(|(q, _, _)| q.to_string())
+                    .unwrap_or(title.clone()),
+                "選一個選項，或寫下你的答案（會原文轉告 agent）。Enter 送出，Esc 取消。",
+                "送出答案",
+            ),
+            DecideKind::Skip => (
+                format!("略過：{title}"),
+                "可以附一句理由，agent 會依現有資訊自己決定。Enter 送出，Esc 取消。",
+                "略過",
+            ),
+        };
+        let id = d.id;
+        let (options, free) = match (d.kind, question) {
+            (DecideKind::Answer, Some((_, options, allow_other))) => {
+                (options.to_vec(), allow_other)
+            }
+            _ => (Vec::new(), true),
+        };
         let dialog = div()
             .id("reject-dialog")
             .w(px(520.))
@@ -420,20 +456,36 @@ impl PotsApp {
                 div()
                     .text_size(px(16.))
                     .font_weight(FontWeight::BOLD)
-                    .child(format!("拒絕：{title}")),
+                    .line_height(relative(1.4))
+                    .child(heading),
             )
-            .child(muted_text(
-                "可以附一句理由，agent 會照著改（merge 被拒絕時 worker 會被叫醒）。Enter 送出，Esc 取消。",
-            ))
-            .child(Input::new(&d.input))
+            .child(muted_text(if free {
+                hint
+            } else {
+                "選一個選項（會原文轉告 agent）。Esc 取消。"
+            }))
+            .when(!options.is_empty(), |el| {
+                el.child(div().flex().flex_wrap().gap(px(8.)).children(
+                    options.into_iter().enumerate().map(|(i, o)| {
+                        let label = o.clone();
+                        secondary_button(SharedString::from(format!("answer-opt-{i}")), label)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.answer_option(id, o.clone(), cx)
+                            }))
+                    }),
+                ))
+            })
+            .when(free, |el| el.child(Input::new(&d.input)))
             .child(
                 div()
                     .flex()
                     .gap(px(8.))
-                    .child(
-                        primary_button("reject-confirm", "拒絕")
-                            .on_click(cx.listener(|this, _, _, cx| this.confirm_reject(cx))),
-                    )
+                    .when(free, |el| {
+                        el.child(
+                            primary_button("reject-confirm", confirm)
+                                .on_click(cx.listener(|this, _, _, cx| this.confirm_reject(cx))),
+                        )
+                    })
                     .child(
                         link_button("reject-cancel", "取消")
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_reject(cx))),

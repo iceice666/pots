@@ -660,9 +660,48 @@ impl PotsApp {
             }))
     }
 
+    /// agent 問題的選項：一個選項一個按鈕，按下就回答。不是問題、或已經回答時是 `None`。
+    pub fn render_question_options(
+        &self,
+        a: &InboxItem,
+        scope: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let (_, options, _) = super::preferences::question_of(a)?;
+        if !a.is_open() || options.is_empty() {
+            return None;
+        }
+        let id = a.id;
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(8.))
+                .children(options.iter().enumerate().map(|(i, o)| {
+                    let key = SharedString::from(format!("{scope}-opt-{}-{i}", id.0));
+                    let answer = o.clone();
+                    secondary_button(key, o.clone()).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.answer_option(id, answer.clone(), cx)
+                        }),
+                    )
+                })),
+        )
+    }
+
     pub fn render_approval_card(&self, a: &InboxItem, cx: &mut Context<Self>) -> impl IntoElement {
         let id = a.id;
+        let question = super::preferences::question_of(a);
         let (banner, banner_fg, banner_bg, border) = match &a.decision {
+            Decision::Pending if question.is_some() => (
+                a.approval
+                    .as_ref()
+                    .map(|v| format!("{}問你", v.requested_by))
+                    .unwrap_or_else(|| "需要你回答".into()),
+                theme::accent_text(),
+                theme::accent_soft(),
+                theme::accent_text(),
+            ),
             Decision::Pending => (
                 "需要你核准".to_string(),
                 theme::warn_text(),
@@ -720,7 +759,12 @@ impl PotsApp {
                         div()
                             .text_size(px(16.))
                             .font_weight(FontWeight::BOLD)
-                            .child(a.title.clone()),
+                            .line_height(relative(1.4))
+                            .child(
+                                question
+                                    .map(|(q, _, _)| q.to_string())
+                                    .unwrap_or_else(|| a.title.clone()),
+                            ),
                     )
                     .when(!a.detail.is_empty() && a.approval.is_some(), |d| {
                         d.child(div().line_height(relative(1.5)).child(a.detail.clone()))
@@ -738,6 +782,7 @@ impl PotsApp {
                             cx.theme().mono_font_family.clone(),
                         ))
                     })
+                    .children(self.render_question_options(a, "card", cx))
                     .when(pending, |d| {
                         d.child(self.render_actions(id, &a.actions, "card", cx))
                     }),
@@ -760,7 +805,7 @@ impl PotsApp {
                 let key = SharedString::from(format!("{scope}-{}-{i}", id.0));
                 let button = match (i, action) {
                     (0, _) => primary_button(key, action.label()),
-                    (_, InboxAction::Reject | InboxAction::CancelTask) => {
+                    (_, InboxAction::Reject | InboxAction::CancelTask | InboxAction::Skip) => {
                         secondary_button(key, action.label())
                     }
                     (1, _) => secondary_button(key, action.label()),

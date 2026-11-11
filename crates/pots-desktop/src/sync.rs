@@ -89,6 +89,9 @@ fn needs_you(state: &TaskStateView) -> Option<&str> {
 
 /// 核准的狀態 → Inbox 與卡片上的決定。
 fn approval_decision(a: &ApprovalView) -> Decision {
+    if a.action.is_question() {
+        return question_decision(a);
+    }
     let result = a.result.clone().unwrap_or_default();
     match a.state {
         ApprovalState::Pending => Decision::Pending,
@@ -102,8 +105,33 @@ fn approval_decision(a: &ApprovalView) -> Decision {
     }
 }
 
+/// agent 的問題：「核准」是回答（答案在 `note`），「拒絕」是略過。
+fn question_decision(a: &ApprovalView) -> Decision {
+    match a.state {
+        ApprovalState::Pending => Decision::Pending,
+        ApprovalState::Executing | ApprovalState::Executed | ApprovalState::Failed => {
+            Decision::Resolved(match &a.note {
+                Some(answer) => format!("已回答：{answer}"),
+                None => "已回答".into(),
+            })
+        }
+        ApprovalState::Rejected => Decision::Resolved("已略過".into()),
+        ApprovalState::Expired => Decision::Resolved("已逾時，沒有回答".into()),
+        ApprovalState::Cancelled => Decision::Resolved("已撤回，不再需要".into()),
+    }
+}
+
 /// 核准卡片與 Inbox 上列出的細節。
 fn approval_facts(a: &ApprovalView) -> Vec<String> {
+    if a.action.is_question() {
+        let mut facts = vec![format!("{}問的", a.requested_by)];
+        if a.state == ApprovalState::Rejected
+            && let Some(note) = &a.note
+        {
+            facts.push(format!("你的理由：{note}"));
+        }
+        return facts;
+    }
     let mut facts = match &a.action {
         ApprovalActionView::MergePr {
             pr,
@@ -157,6 +185,7 @@ fn approval_facts(a: &ApprovalView) -> Vec<String> {
             "封存 {}「{title}」：從列表移除，資料仍留著",
             kind.label()
         )],
+        ApprovalActionView::AskUser { .. } => Vec::new(),
     };
     facts.push(format!("{}申請 · 動作 {}", a.requested_by, a.action_hash));
     if let Some(note) = &a.note {
@@ -288,7 +317,17 @@ impl Sync {
             .and_then(|g| store.goal(instance, g))
             .map(|g| g.title.clone())
             .unwrap_or_default();
-        let mut actions = vec![InboxAction::Approve, InboxAction::Reject];
+        let question = a.action.is_question();
+        let mut actions = if let ApprovalActionView::AskUser { allow_other, .. } = &a.action {
+            // 選項直接列在卡片上；「回答」開回答框寫自己的答案。
+            let mut v = vec![InboxAction::Skip];
+            if *allow_other {
+                v.insert(0, InboxAction::Answer);
+            }
+            v
+        } else {
+            vec![InboxAction::Approve, InboxAction::Reject]
+        };
         if matches!(&a.action, ApprovalActionView::MergePr { url: Some(_), .. }) {
             actions.push(InboxAction::ViewDiff);
         }
@@ -306,7 +345,11 @@ impl Sync {
             instance,
             project: Some(a.project),
             context: goal,
-            kind: InboxKind::Approval,
+            kind: if question {
+                InboxKind::Question
+            } else {
+                InboxKind::Approval
+            },
             title: a.title.clone(),
             detail: a.reason.clone(),
             facts: approval_facts(&a),
@@ -670,12 +713,18 @@ impl Sync {
                 let a = *approval;
                 let (project, title, reason, id) =
                     (a.project, a.title.clone(), a.reason.clone(), a.id);
+                let title = match &a.action {
+                    ApprovalActionView::AskUser { .. } => {
+                        format!("{}問你：{title}", a.requested_by)
+                    }
+                    _ => format!("等你核准：{title}"),
+                };
                 if self.upsert_approval(store, instance, a) {
                     out.notices.push(Notice {
                         instance,
                         project: Some(project),
                         item: Some(id),
-                        title: format!("等你核准：{title}"),
+                        title,
                         body: reason,
                     });
                 }
