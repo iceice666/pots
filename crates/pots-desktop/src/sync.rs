@@ -141,6 +141,16 @@ fn approval_facts(a: &ApprovalView) -> Vec<String> {
         ApprovalActionView::ResumeProject { .. } => {
             vec!["預算熔斷：核准後恢復這個 project 的 run".to_string()]
         }
+        ApprovalActionView::DeleteSchedule { summary, .. } => {
+            vec![format!("刪除排程：{summary}")]
+        }
+        ApprovalActionView::DeleteListener { summary, .. } => {
+            vec![format!("刪除 listener：{summary}")]
+        }
+        ApprovalActionView::ArchiveArtifact { kind, title, .. } => vec![format!(
+            "封存 {}「{title}」：從列表移除，資料仍留著",
+            kind.label()
+        )],
     };
     facts.push(format!("{}申請 · 動作 {}", a.requested_by, a.action_hash));
     if let Some(note) = &a.note {
@@ -694,6 +704,15 @@ impl Sync {
                         None => p.artifacts.push(artifact),
                     }
                 }
+            }
+            ServerEvent::ArtifactArchived {
+                project, artifact, ..
+            } => {
+                if let Some(p) = store.project_mut(instance, project) {
+                    p.artifacts.retain(|a| a.id != artifact);
+                }
+                // 開著的編輯器在沒有草稿時關掉（和快照換掉 artifact 一樣處理）。
+                out.artifacts_reset = true;
             }
             ServerEvent::ArtifactHistory {
                 artifact,
