@@ -814,21 +814,15 @@ impl PotsApp {
             return None;
         }
         let id = a.id;
-        Some(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(px(8.))
-                .children(options.iter().enumerate().map(|(i, o)| {
-                    let key = SharedString::from(format!("{scope}-opt-{}-{i}", id.0));
-                    let answer = o.clone();
-                    secondary_button(key, o.clone()).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.answer_option(id, answer.clone(), cx)
-                        }),
-                    )
-                })),
-        )
+        Some(div().flex().flex_col().items_start().gap(px(8.)).children(
+            options.iter().enumerate().map(|(i, o)| {
+                let key = SharedString::from(format!("{scope}-opt-{}-{i}", id.0));
+                let answer = o.clone();
+                super::widgets::option_button(key, o.clone()).on_click(
+                    cx.listener(move |this, _, _, cx| this.answer_option(id, answer.clone(), cx)),
+                )
+            }),
+        ))
     }
 
     /// 核准／ask_user 卡片。`scope` 是它在畫面上的位置（`render_card` 給的

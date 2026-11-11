@@ -190,6 +190,28 @@ pub fn secondary_button(id: impl Into<ElementId>, label: impl Into<SharedString>
         .hover(|s| s.bg(theme::subtle_bg()))
 }
 
+/// 長文字的選項按鈕（agent 問題的選項）：寬度不超過容器，文字自動換行。
+pub fn option_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .flex()
+        .items_center()
+        .max_w_full()
+        .min_w_0()
+        .cursor_pointer()
+        .px(px(14.))
+        .py(px(7.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(theme::border_strong())
+        .bg(theme::white())
+        .text_color(theme::text())
+        .text_size(px(14.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .hover(|s| s.bg(theme::subtle_bg()))
+        .child(div().min_w_0().child(label.into()))
+}
+
 pub fn link_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
     base_button(id, label)
         .px(px(10.))

@@ -470,10 +470,10 @@ impl PotsApp {
                 "選一個選項（會原文轉告 agent）。Esc 取消。"
             }))
             .when(!options.is_empty(), |el| {
-                el.child(div().flex().flex_wrap().gap(px(8.)).children(
+                el.child(div().flex().flex_col().items_start().gap(px(8.)).children(
                     options.into_iter().enumerate().map(|(i, o)| {
                         let label = o.clone();
-                        secondary_button(SharedString::from(format!("answer-opt-{i}")), label)
+                        option_button(SharedString::from(format!("answer-opt-{i}")), label)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.answer_option(id, o.clone(), cx)
                             }))
