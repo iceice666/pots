@@ -22,6 +22,7 @@ fn mock_providers(extra: Option<ProviderView>) -> ProvidersView {
         active: Some(ProviderId::CHATGPT),
         items,
         memory: MemoryModelView::default(),
+        roles: Vec::new(),
     }
 }
 

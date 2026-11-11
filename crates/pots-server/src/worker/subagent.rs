@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 
 use pots_llm::agent::{self, RunConfig, ToolError};
 use pots_llm::{Item, LlmError};
-use pots_proto::Timestamp;
+use pots_proto::{ModelRole, Timestamp};
 use tokio::sync::Notify;
 use tracing::Instrument as _;
 use uuid::Uuid;
@@ -45,9 +45,13 @@ pub async fn run(
     for j in &jobs {
         tasks::check_text("prompt ", &j.prompt, MAX_PROMPT_CHARS, true).map_err(bad)?;
     }
+    // explorer／reviewer 各有自己的角色設定。profile 只會是上面兩個，不認得的名稱
+    // （將來新增 subagent profile 卻還沒有對應的角色時）退回對話 agent 的設定，
+    // 和主 agent 用同一個模型最不意外。
+    let role = ModelRole::from_profile(&profile.name).unwrap_or(ModelRole::Chat);
     let route = worker
         .router()
-        .resolve()
+        .resolve_role(role)
         .map_err(|e| bad(format!("沒有可用的模型：{}", explain(&e))))?;
 
     // 每個 subagent 看得到的程式碼。
@@ -72,6 +76,7 @@ pub async fn run(
                 let ctx = ctx.clone();
                 let profile = profile.clone();
                 let provider = route.provider.clone();
+                let reasoning = route.reasoning;
                 let meta = route.meta("builtin");
                 let model_name = meta.model.clone();
                 async move {
@@ -128,7 +133,7 @@ pub async fn run(
                             .push_str("\n\n這次沒有可以讀的程式碼，只能用平台狀態的工具。"),
                     }
                     let config = RunConfig {
-                        reasoning: None,
+                        reasoning,
                         provider,
                         model: model_name.clone(),
                         instructions: Some(instructions),

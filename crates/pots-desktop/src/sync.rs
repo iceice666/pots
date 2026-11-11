@@ -985,6 +985,7 @@ mod tests {
                 headers: Vec::new(),
             }],
             memory: MemoryModelView::default(),
+            roles: Vec::new(),
         }
     }
 

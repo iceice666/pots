@@ -177,6 +177,18 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             )
             .await
         }
+        ClientCommand::SetRoleModel {
+            role,
+            provider,
+            model,
+            thinking,
+        } => {
+            retry_memory(
+                app,
+                crate::providers::set_role(app, role, provider, model, thinking).await,
+            )
+            .await
+        }
         ClientCommand::PinObservation {
             project,
             id,

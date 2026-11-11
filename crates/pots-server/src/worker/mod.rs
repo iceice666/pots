@@ -33,7 +33,7 @@ use std::time::Duration;
 use pots_llm::agent::{self, RunConfig};
 use pots_llm::{Item, LlmError};
 use pots_proto::{
-    Card, ExecKind, GoalId, GoalState, ProjectId, ServerEvent, TaskId, Timestamp,
+    Card, ExecKind, GoalId, GoalState, ModelRole, ProjectId, ServerEvent, TaskId, Timestamp,
     WorkerBackendKind, WorkerSettingsDraft, WorkerSettingsView,
 };
 use serde::{Deserialize, Serialize};
@@ -1416,7 +1416,7 @@ impl Worker {
         message: String,
     ) -> Result<RunEnd, Error> {
         let inner = &self.inner;
-        let route = match inner.router.resolve() {
+        let route = match inner.router.resolve_role(ModelRole::Worker) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(RunEnd::Stuck(format!(
@@ -1429,7 +1429,7 @@ impl Worker {
         let meta = route.meta("builtin");
         let ctx = self.tool_ctx(job, task, work, true, meta).await?;
         let config = RunConfig {
-            reasoning: None,
+            reasoning: route.reasoning,
             provider: route.provider,
             model: route.model,
             instructions: Some(instructions),

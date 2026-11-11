@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use pots_llm::Reasoning;
 use pots_llm::provider::{ToolCall, Usage};
 use pots_proto::{GoalId, ProjectId, TaskId, Timestamp};
 use serde_json::{Value, json};
@@ -64,6 +65,9 @@ pub struct RunMeta {
     pub pricing_provider: String,
     /// `builtin` 或 `claude_code`。
     pub runtime: String,
+    /// 角色設定的 thinking；`None` 是模型預設（Claude Code 一律 `None`）。記在 trace 的
+    /// `model` 步驟，「為什麼」面板看得到。
+    pub reasoning: Option<Reasoning>,
 }
 
 impl RunMeta {
@@ -79,6 +83,7 @@ impl RunMeta {
             billing: "cli".into(),
             pricing_provider: "anthropic".into(),
             runtime: "claude_code".into(),
+            reasoning: None,
         }
     }
 }
@@ -93,6 +98,7 @@ pub struct Budget {
     goal: Option<GoalId>,
     task: Option<TaskId>,
     model: String,
+    reasoning: Option<Reasoning>,
     exhausted: AtomicBool,
     traced: AtomicU64,
 }
@@ -127,6 +133,7 @@ impl Budget {
             goal,
             task,
             model: meta.model,
+            reasoning: meta.reasoning,
             exhausted: AtomicBool::new(false),
             traced: AtomicU64::new(0),
         }))
@@ -267,17 +274,21 @@ impl Budget {
             tracing::error!(error = %e, "無法累計任務用量");
         }
         let seq = self.traced.fetch_add(1, Ordering::SeqCst);
+        let mut detail = json!({
+            "turn": turn,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "seq": seq,
+        });
+        if let Some(reasoning) = self.reasoning {
+            detail["thinking"] = json!(reasoning);
+        }
         if let Err(e) = Store::append_trace(
             &mut tx,
             self.run,
             "model",
             &self.model,
-            &json!({
-                "turn": turn,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "seq": seq,
-            }),
+            &detail,
             true,
             total,
             now,

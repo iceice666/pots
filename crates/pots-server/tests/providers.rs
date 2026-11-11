@@ -7,10 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Client, ScriptedApi, TestServer};
+use pots_llm::Reasoning;
 use pots_llm::testing::ScriptedTurn;
 use pots_proto::{
-    ClientCommand, MsgStatus, ProjectId, ProviderDraft, ProviderHeader, ProviderId, ProviderKind,
-    ProvidersView, SendMode, ServerEvent, StreamItemKind,
+    ClientCommand, ItemId, ModelRole, MsgStatus, ProjectId, ProviderDraft, ProviderHeader,
+    ProviderId, ProviderKind, ProvidersView, RoleModelView, SendMode, ServerEvent, StreamItemKind,
+    ThinkingLevel,
 };
 use pots_server::{Config, FakeModelAuth};
 
@@ -1004,4 +1006,183 @@ async fn opencode_preset_uses_catalog_and_headers() {
     let build = builds.last().unwrap();
     assert_eq!(build.kind, ProviderKind::OpenCodeGo);
     assert_eq!(build.headers[0].value, "pots");
+}
+
+/// 送 `SetRoleModel`，回傳之後的 `Providers`。
+async fn set_role(
+    c: &mut Client,
+    role: ModelRole,
+    provider: Option<ProviderId>,
+    model: &str,
+    thinking: ThinkingLevel,
+) -> ProvidersView {
+    c.send(&ClientCommand::SetRoleModel {
+        role,
+        provider,
+        model: model.into(),
+        thinking,
+    })
+    .await;
+    let evs = c
+        .until(|e| matches!(e, ServerEvent::Providers { .. } | ServerEvent::Error { .. }))
+        .await;
+    match evs.last() {
+        Some(ServerEvent::Providers { providers, .. }) => providers.clone(),
+        other => panic!("預期 Providers，收到 {other:?}"),
+    }
+}
+
+/// 傳一則訊息，回傳 agent 回覆的 ID。
+async fn ask_item(c: &mut Client, project: ProjectId, text: &str) -> ItemId {
+    c.say(project, text, SendMode::Queue).await;
+    let evs = c.until_idle(project).await;
+    evs.iter()
+        .find_map(|e| match e {
+            ServerEvent::ItemDone { item, .. } if matches!(item.kind, StreamItemKind::Agent(_)) => {
+                Some(item.id)
+            }
+            _ => None,
+        })
+        .expect("沒有 ItemDone")
+}
+
+/// 各角色可以另外設定 provider、模型與 thinking：對話 agent 的 run 用它；設定重啟後還在；
+/// 刪掉角色用的 provider 時改回跟使用中的相同（thinking 保留）。
+#[tokio::test]
+async fn role_models_lifecycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let srv = launch(
+        dir,
+        Some(ProviderId::CHATGPT),
+        [],
+        [ScriptedTurn::reply("角色的模型")],
+        FakeModelAuth::signed_in(),
+    )
+    .await;
+    let mut c = srv.client().await;
+    let (_, inst) = c.snapshot().await;
+    assert!(inst.providers.roles.is_empty());
+    assert!(inst.providers.role(ModelRole::Planner).is_default());
+    c.send(&ClientCommand::SaveProvider {
+        draft: openai_draft(None, "gpt-x", Some(KEY)),
+    })
+    .await;
+    let view = next_providers(&mut c).await;
+    assert_eq!(view.active, Some(ProviderId::CHATGPT));
+    let api = view.items[1].id;
+
+    // 驗證：不存在的 provider、太長的模型 ID。
+    expect_error(
+        &mut c,
+        ClientCommand::SetRoleModel {
+            role: ModelRole::Chat,
+            provider: Some(ProviderId::new()),
+            model: String::new(),
+            thinking: ThinkingLevel::High,
+        },
+        "找不到",
+    )
+    .await;
+    expect_error(
+        &mut c,
+        ClientCommand::SetRoleModel {
+            role: ModelRole::Chat,
+            provider: Some(api),
+            model: "m".repeat(101),
+            thinking: ThinkingLevel::Default,
+        },
+        "最多",
+    )
+    .await;
+
+    // 對話 agent 用 API provider 的另一個模型與高 thinking；Planner 只改 thinking，
+    // 沒指定 provider 時模型被清掉。
+    let view = set_role(
+        &mut c,
+        ModelRole::Chat,
+        Some(api),
+        " gpt-y ",
+        ThinkingLevel::High,
+    )
+    .await;
+    let chat = RoleModelView {
+        role: ModelRole::Chat,
+        provider: Some(api),
+        model: "gpt-y".into(),
+        thinking: ThinkingLevel::High,
+    };
+    assert_eq!(view.roles, std::slice::from_ref(&chat));
+    let view = set_role(&mut c, ModelRole::Planner, None, "忽略", ThinkingLevel::Low).await;
+    let planner = RoleModelView {
+        role: ModelRole::Planner,
+        provider: None,
+        model: String::new(),
+        thinking: ThinkingLevel::Low,
+    };
+    assert_eq!(view.roles, [chat.clone(), planner.clone()]);
+    assert_eq!(view.active, Some(ProviderId::CHATGPT));
+
+    // run 走角色設定的 provider、模型與 thinking；使用中的 ChatGPT 沒被叫。
+    let project = c.create_project("角色").await;
+    let item = ask_item(&mut c, project, "嗨").await;
+    let reqs = srv.api.provider.requests();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].model, "gpt-y");
+    assert_eq!(reqs[0].reasoning, Some(Reasoning::High));
+    assert!(srv.provider.requests().is_empty());
+    // 「為什麼」面板記著這個 run 的模型與 thinking。
+    c.send(&ClientCommand::Why { item }).await;
+    let evs = c.until(|e| matches!(e, ServerEvent::Why { .. })).await;
+    let Some(ServerEvent::Why { why: Some(why) }) = evs.last() else {
+        panic!("預期 Why，收到 {evs:?}");
+    };
+    assert_eq!(why.model.as_deref(), Some("gpt-y"));
+    let step = why.steps.iter().find(|s| s.kind == "model").unwrap();
+    assert!(
+        step.detail.contains(r#""thinking":"high""#),
+        "{}",
+        step.detail
+    );
+    drop(c);
+    srv.stop().await;
+
+    // 重啟後設定還在。
+    let srv = launch(
+        dir,
+        None,
+        [ScriptedTurn::reply("回到 ChatGPT")],
+        [],
+        FakeModelAuth::signed_in(),
+    )
+    .await;
+    let mut c = srv.client().await;
+    let (_, inst) = c.snapshot().await;
+    assert_eq!(inst.providers.roles, [chat.clone(), planner.clone()]);
+
+    // 刪掉對話 agent 用的 provider：改回跟使用中的相同，thinking 保留。
+    c.send(&ClientCommand::DeleteProvider { id: api }).await;
+    let view = next_providers(&mut c).await;
+    let chat = RoleModelView {
+        provider: None,
+        model: String::new(),
+        ..chat
+    };
+    assert_eq!(view.roles, [chat.clone(), planner.clone()]);
+    let (_, text) = ask(&mut c, project, "還在嗎").await;
+    assert_eq!(text, "回到 ChatGPT");
+    let reqs = srv.provider.requests();
+    assert_eq!(reqs[0].model, "test-model");
+    assert_eq!(reqs[0].reasoning, Some(Reasoning::High));
+
+    // 改回預設：不再列出。
+    let view = set_role(&mut c, ModelRole::Chat, None, "", ThinkingLevel::Default).await;
+    assert_eq!(view.roles, std::slice::from_ref(&planner));
+    drop(c);
+    srv.stop().await;
+
+    let srv = launch(dir, None, [], [], FakeModelAuth::signed_in()).await;
+    let (_, inst) = srv.client().await.snapshot().await;
+    assert_eq!(inst.providers.roles, [planner]);
+    srv.stop().await;
 }

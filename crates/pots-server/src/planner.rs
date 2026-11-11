@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use pots_llm::agent::{self, RunConfig};
 use pots_llm::{Item, LlmError};
-use pots_proto::{ArtifactKind, Card, GoalId, ProjectId, Timestamp};
+use pots_proto::{ArtifactKind, Card, GoalId, ModelRole, ProjectId, Timestamp};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::sqlite::SqliteConnection;
@@ -569,7 +569,7 @@ impl Planner {
             message
         };
 
-        let route = match inner.router.resolve() {
+        let route = match inner.router.resolve_role(ModelRole::Planner) {
             Ok(r) => r,
             Err(e) => return Ok(RunEnd::Llm(e)),
         };
@@ -625,7 +625,7 @@ impl Planner {
         });
         let gate = ctx.gate();
         let config = RunConfig {
-            reasoning: None,
+            reasoning: route.reasoning,
             provider: route.provider,
             model: route.model,
             instructions: Some(instructions),

@@ -30,7 +30,8 @@ use uuid::Uuid;
 ///   帶 `workdir`、`ApprovalActionView::ApplyChanges`）。
 /// - 13：對話 agent 管理自動化與 artifact（`ArtifactArchived`、`ApprovalActionView` 的
 ///   `DeleteSchedule`／`DeleteListener`／`ArchiveArtifact`）。
-pub const PROTOCOL_VERSION: u32 = 13;
+/// - 14：依角色設定模型與 thinking（`ProvidersView::roles`、`SetRoleModel`）。
+pub const PROTOCOL_VERSION: u32 = 14;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -1982,6 +1983,127 @@ pub struct ProvidersView {
     /// 整理記憶（Observer／Reflector）用的模型。
     #[serde(default)]
     pub memory: MemoryModelView,
+    /// 各角色另外設定的模型與 thinking；沒有列出的角色是 [`RoleModelView::default`]
+    /// （跟使用中的 provider 相同、thinking 用模型預設）。用 [`ProvidersView::role`] 讀。
+    #[serde(default)]
+    pub roles: Vec<RoleModelView>,
+}
+
+/// 可以個別設定模型與 thinking 的 agent 角色，對應 `crates/pots-server/profiles/` 的 profile。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ModelRole {
+    /// project 對話 agent（profile `chat`）。
+    Chat,
+    /// 總管（profile `global`）。
+    Global,
+    Planner,
+    /// 內建 worker。Claude Code worker 用 Worker 設定的模型，不看這裡。
+    Worker,
+    /// 唯讀查程式碼的 subagent。
+    Explorer,
+    /// 唯讀審查的 subagent。
+    Reviewer,
+}
+
+impl ModelRole {
+    pub const ALL: [Self; 6] = [
+        Self::Chat,
+        Self::Global,
+        Self::Planner,
+        Self::Worker,
+        Self::Explorer,
+        Self::Reviewer,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "對話 agent",
+            Self::Global => "總管",
+            Self::Planner => "Planner",
+            Self::Worker => "內建 worker",
+            Self::Explorer => "Explorer subagent",
+            Self::Reviewer => "Reviewer subagent",
+        }
+    }
+
+    /// 對應的 profile 名稱。
+    pub fn profile(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Global => "global",
+            Self::Planner => "planner",
+            Self::Worker => "worker",
+            Self::Explorer => "explorer",
+            Self::Reviewer => "reviewer",
+        }
+    }
+
+    /// profile 名稱對應的角色；不認得時 `None`。
+    pub fn from_profile(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.profile() == name)
+    }
+}
+
+/// 模型推理（thinking）的強度。送給 provider 時依 API 轉換：OpenAI 的 reasoning effort、
+/// Anthropic 的 adaptive thinking 與 effort。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ThinkingLevel {
+    /// 不送參數，用模型的預設值。
+    #[default]
+    Default,
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingLevel {
+    pub const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Off,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "模型預設",
+            Self::Off => "關閉",
+            Self::Low => "低",
+            Self::Medium => "中",
+            Self::High => "高",
+        }
+    }
+}
+
+/// 一個角色用的 provider、模型與 thinking。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleModelView {
+    pub role: ModelRole,
+    /// `None`：跟使用中的 provider 相同（模型也用那個 provider 設定的）。
+    pub provider: Option<ProviderId>,
+    /// 空字串：用該 provider 設定的模型。`provider` 是 `None` 時一定是空字串。
+    pub model: String,
+    #[serde(default)]
+    pub thinking: ThinkingLevel,
+}
+
+impl RoleModelView {
+    /// 沒有另外設定的角色。
+    pub fn default_for(role: ModelRole) -> Self {
+        Self {
+            role,
+            provider: None,
+            model: String::new(),
+            thinking: ThinkingLevel::Default,
+        }
+    }
+
+    /// 和 [`default_for`](Self::default_for) 相同：服務不必存這一列。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default_for(self.role)
+    }
 }
 
 /// 整理記憶用的 provider 與模型，和對話 agent 分開設定。
@@ -2000,6 +2122,31 @@ impl ProvidersView {
 
     pub fn active(&self) -> Option<&ProviderView> {
         self.active.and_then(|id| self.get(id))
+    }
+
+    /// `role` 的設定；沒有另外設定時是 [`RoleModelView::default_for`]。
+    pub fn role(&self, role: ModelRole) -> RoleModelView {
+        self.roles
+            .iter()
+            .find(|r| r.role == role)
+            .cloned()
+            .unwrap_or_else(|| RoleModelView::default_for(role))
+    }
+
+    /// `role` 實際會用的 provider 與模型 ID（模型空字串表示 provider 自動選，例如 ChatGPT）。
+    /// 沒有使用中的 provider、或設定的 provider 不見了時 `None`。
+    pub fn resolve_role(&self, role: ModelRole) -> Option<(&ProviderView, String)> {
+        let config = self.role(role);
+        let provider = match config.provider {
+            Some(id) => self.get(id)?,
+            None => self.active()?,
+        };
+        let model = if config.provider.is_some() && !config.model.trim().is_empty() {
+            config.model.trim().to_string()
+        } else {
+            provider.model.clone()
+        };
+        Some((provider, model))
     }
 }
 
@@ -2420,6 +2567,14 @@ pub enum ClientCommand {
         /// `None`：跟對話 agent 相同。
         provider: Option<ProviderId>,
         model: String,
+    },
+    /// 設定一個角色用的 provider、模型與 thinking；伺服器回 `Providers`。
+    /// `provider` 為 `None` 時跟使用中的 provider 相同，`model` 會被清掉。
+    SetRoleModel {
+        role: ModelRole,
+        provider: Option<ProviderId>,
+        model: String,
+        thinking: ThinkingLevel,
     },
     /// 釘選或取消釘選一條觀察。有變動時伺服器回 `Memory`；被拒絕時回 `Error`，並重送一次
     /// 目前的 `Memory`（下面兩個指令也一樣）。

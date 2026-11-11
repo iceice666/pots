@@ -18,19 +18,28 @@
 //! - 整理記憶（Observer／Reflector）用的 provider 與模型存在 `instance_settings.memory_provider`
 //!   與 `memory_model`：provider 是空字串或沒有這列表示跟對話 agent 相同；模型是空字串時用該
 //!   provider 設定的模型。刪掉記憶用的 provider 時改回跟對話 agent 相同。
+//! - 各角色（[`ModelRole`]：對話 agent、總管、Planner、內建 worker、explorer、reviewer）的
+//!   provider、模型與 thinking 存在 `instance_settings.role_models`，值是 JSON 物件，鍵是 profile
+//!   名稱，只存非預設的角色，例如
+//!   `{"planner":{"provider":"<id>","model":"gpt-y","thinking":"high"}}`。provider 是空字串
+//!   表示跟使用中的 provider 相同（模型一併清掉）；`thinking` 省略表示用模型預設。整個實例共用，
+//!   不寫進 `profiles/*.toml`。載入時 provider 已經不存在的角色改回跟使用中的相同；刪掉某個角色
+//!   用的 provider 時也一樣（thinking 保留）。
 //!
-//! run 開始時用 [`ProviderRouter`] 依當下使用中的 provider 決定一次 [`Route`]，整個 run 都用它；
-//! Observer／Reflector 每次呼叫用 [`ProviderRouter::resolve_memory`]。
+//! run 開始時用 [`ProviderRouter::resolve_role`] 依當下的設定決定一次 [`Route`]（含 thinking），
+//! 整個 run 都用它；Observer／Reflector 每次呼叫用 [`ProviderRouter::resolve_memory`]（不帶
+//! thinking）。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pots_llm::{LlmError, ModelProvider};
+use pots_llm::{LlmError, ModelProvider, Reasoning};
 use pots_proto::{
-    MemoryModelView, ModelOption, ProviderDraft, ProviderHeader, ProviderId, ProviderKind,
-    ProviderView, ProvidersView, ServerEvent, Timestamp,
+    MemoryModelView, ModelOption, ModelRole, ProviderDraft, ProviderHeader, ProviderId,
+    ProviderKind, ProviderView, ProvidersView, RoleModelView, ServerEvent, ThinkingLevel,
+    Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -42,6 +51,7 @@ pub(crate) const SETTING_ACTIVE: &str = "active_provider";
 pub(crate) const SETTING_CHATGPT_MODEL: &str = "chatgpt_model";
 pub(crate) const SETTING_MEMORY_PROVIDER: &str = "memory_provider";
 pub(crate) const SETTING_MEMORY_MODEL: &str = "memory_model";
+pub(crate) const SETTING_ROLE_MODELS: &str = "role_models";
 /// API key 檔案的目錄，相對於資料目錄。
 const SECRET_DIR: &str = "auth/providers";
 /// `TestProvider` 列模型的時限。
@@ -147,6 +157,124 @@ struct SecretFile {
     api_key: String,
 }
 
+/// `instance_settings.role_models` 裡的一個角色（鍵是 profile 名稱）。用自己的字串格式，
+/// 不直接存協定型別，協定改名不影響已存的設定。
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StoredRole {
+    /// 空字串：跟使用中的 provider 相同。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    provider: String,
+    /// 空字串：用該 provider 設定的模型。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    model: String,
+    /// `off`、`low`、`medium`、`high`；省略表示用模型預設。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thinking: Option<String>,
+}
+
+fn thinking_key(level: ThinkingLevel) -> Option<&'static str> {
+    match level {
+        ThinkingLevel::Default => None,
+        ThinkingLevel::Off => Some("off"),
+        ThinkingLevel::Low => Some("low"),
+        ThinkingLevel::Medium => Some("medium"),
+        ThinkingLevel::High => Some("high"),
+    }
+}
+
+/// 角色設定的 thinking 轉成送給 provider 的值；`Default` 不送。
+fn reasoning(level: ThinkingLevel) -> Option<Reasoning> {
+    match level {
+        ThinkingLevel::Default => None,
+        ThinkingLevel::Off => Some(Reasoning::Off),
+        ThinkingLevel::Low => Some(Reasoning::Low),
+        ThinkingLevel::Medium => Some(Reasoning::Medium),
+        ThinkingLevel::High => Some(Reasoning::High),
+    }
+}
+
+/// 角色設定寫進 `role_models` 的 JSON；只有非預設的角色。
+fn encode_roles(roles: &[RoleModelView]) -> String {
+    let map: BTreeMap<&str, StoredRole> = roles
+        .iter()
+        .filter(|r| !r.is_default())
+        .map(|r| {
+            let stored = StoredRole {
+                provider: r.provider.map(|id| id.to_string()).unwrap_or_default(),
+                model: r.model.clone(),
+                thinking: thinking_key(r.thinking).map(str::to_string),
+            };
+            (r.role.profile(), stored)
+        })
+        .collect();
+    serde_json::to_string(&map).expect("字串組成的 map 一定能序列化")
+}
+
+/// 讀 `role_models`。不認得的角色與 thinking 跳過；provider 已經不存在時改回跟使用中的相同
+/// （thinking 保留）。都記 warn。
+fn decode_roles(raw: &str, state: &ProviderState) -> Vec<RoleModelView> {
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    let map: BTreeMap<String, StoredRole> = match serde_json::from_str(raw) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "角色模型設定格式不對，全部改回預設");
+            return Vec::new();
+        }
+    };
+    let mut roles = Vec::new();
+    for (name, stored) in map {
+        let Some(role) = ModelRole::from_profile(&name) else {
+            tracing::warn!(role = %name, "不認得的角色，忽略它的模型設定");
+            continue;
+        };
+        let thinking = match stored.thinking.as_deref() {
+            None => ThinkingLevel::Default,
+            Some(key) => match ThinkingLevel::ALL
+                .into_iter()
+                .find(|l| thinking_key(*l) == Some(key))
+            {
+                Some(level) => level,
+                None => {
+                    tracing::warn!(role = %name, value = %key, "不認得的 thinking，改用模型預設");
+                    ThinkingLevel::Default
+                }
+            },
+        };
+        let provider = match stored.provider.as_str() {
+            "" => None,
+            s => match s.parse::<ProviderId>() {
+                Ok(id) if state.contains(id) => Some(id),
+                _ => {
+                    tracing::warn!(
+                        role = %name,
+                        value = %s,
+                        "角色用的 provider 不存在，改成跟使用中的相同"
+                    );
+                    None
+                }
+            },
+        };
+        let model = if provider.is_some() {
+            stored.model.trim().to_string()
+        } else {
+            String::new()
+        };
+        let config = RoleModelView {
+            role,
+            provider,
+            model,
+            thinking,
+        };
+        if !config.is_default() {
+            roles.push(config);
+        }
+    }
+    roles.sort_by_key(|r| r.role);
+    roles
+}
+
 #[derive(Clone)]
 struct ApiEntry {
     row: ConnectionRow,
@@ -179,9 +307,29 @@ struct ProviderState {
     memory_provider: Option<ProviderId>,
     /// 整理記憶用的模型；空字串用該 provider 設定的模型。
     memory_model: String,
+    /// 另外設定的角色，依 [`ModelRole`] 排序；只放非預設的（[`RoleModelView::is_default`]）。
+    roles: Vec<RoleModelView>,
 }
 
 impl ProviderState {
+    /// `role` 的設定；沒有另外設定時是預設值。
+    fn role(&self, role: ModelRole) -> RoleModelView {
+        self.roles
+            .iter()
+            .find(|r| r.role == role)
+            .cloned()
+            .unwrap_or_else(|| RoleModelView::default_for(role))
+    }
+
+    /// 換掉一個角色的設定；預設值不存。
+    fn put_role(&mut self, config: RoleModelView) {
+        self.roles.retain(|r| r.role != config.role);
+        if !config.is_default() {
+            self.roles.push(config);
+            self.roles.sort_by_key(|r| r.role);
+        }
+    }
+
     fn view(&self) -> ProvidersView {
         let mut items = vec![ProviderView {
             id: ProviderId::CHATGPT,
@@ -200,6 +348,7 @@ impl ProviderState {
                 provider: self.memory_provider,
                 model: self.memory_model.clone(),
             },
+            roles: self.roles.clone(),
         }
     }
 
@@ -243,6 +392,7 @@ impl ProviderRegistry {
                 api: Vec::new(),
                 memory_provider: None,
                 memory_model: String::new(),
+                roles: Vec::new(),
             }),
         };
         let mut api = Vec::new();
@@ -267,6 +417,7 @@ impl ProviderRegistry {
             api,
             memory_provider: None,
             memory_model,
+            roles: Vec::new(),
         };
         match store.setting(SETTING_MEMORY_PROVIDER).await? {
             None => {}
@@ -275,6 +426,9 @@ impl ProviderRegistry {
                 Ok(id) if state.contains(id) => state.memory_provider = Some(id),
                 _ => tracing::warn!(value = %s, "記憶用的 provider 不存在，改成跟對話 agent 相同"),
             },
+        }
+        if let Some(raw) = store.setting(SETTING_ROLE_MODELS).await? {
+            state.roles = decode_roles(&raw, &state);
         }
         let mut initial_active = None;
         match store.setting(SETTING_ACTIVE).await? {
@@ -396,6 +550,8 @@ pub(crate) struct Route {
     pub billing: &'static str,
     /// models.dev 的 provider 鍵（單價表用）。
     pub pricing_provider: String,
+    /// 角色設定的 thinking；`None` 不送，用模型預設。記憶的 route 一定是 `None`。
+    pub reasoning: Option<Reasoning>,
 }
 
 impl Route {
@@ -407,6 +563,7 @@ impl Route {
             billing: self.billing.into(),
             pricing_provider: self.pricing_provider.clone(),
             runtime: runtime.into(),
+            reasoning: self.reasoning,
         }
     }
 }
@@ -469,30 +626,40 @@ impl ProviderRouter {
         }
     }
 
+    /// 一個角色的 route：沒有另外設定 provider 時用使用中的 provider 與它設定的模型，
+    /// 否則用該 provider（模型非空時取代 provider 設定的模型）。thinking 另外套上。
+    ///
     /// 沒有使用中的 provider 時回 [`LlmError::NotConfigured`]；API provider 沒選模型時回
     /// `Unsupported`；設定有問題（例如 key 檔不見）時回建立時記下的錯誤。
-    pub fn resolve(&self) -> Result<Route, LlmError> {
+    pub fn resolve_role(&self, role: ModelRole) -> Result<Route, LlmError> {
         let state = self.registry.state.lock().unwrap();
+        let config = state.role(role);
+        let mut route = match config.provider {
+            None => self.active_route(&state)?,
+            Some(id) => self.route(&state, id, &config.model)?,
+        };
+        route.reasoning = reasoning(config.thinking);
+        Ok(route)
+    }
+
+    fn active_route(&self, state: &ProviderState) -> Result<Route, LlmError> {
         match state.active {
             None => Err(LlmError::NotConfigured),
-            Some(id) => self.route(&state, id, ""),
+            Some(id) => self.route(state, id, ""),
         }
     }
 
-    /// 整理記憶（Observer／Reflector）用的 route：沒有另外設定時和 [`resolve`](Self::resolve)
-    /// 相同。
+    /// 整理記憶（Observer／Reflector）用的 route：沒有另外設定時用使用中的 provider。
+    /// 不看角色設定、不帶 thinking。
     pub fn resolve_memory(&self) -> Result<Route, LlmError> {
         let state = self.registry.state.lock().unwrap();
         match state.memory_provider {
-            None => match state.active {
-                None => Err(LlmError::NotConfigured),
-                Some(id) => self.route(&state, id, ""),
-            },
+            None => self.active_route(&state),
             Some(id) => self.route(&state, id, &state.memory_model),
         }
     }
 
-    /// `id` 這個 provider 的 route。`model` 非空時取代 provider 設定的模型。
+    /// `id` 這個 provider 的 route。`model` 非空時取代 provider 設定的模型。不帶 thinking。
     fn route(&self, state: &ProviderState, id: ProviderId, model: &str) -> Result<Route, LlmError> {
         let model = model.trim();
         if id == ProviderId::CHATGPT {
@@ -510,6 +677,7 @@ impl ProviderRouter {
                 label: "ChatGPT".into(),
                 billing: "subscription",
                 pricing_provider: "chatgpt".into(),
+                reasoning: None,
             });
         }
         let entry = state.entry(id).ok_or(LlmError::NotConfigured)?;
@@ -529,6 +697,7 @@ impl ProviderRouter {
             label: entry.row.name.clone(),
             billing: "api",
             pricing_provider,
+            reasoning: None,
         })
     }
 }
@@ -808,6 +977,21 @@ pub(crate) async fn delete(app: &App, id: ProviderId) -> Result<(), String> {
         state.memory_provider = None;
         state.memory_model.clear();
     }
+    // 用這個 provider 的角色改回跟使用中的相同；thinking 保留。
+    let orphaned: Vec<RoleModelView> = state
+        .roles
+        .iter()
+        .filter(|r| r.provider == Some(id))
+        .cloned()
+        .collect();
+    let roles_cleared = !orphaned.is_empty();
+    for config in orphaned {
+        state.put_role(RoleModelView {
+            provider: None,
+            model: String::new(),
+            ..config
+        });
+    }
     let providers = state.view();
     let result: Result<(), Error> = async {
         Store::delete_connection(txn.conn(), id).await?;
@@ -817,6 +1001,14 @@ pub(crate) async fn delete(app: &App, id: ProviderId) -> Result<(), String> {
         if memory_cleared {
             Store::set_setting(txn.conn(), SETTING_MEMORY_PROVIDER, "").await?;
             Store::set_setting(txn.conn(), SETTING_MEMORY_MODEL, "").await?;
+        }
+        if roles_cleared {
+            Store::set_setting(
+                txn.conn(),
+                SETTING_ROLE_MODELS,
+                &encode_roles(&providers.roles),
+            )
+            .await?;
         }
         txn.push(|seq| ServerEvent::Providers { seq, providers })
             .await?;
@@ -880,6 +1072,53 @@ pub(crate) async fn set_memory(
         let id = provider.map(|id| id.to_string()).unwrap_or_default();
         Store::set_setting(txn.conn(), SETTING_MEMORY_PROVIDER, &id).await?;
         Store::set_setting(txn.conn(), SETTING_MEMORY_MODEL, &providers.memory.model).await?;
+        txn.push(|seq| ServerEvent::Providers { seq, providers })
+            .await?;
+        txn.commit_then(|| registry.replace(state)).await
+    }
+    .await;
+    result.map_err(internal)
+}
+
+/// `SetRoleModel`。驗證和 [`set_memory`] 一樣；`provider` 為 `None` 時跟使用中的 provider
+/// 相同，模型一併清掉。只影響下一個 run。
+pub(crate) async fn set_role(
+    app: &App,
+    role: ModelRole,
+    provider: Option<ProviderId>,
+    model: String,
+    thinking: ThinkingLevel,
+) -> Result<(), String> {
+    let registry = &app.providers;
+    let model = model.trim().to_string();
+    if model.chars().count() > MAX_NAME {
+        return Err(format!("模型 ID 最多 {MAX_NAME} 個字"));
+    }
+    let mut txn = app.hub.begin().await.map_err(internal)?;
+    let mut state = registry.snapshot();
+    if let Some(id) = provider
+        && !state.contains(id)
+    {
+        return Err("找不到這個 provider".into());
+    }
+    state.put_role(RoleModelView {
+        role,
+        provider,
+        model: if provider.is_some() {
+            model
+        } else {
+            String::new()
+        },
+        thinking,
+    });
+    let providers = state.view();
+    let result: Result<(), Error> = async {
+        Store::set_setting(
+            txn.conn(),
+            SETTING_ROLE_MODELS,
+            &encode_roles(&providers.roles),
+        )
+        .await?;
         txn.push(|seq| ServerEvent::Providers { seq, providers })
             .await?;
         txn.commit_then(|| registry.replace(state)).await
@@ -1055,6 +1294,64 @@ mod tests {
                 value: "yes".into()
             }]
         );
+    }
+
+    fn empty_state() -> ProviderState {
+        ProviderState {
+            active: Some(ProviderId::CHATGPT),
+            chatgpt_model: String::new(),
+            api: Vec::new(),
+            memory_provider: None,
+            memory_model: String::new(),
+            roles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn role_models_roundtrip() {
+        let roles = vec![
+            RoleModelView {
+                role: ModelRole::Chat,
+                provider: None,
+                model: String::new(),
+                thinking: ThinkingLevel::Low,
+            },
+            RoleModelView {
+                role: ModelRole::Planner,
+                provider: Some(ProviderId::CHATGPT),
+                model: "gpt-5".into(),
+                thinking: ThinkingLevel::High,
+            },
+            RoleModelView::default_for(ModelRole::Worker),
+        ];
+        let raw = encode_roles(&roles);
+        let id = ProviderId::CHATGPT;
+        assert_eq!(
+            raw,
+            format!(
+                r#"{{"chat":{{"thinking":"low"}},"planner":{{"provider":"{id}","model":"gpt-5","thinking":"high"}}}}"#
+            )
+        );
+        assert_eq!(decode_roles(&raw, &empty_state()), roles[..2].to_vec());
+    }
+
+    #[test]
+    fn role_models_drop_unknown_entries() {
+        let missing = ProviderId::new();
+        let raw = format!(
+            r#"{{"ghost":{{"thinking":"high"}},"worker":{{"provider":"{missing}","model":"x","thinking":"medium"}},"explorer":{{"provider":"{missing}"}},"reviewer":{{"thinking":"max"}}}}"#
+        );
+        assert_eq!(
+            decode_roles(&raw, &empty_state()),
+            vec![RoleModelView {
+                role: ModelRole::Worker,
+                provider: None,
+                model: String::new(),
+                thinking: ThinkingLevel::Medium,
+            }]
+        );
+        assert!(decode_roles("not json", &empty_state()).is_empty());
+        assert!(decode_roles("", &empty_state()).is_empty());
     }
 
     #[test]

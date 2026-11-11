@@ -25,9 +25,9 @@ use pots_llm::LlmError;
 use pots_llm::agent::{self, AgentEvent, RunConfig, RunOutcome};
 use pots_llm::{Item, ToolCall};
 use pots_proto::{
-    AgentRole, AgentState, Author, Card, GoalState, ItemId, ModelAuthView, Msg, MsgStatus,
-    ProjectId, ProviderId, ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp,
-    ToolSummary,
+    AgentRole, AgentState, Author, Card, GoalState, ItemId, ModelAuthView, ModelRole, Msg,
+    MsgStatus, ProjectId, ProviderId, ServerEvent, StreamItemKind, StreamItemView, StreamScope,
+    Timestamp, ToolSummary,
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -494,8 +494,11 @@ async fn run_chat(
         inner.memory.wake(project);
     }
 
-    // 整個 run 用同一個 provider 與模型，中途切換只影響下一個 run。
-    let route = inner.router.resolve();
+    // 整個 run 用同一個 provider 與模型，中途切換只影響下一個 run。project 的 Runs 用 chat
+    // profile（對話 agent），總管的 Runs 用 global profile（總管）；profile 名稱固定，
+    // 不會不認得，保險起見退回對話 agent。
+    let role = ModelRole::from_profile(&profile.name).unwrap_or(ModelRole::Chat);
+    let route = inner.router.resolve_role(role);
     let pinned = route.as_ref().ok().map(|r| r.id);
     let result = match route {
         Ok(route) => drive_loop(inner, &row, run_id, &mut reply, route, cancel).await,
@@ -797,7 +800,7 @@ async fn drive_loop(
     });
     let gate = ctx.gate();
     let config = RunConfig {
-        reasoning: None,
+        reasoning: route.reasoning,
         provider: route.provider,
         model: route.model,
         instructions: Some(instructions),

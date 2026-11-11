@@ -14,10 +14,10 @@ use std::time::Duration;
 
 use common::{Client, ScriptedApi, TestServer};
 use pots_llm::testing::{FnProvider, ScriptedTurn};
-use pots_llm::{Item, ModelRequest};
+use pots_llm::{Item, ModelRequest, Reasoning};
 use pots_proto::{
-    ArtifactKind, ArtifactView, Card, ClientCommand, GoalState, GoalView, ProjectId, ProviderId,
-    SendMode, ServerEvent, StreamItemKind, TaskStateView,
+    ArtifactKind, ArtifactView, Card, ClientCommand, GoalState, GoalView, ModelRole, ProjectId,
+    ProviderId, SendMode, ServerEvent, StreamItemKind, TaskStateView, ThinkingLevel,
 };
 use pots_server::{Config, Deps, FakeModelAuth};
 use serde_json::{Value, json};
@@ -299,6 +299,58 @@ async fn create_goal_hands_off_to_planner() {
     let instructions = chat.instructions.unwrap();
     assert!(instructions.contains("「登入重構」"), "{instructions}");
     assert!(instructions.contains("已拆成兩個任務"));
+    srv.stop().await;
+}
+
+/// Planner 與對話 agent 各用自己角色設定的模型與 thinking。
+#[tokio::test]
+async fn planner_uses_its_role_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = FnProvider::new("m", |req| {
+        if is_planner(req) {
+            ScriptedTurn::reply("用自己的模型規劃")
+        } else {
+            chat_turn(req)
+        }
+    });
+    let srv = launch(tmp.path(), model.clone()).await;
+    let mut c = srv.client().await;
+    c.snapshot().await;
+    for (role, provider, name, thinking) in [
+        (
+            ModelRole::Planner,
+            Some(ProviderId::CHATGPT),
+            "planner-model",
+            ThinkingLevel::High,
+        ),
+        (ModelRole::Chat, None, "", ThinkingLevel::Off),
+    ] {
+        c.send(&ClientCommand::SetRoleModel {
+            role,
+            provider,
+            model: name.into(),
+            thinking,
+        })
+        .await;
+        c.until(|e| matches!(e, ServerEvent::Providers { .. }))
+            .await;
+    }
+    let project = c.create_project("角色").await;
+    let events = say(&mut c, project, &create_goal_call("登入重構")).await;
+    settle_goal(&mut c, &events, |g| g.planner_note == "用自己的模型規劃").await;
+
+    let requests = model.requests();
+    let planner: Vec<_> = requests.iter().filter(|r| is_planner(r)).collect();
+    assert!(!planner.is_empty());
+    assert!(
+        planner
+            .iter()
+            .all(|r| r.model == "planner-model" && r.reasoning == Some(Reasoning::High))
+    );
+    // 第一個請求是對話 agent（記憶整理在之後，不帶 thinking）。
+    assert!(!is_planner(&requests[0]));
+    assert_eq!(requests[0].model, "test-model");
+    assert_eq!(requests[0].reasoning, Some(Reasoning::Off));
     srv.stop().await;
 }
 
