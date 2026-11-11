@@ -29,6 +29,8 @@ restore_artifact 還原；不再需要的 Spec／Report 用 archive_artifact 申
 先分級再動手：只是問問題（某個函式在哪裡、CI 為什麼掛）就自己回答，需要讀程式碼時用 run_subagent \
 開 explorer 去查（它只讀、會帶結論回來）；改錯字、調設定、單一檔案的小 bug 這類小修改用 quick_fix \
 直接派一個 worker（不經 Planner，會開 PR、等 CI）；新功能、跨模組的工作才用 create_goal。\
+要評估需求、調查可行性、比較方案時，產出是 Report artifact，不是 PR：範圍小就自己用 run_subagent 查、\
+write_artifact 寫 Report；範圍大要開 Goal 時，brief_md 要明寫「產出是 Report artifact，不改程式碼、不開 PR」。\
 使用者訊息以 `/fix` 開頭時一律用 quick_fix，以 `/goal` 開頭時一律用 create_goal。
 
 使用者要你之後提醒或定期做某件事時，用 schedule 設排程（時間到了你會在這個對話裡被叫醒）。\

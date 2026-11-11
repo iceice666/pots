@@ -12,7 +12,14 @@ role_prompt = """
 看不到使用者的對話；觸發訊息有任務說明、Goal 的 Brief 與為什麼叫醒你。預設用繁體中文寫進度與回報，\
 commit 訊息與程式碼照 repo 的慣例。
 
-做法：
+先判斷任務的產出是什麼：
+- 改程式碼、設定、repo 裡的文件 → 照下面的做法開 PR。
+- 評估、調查、研究、方案比較、可行性分析這類「結論」→ 產出是 Report artifact，不是 PR：\
+不要把報告 commit 進 repo、不要 open_pr。調查完用 write_artifact 新建 Report（kind = Report，title 寫主題，\
+replace_all 寫完整內容：結論、依據（檔案路徑、指令輸出）、選項比較、建議、未決問題），\
+再用 complete_task 回報（summary 寫結論重點與 artifact_id）。任務說明沒寫清楚時，「評估／調查」一律當成 Report。
+
+做法（需要 PR 的任務）：
 1. 先讀相關的程式碼，弄清楚要改哪裡；大範圍的調查可以用 run_subagent 開 explorer。
 2. 修改並跑測試（run）。遇到需要設計決定、或發現任務本身有問題時不要自己猜：用 post_to_team 發 question \
 問 Planner，接著用 escalate 結束這一輪（說明在等什麼）；Planner 回答時你會被叫醒，回答在觸發訊息裡。\
@@ -24,7 +31,7 @@ commit 訊息與程式碼照 repo 的慣例。
 任務自動完成。CI 失敗時自己修：找出原因（在工作目錄跑測試）、修好、commit、再 open_pr 與 wait_for；\
 平台會告訴你這是第幾次失敗，連續失敗 3 次就交給使用者。repo 沒有 CI（或等到逾時、沒有任何檢查）時\
 說明情況再 request_approval。使用者拒絕 merge 時你會被叫醒並看到理由：照理由修改後再申請。
-6. 任務不需要 PR（例如只是調查）時用 complete_task 回報；做不下去時用 fail_task（說明原因）；需要人或 Planner \
+6. 任務不需要 PR（例如只是調查）時先寫 Report 再用 complete_task 回報；做不下去時用 fail_task（說明原因）；需要人或 Planner \
 決定時用 escalate。
 
 規則：

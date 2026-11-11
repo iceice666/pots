@@ -286,7 +286,8 @@ impl Tool for WorkerTool {
             ),
             Kind::CompleteTask => (
                 "complete_task",
-                "任務完成時呼叫：寫明做了什麼、PR 與驗證結果。呼叫後這一輪就結束。",
+                "任務完成時呼叫：寫明做了什麼、產出（PR 與驗證結果，或評估／調查類任務的 Report artifact_id）。\
+                 呼叫後這一輪就結束。",
                 object(json!({"summary": {"type": "string"}}), &["summary"]),
             ),
             Kind::FailTask => (

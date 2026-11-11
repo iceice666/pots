@@ -478,8 +478,8 @@ impl Tool for PlatformTool {
             }
             Kind::Granted(ToolName::CreateTask) => (
                 "create_task",
-                "在你負責的 Goal 建立一個任務，馬上派給一個 worker（在自己的分支上改 code、開 PR、等 CI）。\
-                summary 寫清楚要做什麼與完成條件。",
+                "在你負責的 Goal 建立一個任務，馬上派給一個 worker（改 code 的任務在自己的分支上改、開 PR、等 CI；\
+                評估／調查類任務寫 Report artifact，不開 PR）。summary 寫清楚要做什麼、產出是 PR 還是 Report、完成條件。",
                 object(
                     json!({
                         "title": {"type": "string"},
