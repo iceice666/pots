@@ -160,7 +160,7 @@ fn approval_facts(a: &ApprovalView) -> Vec<String> {
         } => vec![
             format!("本機資料夾 {path}"),
             format!("{branch} → {base}"),
-            format!("套用 {}（fast-forward）", &sha[..sha.len().min(7)]),
+            format!("套用 {}（線性接到 {base} 上）", &sha[..sha.len().min(7)]),
         ],
         ApprovalActionView::CreateListener { summary, .. } => vec![summary.clone()],
         ApprovalActionView::EditUserMd { base_rev, .. } => {

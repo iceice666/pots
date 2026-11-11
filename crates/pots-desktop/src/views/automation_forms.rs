@@ -1389,7 +1389,7 @@ impl PotsApp {
                     .text_size(px(12.))
                     .text_color(theme::text_muted())
                     .child(if local {
-                        "本機資料夾：worker 在任務分支上改，核准後平台把分支 fast-forward 套用進去；沒有 PR 與 CI。"
+                        "本機資料夾：worker 在任務分支上改，核准後平台把分支的 commit 線性接到你的分支上；沒有 PR 與 CI。"
                     } else {
                         "worker 在任務分支上改、開 PR、等 CI，核准後 merge。"
                     }),
@@ -1485,7 +1485,7 @@ impl PotsApp {
             }
         }
         // 你核准 merge 後平台用的方式（agent 申請時可以另外指定，核准卡片上看得到）。
-        // 本機資料夾只有 fast-forward，沒有 merge 方式可選。
+        // 本機資料夾一律線性套用，沒有 merge 方式可選。
         if local {
             return b;
         }

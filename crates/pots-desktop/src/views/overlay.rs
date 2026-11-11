@@ -211,8 +211,8 @@ impl PotsApp {
         let editing = d.project.is_some();
         let local = d.kind == WorkdirKind::Local;
         let hint = if local {
-            "worker 在任務分支上改平台自己的副本，不是你資料夾裡的即時檔案；核准後平台把分支 \
-             fast-forward 套用進去。沒有 PR 與 CI，資料夾有未 commit 的修改時不能套用。"
+            "worker 在任務分支上改平台自己的副本，不是你資料夾裡的即時檔案；核准後平台把分支的 \
+             commit 線性接到你的分支上（不衝突時）。沒有 PR 與 CI，資料夾有未 commit 的修改時不能套用。"
         } else {
             "worker 在平台維護的鏡像上開任務分支、開 PR、等 CI，核准後 merge。這不是你電腦上的資料夾。"
         };
