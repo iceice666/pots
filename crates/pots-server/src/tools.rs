@@ -299,6 +299,7 @@ fn kind_name(kind: ArtifactKind) -> &'static str {
 
 fn goal_state_name(state: &GoalState) -> &'static str {
     match state {
+        GoalState::Draft => "draft",
         GoalState::Active => "active",
         GoalState::Done { .. } => "done",
         GoalState::Cancelled { .. } => "cancelled",
@@ -413,7 +414,8 @@ impl Tool for PlatformTool {
             Kind::Granted(ToolName::CreateGoal) => (
                 "create_goal",
                 "開一個 Goal，把討論收斂的工作交給 Planner。brief_md 是交接用的 Brief：目標、約束、\
-                已決定事項與未決問題，用 `## ` 分段。Planner 不讀對話，只讀 Brief。",
+                已決定事項與未決問題，用 `## ` 分段。Planner 不讀對話，只讀 Brief。\
+                對話 agent 開的 Goal 先是草稿：使用者看過 Brief（可能直接改、或和你再討論）按「開始」才交給 Planner。",
                 object(
                     json!({
                         "title": {"type": "string", "description": "簡短的 Goal 標題"},
@@ -427,7 +429,8 @@ impl Tool for PlatformTool {
             Kind::Granted(ToolName::SteerGoal) => (
                 "steer_goal",
                 "使用者改變方向時修改 Goal 的 Brief 並叫醒 Planner 重新規劃（Planner 正在跑會被中斷）。\
-                edits 改 Brief 的區段，要帶 base_rev（先 read_artifact）；只想提醒 Planner 時可以只給 reason。",
+                edits 改 Brief 的區段，要帶 base_rev（先 read_artifact）；只想提醒 Planner 時可以只給 reason。\
+                草稿 Goal 也用這個改 Brief（要帶 edits），不會叫醒 Planner。",
                 object(
                     json!({
                         "goal_id": {"type": "string"},
@@ -440,7 +443,7 @@ impl Tool for PlatformTool {
             ),
             Kind::Granted(ToolName::CancelGoal) => (
                 "cancel_goal",
-                "取消一個進行中的 Goal：還沒結束的任務一起取消，Planner 停止。",
+                "取消一個進行中或草稿的 Goal：還沒結束的任務一起取消，Planner 停止。",
                 object(
                     json!({"goal_id": {"type": "string"}, "reason": {"type": "string"}}),
                     &["goal_id", "reason"],
@@ -1052,6 +1055,19 @@ impl PlatformTool {
         Ok(g)
     }
 
+    /// 自己的、還沒結束的 Goal（草稿或進行中）。
+    async fn unfinished_goal(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+        id: GoalId,
+    ) -> Result<GoalRow, ToolError> {
+        let g = self.own_goal(conn, id).await?;
+        if !g.state.is_open() {
+            return Err(bad(format!("Goal「{}」已經{}", g.title, g.state.label())));
+        }
+        Ok(g)
+    }
+
     async fn get_source_status(&self) -> Result<String, ToolError> {
         let mut tx = self.ctx.store.read().await.map_err(internal)?;
         let rows = crate::watcher::source::rows(&mut tx)
@@ -1146,11 +1162,12 @@ impl PlatformTool {
                 for p in projects {
                     let goals = tasks::goals(&mut tx, p.id).await.map_err(internal)?;
                     let mut active = Vec::new();
-                    for g in goals.iter().filter(|g| g.state.is_active()) {
+                    for g in goals.iter().filter(|g| g.state.is_open()) {
                         let tasks = tasks::tasks(&mut tx, g.id).await.map_err(internal)?;
                         active.push(json!({
                             "id": g.id.to_string(),
                             "title": g.title,
+                            "state": goal_state_name(&g.state),
                             "planner_note": g.planner_note,
                             "tasks": {
                                 "total": tasks.len(),
@@ -1188,7 +1205,7 @@ impl PlatformTool {
                 let mut active = Vec::new();
                 let mut closed = 0;
                 for g in &goals {
-                    if !g.state.is_active() {
+                    if !g.state.is_open() {
                         closed += 1;
                         continue;
                     }
@@ -1202,6 +1219,7 @@ impl PlatformTool {
                     active.push(json!({
                         "id": g.id.to_string(),
                         "title": g.title,
+                        "state": goal_state_name(&g.state),
                         "planner_note": g.planner_note,
                         "brief": artifact_ref(&brief),
                         "ledger": artifact_ref(&ledger),
@@ -1252,7 +1270,7 @@ impl PlatformTool {
         }
         let mut out = Vec::new();
         for g in goals {
-            if !args.include_closed && !g.state.is_active() {
+            if !args.include_closed && !g.state.is_open() {
                 continue;
             }
             // Planner 與 worker 只看得到自己的 Goal。
@@ -1263,7 +1281,7 @@ impl PlatformTool {
             }
             let tasks = tasks::tasks(&mut tx, g.id).await.map_err(internal)?;
             let outcome = match &g.state {
-                GoalState::Active => None,
+                GoalState::Draft | GoalState::Active => None,
                 GoalState::Done { summary } => Some(summary.clone()),
                 GoalState::Cancelled { reason } => Some(reason.clone()),
             };
@@ -1358,6 +1376,12 @@ impl PlatformTool {
                 ctx.project
             }
         };
+        // 對話 agent 開的 Goal 先是草稿，等你看過 Brief 再開始；總管開的直接交給 Planner。
+        let opening = if ctx.scope == Scope::Global {
+            Opening::Start
+        } else {
+            Opening::Draft
+        };
         let result: Result<Result<(GoalId, ArtifactId), String>, Error> = async {
             let mut txn = ctx.hub.begin().await?;
             let opened = open_goal_with_brief(
@@ -1368,14 +1392,19 @@ impl PlatformTool {
                 &ctx.actor,
                 &ctx.actor.label(),
                 Some(&ctx.reader),
-                false,
+                opening,
             )
             .await?;
             if let Ok((goal, _)) = &opened {
                 if let Some(tokens) = args.budget_tokens {
                     tasks::set_goal_budget(txn.conn(), *goal, tokens).await?;
                 }
-                txn.commit_then(|| ctx.planner.kick()).await?;
+                txn.commit_then(|| {
+                    if opening == Opening::Start {
+                        ctx.planner.kick();
+                    }
+                })
+                .await?;
             }
             Ok(opened)
         }
@@ -1383,10 +1412,18 @@ impl PlatformTool {
         let (goal, brief) = result.map_err(internal)?.map_err(bad)?;
         ctx.goals_created.fetch_add(1, Ordering::SeqCst);
         ctx.cards.lock().unwrap().push(Card::GoalCreated { goal });
+        let note = if opening == Opening::Draft {
+            "Goal 已建立成草稿：Planner 還沒開工。使用者會在對話裡的 Goal 卡片看 Brief、直接修改或和你討論，\
+             按「開始」才交給 Planner。請他看一下 Brief；要依討論修改時先 read_artifact（會看到他改過的地方），\
+             再用 steer_goal 帶 edits 改 Brief（草稿時不會叫醒 Planner）。你不能替他開始。"
+        } else {
+            "Goal 已建立，Planner 會在背景拆任務；使用者會在對話裡看到 Goal 卡片。"
+        };
         Ok(json!({
             "goal_id": goal.to_string(),
+            "state": if opening == Opening::Draft { "draft" } else { "active" },
             "brief": {"artifact_id": brief.to_string(), "rev": 1},
-            "note": "Goal 已建立，Planner 會在背景拆任務；使用者會在對話裡看到 Goal 卡片。",
+            "note": note,
         })
         .to_string())
     }
@@ -1397,7 +1434,13 @@ impl PlatformTool {
         let reason =
             tasks::check_text("reason ", &args.reason, MAX_REASON_CHARS, true).map_err(bad)?;
         let mut txn = ctx.hub.begin().await.map_err(internal)?;
-        let g = self.active_goal(txn.conn(), goal).await?;
+        let g = self.unfinished_goal(txn.conn(), goal).await?;
+        let draft = g.state.is_draft();
+        if draft && args.edits.is_empty() {
+            return Err(bad(
+                "這個 Goal 還是草稿，沒有 Planner 可以改方向：要改就帶 edits 改 Brief",
+            ));
+        }
         if tasks::goal_kind(txn.conn(), g.id).await.map_err(internal)? == "quick" {
             return Err(bad(
                 "這是快速修改，沒有 Planner 可以改方向：要改就用 cancel_goal 取消它，再開一個新的",
@@ -1437,6 +1480,15 @@ impl PlatformTool {
                 } => return Ok(conflict_json(current_rev, changes, human)),
             }
         }
+        if draft {
+            txn.commit().await.map_err(internal)?;
+            return Ok(json!({
+                "goal": g.id.to_string(),
+                "brief_rev": rev,
+                "note": "已更新草稿的 Brief；Planner 要等使用者按「開始」才開工。",
+            })
+            .to_string());
+        }
         planner::enqueue(
             txn.conn(),
             ctx.project,
@@ -1465,7 +1517,7 @@ impl PlatformTool {
         let reason =
             tasks::check_text("reason ", &args.reason, MAX_REASON_CHARS, true).map_err(bad)?;
         let mut txn = ctx.hub.begin().await.map_err(internal)?;
-        let g = self.active_goal(txn.conn(), goal).await?;
+        let g = self.unfinished_goal(txn.conn(), goal).await?;
         let cancelled = close_goal(
             &mut txn,
             &g,
@@ -1498,7 +1550,7 @@ impl PlatformTool {
         if ctx.scope != Scope::Global && g.project != ctx.project {
             return Err(bad("只能封存這個 project 的 Goal"));
         }
-        if g.state.is_active() {
+        if g.state.is_open() {
             return Err(bad("只能封存已結束的 Goal；先完成或取消它"));
         }
         if g.archived_at.is_some() {
@@ -1858,6 +1910,18 @@ pub async fn close_goal(
     Ok(cancelled)
 }
 
+/// 草稿 Goal 在狀態面板上的說明。
+pub const DRAFT_NOTE: &str = "草稿：看過 Brief 後按「開始」交給 Planner";
+
+/// 開始一個草稿 Goal：改成進行中、排 Planner（拿到的是當下的 Brief）、記 `GoalChanged`。
+/// 呼叫端在 commit 之後叫醒 Planner（[`Planner::kick`]）。
+pub async fn start_goal(txn: &mut LogTxn<'_>, g: &GoalRow) -> Result<(), Error> {
+    tasks::set_goal_state(txn.conn(), g.id, &GoalState::Active).await?;
+    tasks::set_planner_note(txn.conn(), g.id, "等待 Planner…").await?;
+    planner::enqueue(txn.conn(), g.project, g.id, &PlannerTrigger::Started).await?;
+    tasks::push_goal(txn, g.id).await
+}
+
 /// 開一個 Goal：寫入 Goal 與 Brief、排 Planner、記 `ArtifactChanged`。呼叫端在 commit 之後
 /// 叫醒 Planner（[`Planner::kick`]）。進行中的 Goal 太多或內容不合法時回說明。
 /// `by_label` 是告訴 Planner 誰開的，`reader` 是已經讀過這份 Brief 的 agent。
@@ -1870,14 +1934,32 @@ pub async fn open_goal(
     by_label: &str,
     reader: Option<&str>,
 ) -> Result<Result<GoalId, String>, Error> {
-    Ok(
-        open_goal_with_brief(txn, project, title, brief_md, by, by_label, reader, false)
-            .await?
-            .map(|(g, _)| g),
+    Ok(open_goal_with_brief(
+        txn,
+        project,
+        title,
+        brief_md,
+        by,
+        by_label,
+        reader,
+        Opening::Start,
     )
+    .await?
+    .map(|(g, _)| g))
 }
 
-/// 開 Goal 與 Brief。`quick` 時是快速修改：種類是 `quick`，不排 Planner（呼叫端自己建任務）。
+/// 開 Goal 之後怎麼走。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Opening {
+    /// 直接交給 Planner（listener、排程、總管）。
+    Start,
+    /// 草稿：不排 Planner，等你看過 Brief 按「開始」（對話 agent 開的 Goal）。
+    Draft,
+    /// 快速修改：種類是 `quick`，不排 Planner（呼叫端自己建任務）。
+    Quick,
+}
+
+/// 開 Goal 與 Brief，見 [`Opening`]。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn open_goal_with_brief(
     txn: &mut LogTxn<'_>,
@@ -1887,7 +1969,7 @@ pub(crate) async fn open_goal_with_brief(
     by: &Principal,
     by_label: &str,
     reader: Option<&str>,
-    quick: bool,
+    opening: Opening,
 ) -> Result<Result<(GoalId, ArtifactId), String>, Error> {
     let title = match tasks::check_line("title ", title, tasks::MAX_TITLE_CHARS) {
         Ok(t) => t,
@@ -1908,19 +1990,28 @@ pub(crate) async fn open_goal_with_brief(
     let active = tasks::goals(txn.conn(), project)
         .await?
         .iter()
-        .filter(|g| g.state.is_active())
+        .filter(|g| g.state.is_open())
         .count();
     if active >= MAX_ACTIVE_GOALS {
         return Ok(Err(format!(
-            "這個 project 已經有 {active} 個進行中的 Goal，先完成或取消一些"
+            "這個 project 已經有 {active} 個進行中或草稿的 Goal，先完成、取消或捨棄一些"
         )));
     }
+    let draft = opening == Opening::Draft;
     let goal = GoalRow {
         id: GoalId::new(),
         project,
         title: title.clone(),
-        state: GoalState::Active,
-        planner_note: "等待 Planner…".into(),
+        state: if draft {
+            GoalState::Draft
+        } else {
+            GoalState::Active
+        },
+        planner_note: if draft {
+            DRAFT_NOTE.into()
+        } else {
+            "等待 Planner…".into()
+        },
         created_at: Timestamp::now(),
         archived_at: None,
     };
@@ -1939,18 +2030,20 @@ pub(crate) async fn open_goal_with_brief(
     if let Some(reader) = reader {
         artifacts::mark_read(txn.conn(), brief.id, reader, brief.rev).await?;
     }
-    if quick {
-        tasks::set_goal_kind(txn.conn(), goal.id, "quick").await?;
-    } else {
-        planner::enqueue(
-            txn.conn(),
-            project,
-            goal.id,
-            &PlannerTrigger::GoalCreated {
-                by: by_label.to_string(),
-            },
-        )
-        .await?;
+    match opening {
+        Opening::Quick => tasks::set_goal_kind(txn.conn(), goal.id, "quick").await?,
+        Opening::Draft => {}
+        Opening::Start => {
+            planner::enqueue(
+                txn.conn(),
+                project,
+                goal.id,
+                &PlannerTrigger::GoalCreated {
+                    by: by_label.to_string(),
+                },
+            )
+            .await?
+        }
     }
     artifacts::push_changed(txn, &brief).await?;
     Ok(Ok((goal.id, brief.id)))

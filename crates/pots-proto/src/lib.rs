@@ -33,7 +33,8 @@ use uuid::Uuid;
 /// - 14：依角色設定模型與 thinking（`ProvidersView::roles`、`SetRoleModel`）。
 /// - 15：每個 project 有自己的負責人（`ProjectAgentName`、`RenameAgent`）。
 /// - 16：agent 問你問題（`ApprovalActionView::AskUser`，用 `Decide` 回答）。
-pub const PROTOCOL_VERSION: u32 = 16;
+/// - 17：Goal 草稿（`GoalState::Draft`、`StartGoal`、`DiscardGoal`）。
+pub const PROTOCOL_VERSION: u32 = 17;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -771,6 +772,8 @@ pub struct TeamPost {
 /// Goal 的狀態。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GoalState {
+    /// 對話 agent 開的 Goal 先是草稿：Brief 等你看過、按「開始」才交給 Planner。
+    Draft,
     #[default]
     Active,
     Done {
@@ -784,14 +787,25 @@ pub enum GoalState {
 impl GoalState {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Draft => "草稿",
             Self::Active => "進行中",
             Self::Done { .. } => "已完成",
             Self::Cancelled { .. } => "已取消",
         }
     }
 
+    /// 已經開工（Planner 與 worker 只處理這種）。
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Active)
+    }
+
+    pub fn is_draft(&self) -> bool {
+        matches!(self, Self::Draft)
+    }
+
+    /// 還沒結束：草稿或進行中。
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Draft | Self::Active)
     }
 }
 
@@ -2577,6 +2591,14 @@ pub enum ClientCommand {
     },
     Cancel {
         task: TaskId,
+    },
+    /// 開始一個草稿 Goal：交給 Planner，拿到的是當下的 Brief。不是草稿時回 `Error`。
+    StartGoal {
+        goal: GoalId,
+    },
+    /// 捨棄一個草稿 Goal（變成已取消）。不是草稿時回 `Error`。
+    DiscardGoal {
+        goal: GoalId,
     },
     /// 重試一個需要決定（或失敗）的任務：回到佇列，worker 從工作目錄的現況接著做。
     RetryTask {

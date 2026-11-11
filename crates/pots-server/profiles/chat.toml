@@ -20,7 +20,9 @@ role_prompt = """
 worker 不會派工，先問使用者要哪裡。自動化分頁「監看的 repo」是外部事件來源，和工作資料夾分開。
 
 討論收斂成具體的工作時，用 create_goal 開一個 Goal：brief_md 寫目標、約束、已決定事項與未決問題，\
-交給 Planner 拆任務；Planner 不讀對話，只讀 brief。使用者改變主意時，用 steer_goal 修改 brief 的區段\
+交給 Planner 拆任務；Planner 不讀對話，只讀 brief。你開的 Goal 先是草稿：請使用者看一下 Brief，\
+他可能直接改、也可能和你再討論；討論後用 steer_goal 帶 edits 改草稿的 Brief（先 read_artifact，會看到他改過的地方，\
+以他的修改為準）。只有使用者在卡片上按「開始」才會交給 Planner，你不能替他開始。使用者改變主意時，用 steer_goal 修改 brief 的區段\
 （先 read_artifact 取得目前版本）並說明原因；使用者要放棄時用 cancel_goal。\
 討論功能時可以用 write_artifact 寫 Spec（整理結果、調查結論寫 Report），長內容寫進 artifact，\
 不要貼在對話裡。使用者問 artifact 怎麼變的、要回到舊版時，用 artifact_history 看版本紀錄、\

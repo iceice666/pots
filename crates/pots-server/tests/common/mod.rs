@@ -183,6 +183,9 @@ impl TestServer {
 pub struct Client {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     pub last_seq: u64,
+    /// 收到草稿 Goal 時自動送 `StartGoal`，而且不把那個草稿事件交給測試：
+    /// 對話 agent 開的 Goal 先是草稿，大部分測試只關心開始之後的事。測草稿本身時關掉。
+    pub auto_start: bool,
 }
 
 impl Client {
@@ -197,14 +200,22 @@ impl Client {
         let (ws, _) = tokio_tungstenite::connect_async(req)
             .await
             .expect("WebSocket 連線失敗");
-        let mut client = Self { ws, last_seq };
+        let mut client = Self {
+            ws,
+            last_seq,
+            auto_start: true,
+        };
         client.send(&ClientCommand::Resume { last_seq }).await;
         client
     }
 
     /// 已經連好、還沒送 `Resume` 的連線。
     pub fn from_ws(ws: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
-        Self { ws, last_seq: 0 }
+        Self {
+            ws,
+            last_seq: 0,
+            auto_start: true,
+        }
     }
 
     pub async fn send(&mut self, cmd: &ClientCommand) {
@@ -228,6 +239,14 @@ impl Client {
                     let ev: ServerEvent = serde_json::from_str(&text).unwrap();
                     if let Some(seq) = ev.seq() {
                         self.last_seq = seq;
+                    }
+                    if self.auto_start
+                        && let ServerEvent::GoalChanged { goal, .. } = &ev
+                        && goal.state == pots_proto::GoalState::Draft
+                    {
+                        let goal = goal.id;
+                        self.send(&ClientCommand::StartGoal { goal }).await;
+                        continue;
                     }
                     return Some(ev);
                 }

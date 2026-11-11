@@ -959,6 +959,22 @@ async fn goal_overview(inner: &Inner, project: ProjectId) -> Result<String, Erro
             ));
         }
     }
+    let drafts: Vec<_> = goals.iter().filter(|g| g.state.is_draft()).collect();
+    if !drafts.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(
+            "# 草稿 Goal（等使用者看過 Brief 按「開始」；要改 Brief 用 steer_goal 帶 edits）\n\n",
+        );
+        for g in drafts {
+            out.push_str(&format!(
+                "- 「{}」（goal_id：{}）\n",
+                tasks::one_line(&g.title, 120),
+                g.id
+            ));
+        }
+    }
     let mut milestones = Vec::new();
     for item in Store::recent_cards(&mut tx, project, RECENT_MILESTONES * 4).await? {
         if let StreamItemKind::Card(Card::Milestone { goal, text }) = item.kind {

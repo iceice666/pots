@@ -1626,12 +1626,18 @@ async fn ask_user_wakes_whoever_asked() {
         SendMode::Queue,
     )
     .await;
-    let (pq2, _) = until_approval(&mut c, |a| {
+    let (pq2, seen) = until_approval(&mut c, |a| {
         is_question(a) && a.is_pending() && a.id != pq.id
     })
     .await;
     let goal = pq2.goal.expect("Planner 的問題有 Goal");
-    c.until_idle(project).await;
+    // 對話 agent 可能在 Planner 問問題之前就結束了（Goal 開始之後 Planner 才跑）。
+    if !seen
+        .iter()
+        .any(|e| common::is_state(e, project, pots_proto::AgentState::Idle))
+    {
+        c.until_idle(project).await;
+    }
     c.say(
         project,
         &call(

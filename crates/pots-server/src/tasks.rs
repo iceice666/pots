@@ -199,6 +199,7 @@ impl TaskRow {
 
 fn goal_state_columns(state: &GoalState) -> (&'static str, Option<&str>) {
     match state {
+        GoalState::Draft => ("draft", None),
         GoalState::Active => ("active", None),
         GoalState::Done { summary } => ("done", Some(summary)),
         GoalState::Cancelled { reason } => ("cancelled", Some(reason)),
@@ -216,6 +217,7 @@ fn goal_from_row(row: &SqliteRow) -> Result<GoalRow, Error> {
     let outcome: Option<String> = row.try_get("outcome")?;
     let outcome = outcome.unwrap_or_default();
     let state = match state.as_str() {
+        "draft" => GoalState::Draft,
         "active" => GoalState::Active,
         "done" => GoalState::Done { summary: outcome },
         "cancelled" => GoalState::Cancelled { reason: outcome },

@@ -56,6 +56,8 @@ pub enum PlannerTrigger {
     GoalCreated {
         by: String,
     },
+    /// 你看過草稿的 Brief 後按了「開始」。
+    Started,
     Steer {
         by: String,
         reason: String,
@@ -109,6 +111,10 @@ impl PlannerTrigger {
     fn describe(&self) -> String {
         match self {
             Self::GoalCreated { by } => format!("{by}剛建立這個 Goal，請開始規劃。"),
+            Self::Started => {
+                "對話 agent 剛建立這個 Goal；使用者看過 Brief（可能改過）後按下開始，請依目前的 Brief 開始規劃。"
+                    .into()
+            }
             Self::Steer { by, reason } => {
                 format!("{by}要求改方向：{}", tasks::one_line(reason, 1000))
             }

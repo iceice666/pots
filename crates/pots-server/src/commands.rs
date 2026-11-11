@@ -2,9 +2,9 @@
 //! 被拒絕或失敗時只回給發出指令的連線一個 `Error`。
 
 use pots_proto::{
-    AgentState, ArtifactId, ArtifactKind, Author, Card, ClientCommand, ItemId, Msg, MsgStatus,
-    ProjectId, ProjectSnapshot, SendMode, ServerEvent, StreamItemKind, StreamItemView, StreamScope,
-    TaskId, Timestamp, TraceStepView, WhyView, WorkDir,
+    AgentState, ArtifactId, ArtifactKind, Author, Card, ClientCommand, GoalId, ItemId, Msg,
+    MsgStatus, ProjectId, ProjectSnapshot, SendMode, ServerEvent, StreamItemKind, StreamItemView,
+    StreamScope, TaskId, Timestamp, TraceStepView, WhyView, WorkDir,
 };
 use tokio::sync::mpsc;
 
@@ -143,6 +143,8 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
         } => crate::approvals::decide(app, approval, approve, note).await,
         ClientCommand::Cancel { task } => cancel_task(app, task).await,
         ClientCommand::RetryTask { task } => retry_task(app, task).await,
+        ClientCommand::StartGoal { goal } => start_goal(app, goal, true).await,
+        ClientCommand::DiscardGoal { goal } => start_goal(app, goal, false).await,
         ClientCommand::SaveArtifact {
             artifact,
             base_rev,
@@ -1018,6 +1020,59 @@ async fn cancel_task(app: &App, id: TaskId) -> Result<(), String> {
         tasks::push_goal(&mut txn, task.goal).await?;
         let worker = app.worker.clone();
         txn.commit_then(|| worker.interrupt(id)).await?;
+        Ok(Ok(()))
+    }
+    .await;
+    result.map_err(internal)?
+}
+
+/// 你開始（`start`）或捨棄一個草稿 Goal。開始時 Planner 拿到當下的 Brief。
+async fn start_goal(app: &App, id: GoalId, start: bool) -> Result<(), String> {
+    let result: Result<Result<(), String>, crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        let Some(goal) = tasks::goal(txn.conn(), id).await? else {
+            return Ok(Err("找不到這個 Goal".into()));
+        };
+        if !owns(app, goal.project).await? {
+            return Ok(Err("找不到這個 Goal".into()));
+        }
+        if !goal.state.is_draft() {
+            // 重送目前的 Goal，讓客戶端蓋掉它先改的狀態。
+            tasks::push_goal(&mut txn, goal.id).await?;
+            txn.commit().await?;
+            return Ok(Err(format!(
+                "Goal「{}」已經{}，不是草稿",
+                goal.title,
+                goal.state.label()
+            )));
+        }
+        if start {
+            crate::tools::start_goal(&mut txn, &goal).await?;
+            crate::tools::post_card(
+                &mut txn,
+                goal.project,
+                Card::Milestone {
+                    goal: goal.id,
+                    text: "你開始了這個 Goal，交給 Planner".into(),
+                },
+                None,
+            )
+            .await?;
+            let planner = app.planner.clone();
+            txn.commit_then(|| planner.kick()).await?;
+        } else {
+            crate::tools::close_goal(
+                &mut txn,
+                &goal,
+                pots_proto::GoalState::Cancelled {
+                    reason: "你捨棄了這份草稿".into(),
+                },
+                &Principal::Human,
+                "草稿已捨棄",
+            )
+            .await?;
+            txn.commit().await?;
+        }
         Ok(Ok(()))
     }
     .await;

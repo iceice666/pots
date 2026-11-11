@@ -782,3 +782,116 @@ async fn planner_run_resumes_after_restart() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     srv.stop().await;
 }
+
+/// 對話 agent 開的 Goal 先是草稿：你和 agent 都能改 Brief，Planner 不動；按「開始」才交給
+/// Planner（拿到最新的 Brief）；草稿可以捨棄；不是草稿時開始或捨棄都會被拒絕。
+#[tokio::test]
+async fn draft_goals_wait_for_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = FnProvider::new("m", |req| {
+        if is_planner(req) {
+            ScriptedTurn::reply("開工了")
+        } else {
+            chat_turn(req)
+        }
+    });
+    let srv = launch(tmp.path(), model.clone()).await;
+    let mut c = srv.client().await;
+    c.auto_start = false;
+    c.snapshot().await;
+    let project = c.create_project("登入").await;
+
+    let events = say(&mut c, project, &create_goal_call("登入重構")).await;
+    let goal = settle_goal(&mut c, &events, |g| g.state == GoalState::Draft).await;
+    assert!(
+        goal.planner_note.starts_with("草稿"),
+        "{}",
+        goal.planner_note
+    );
+    let outputs = chat_tool_outputs(&model);
+    assert!(outputs[0].contains("\"state\":\"draft\""), "{}", outputs[0]);
+
+    // 你直接改 Brief：存成 v2，不叫醒 Planner。
+    let p = snapshot_project(&srv).await;
+    assert_eq!(p.goals[0].state, GoalState::Draft);
+    let brief = brief_of(&p, goal.id);
+    c.send(&ClientCommand::SaveArtifact {
+        artifact: brief.id,
+        base_rev: 1,
+        body: format!("{}\n## 補充\n\n人類加的\n", brief.body),
+    })
+    .await;
+    until_artifact(&mut c, |a| a.id == brief.id && a.rev == 2).await;
+
+    // 和 agent 討論後它改「目標」：v3；只給 reason 不帶 edits 會被拒絕。
+    let steer = call(
+        "steer_goal",
+        json!({
+            "goal_id": goal.id.to_string(),
+            "reason": "討論後改用 passkey",
+            "base_rev": 2,
+            "edits": [{"op": "replace_section", "heading": "目標", "body_md": "改用 passkey"}],
+        }),
+    );
+    let nudge = call(
+        "steer_goal",
+        json!({"goal_id": goal.id.to_string(), "reason": "提醒一下"}),
+    );
+    say(&mut c, project, &format!("{steer}\n{nudge}")).await;
+    let outputs = chat_tool_outputs(&model);
+    let [.., edited, nudged] = outputs.as_slice() else {
+        panic!("{outputs:?}")
+    };
+    assert!(edited.contains("\"brief_rev\":3"), "{edited}");
+    assert!(nudged.contains("還是草稿"), "{nudged}");
+
+    // 對話 agent 的指示列出草稿。
+    let chat = model
+        .requests()
+        .into_iter()
+        .rev()
+        .find(|r| !is_planner(r))
+        .unwrap();
+    assert!(chat.instructions.unwrap().contains("# 草稿 Goal"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !model.requests().iter().any(is_planner),
+        "草稿不該叫醒 Planner"
+    );
+
+    // 按「開始」：Planner 拿到你和 agent 都改過的 Brief。
+    c.send(&ClientCommand::StartGoal { goal: goal.id }).await;
+    let g = until_goal(&mut c, |g| g.id == goal.id && g.planner_note == "開工了").await;
+    assert_eq!(g.state, GoalState::Active);
+    let planner: Vec<_> = model.requests().into_iter().filter(is_planner).collect();
+    assert_eq!(planner.len(), 1);
+    let (trigger, _) = planner_turn(&planner[0]);
+    assert!(trigger.contains("按下開始"), "{trigger}");
+    assert!(trigger.contains("人類加的"), "{trigger}");
+    assert!(trigger.contains("改用 passkey"), "{trigger}");
+
+    // 已經開始了：再開始、捨棄都被拒絕。
+    c.send(&ClientCommand::StartGoal { goal: goal.id }).await;
+    let events = c.until(|e| matches!(e, ServerEvent::Error { .. })).await;
+    let Some(ServerEvent::Error { message }) = events.last() else {
+        unreachable!()
+    };
+    assert!(message.contains("不是草稿"), "{message}");
+    c.send(&ClientCommand::DiscardGoal { goal: goal.id }).await;
+    c.until(|e| matches!(e, ServerEvent::Error { .. })).await;
+
+    // 另一份草稿：捨棄就是取消，Planner 不會被叫醒。
+    let events = say(&mut c, project, &create_goal_call("搜尋")).await;
+    let draft = settle_goal(&mut c, &events, |g| g.title == "搜尋").await;
+    assert_eq!(draft.state, GoalState::Draft);
+    c.send(&ClientCommand::DiscardGoal { goal: draft.id }).await;
+    let g = until_goal(&mut c, |g| g.id == draft.id && !g.state.is_open()).await;
+    assert!(
+        matches!(g.state, GoalState::Cancelled { .. }),
+        "{:?}",
+        g.state
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(model.requests().into_iter().filter(is_planner).count(), 1);
+    srv.stop().await;
+}

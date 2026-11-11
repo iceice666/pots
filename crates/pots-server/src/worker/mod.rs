@@ -573,7 +573,7 @@ pub async fn open_quick(
         by,
         &by.label(),
         reader,
-        true,
+        crate::tools::Opening::Quick,
     )
     .await?
     {
