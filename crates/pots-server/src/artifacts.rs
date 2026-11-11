@@ -119,7 +119,7 @@ pub async fn get(
     let row = sqlx::query(concat!(
         "SELECT ",
         artifact_columns!(),
-        " FROM artifacts WHERE id = ?"
+        " FROM artifacts WHERE id = ? AND archived_at IS NULL"
     ))
     .bind(id.to_string())
     .fetch_optional(conn)
@@ -145,7 +145,7 @@ pub async fn for_goal(
     row.as_ref().map(from_row).transpose()
 }
 
-/// project 的所有 artifact，依建立時間。
+/// project 的所有 artifact（不含封存的），依建立時間。
 pub async fn list(
     conn: &mut SqliteConnection,
     project: ProjectId,
@@ -153,12 +153,31 @@ pub async fn list(
     let rows = sqlx::query(concat!(
         "SELECT ",
         artifact_columns!(),
-        " FROM artifacts WHERE project_id = ? ORDER BY created_at, id"
+        " FROM artifacts WHERE project_id = ? AND archived_at IS NULL ORDER BY created_at, id"
     ))
     .bind(project.to_string())
     .fetch_all(conn)
     .await?;
     rows.iter().map(from_row).collect()
+}
+
+/// 封存一份 artifact：從列表與快照消失（[`get`] 也找不到），資料與版本紀錄仍留著。
+/// 回傳有沒有封存（已經封存或不存在時是 `false`）。呼叫端在同一個 transaction 裡記一筆
+/// `ArtifactArchived`。
+pub async fn set_archived(
+    conn: &mut SqliteConnection,
+    id: ArtifactId,
+    at: Timestamp,
+) -> Result<bool, Error> {
+    let done = sqlx::query(
+        "UPDATE artifacts SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL",
+    )
+    .bind(at.0)
+    .bind(at.0)
+    .bind(id.to_string())
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() > 0)
 }
 
 /// 新增一份 artifact（第 1 版）。
@@ -612,6 +631,35 @@ pub async fn restore(
         return Ok(Err(format!("找不到 v{rev}")));
     };
     human_save(conn, row, row.rev, &body).await
+}
+
+/// agent 還原成某一版（新增一個版本，作者是 agent）。`base_rev` 不是目前的版本時不寫入，
+/// 避免蓋掉 agent 沒看過的修改。內容沒變時回 `Ok(Ok(None))`。
+pub async fn agent_restore(
+    conn: &mut SqliteConnection,
+    row: &ArtifactRow,
+    base_rev: u32,
+    rev: u32,
+    author: &Principal,
+    reader: &str,
+) -> Result<Result<Option<ArtifactRow>, String>, Error> {
+    if base_rev != row.rev {
+        return Ok(Err(format!(
+            "base_rev {base_rev} 不是目前的版本（v{}）；先 read_artifact 看過最新的內容再還原",
+            row.rev
+        )));
+    }
+    if rev == row.rev {
+        return Ok(Err(format!("v{rev} 就是目前的版本")));
+    }
+    let Some(body) = revision_body(conn, row.id, rev).await? else {
+        return Ok(Err(format!("找不到 v{rev}")));
+    };
+    let Some(new) = write_approved(conn, row, &body, author).await? else {
+        return Ok(Ok(None));
+    };
+    mark_read(conn, new.id, reader, new.rev).await?;
+    Ok(Ok(Some(new)))
 }
 
 /// 與 `join_sections` 一致的正規化，避免只差空白就多一個版本。

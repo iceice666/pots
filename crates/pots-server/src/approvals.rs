@@ -20,8 +20,9 @@ use std::sync::atomic::Ordering;
 
 use pots_llm::agent::ToolError;
 use pots_proto::{
-    ApprovalActionView, ApprovalId, ApprovalState, ApprovalView, ArtifactId, Card, GoalId,
-    ListenerId, ListenerSpec, MergeMethod, ProjectId, ServerEvent, TaskId, Timestamp,
+    ApprovalActionView, ApprovalId, ApprovalState, ApprovalView, ArtifactId, ArtifactKind, Card,
+    GoalId, ListenerId, ListenerSpec, MergeMethod, ProjectId, ScheduleId, ServerEvent, TaskId,
+    Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -94,6 +95,23 @@ pub enum Action {
     IncreaseBudget { goal: GoalId, tokens: u64 },
     /// project 的每小時用量超過上限；核准就解除熔斷並重新排程（M6）。
     ResumeProject { project: ProjectId },
+    /// 刪除排程（對話 agent 申請）。`summary` 是申請時的描述，顯示用。
+    DeleteSchedule {
+        schedule: ScheduleId,
+        summary: String,
+    },
+    /// 刪除 listener（對話 agent 申請）。
+    DeleteListener {
+        listener: ListenerId,
+        summary: String,
+    },
+    /// 封存 artifact（對話 agent 申請）：從列表移除，資料仍留著。
+    ArchiveArtifact {
+        artifact: ArtifactId,
+        /// 不能叫 `kind`（和 serde 的 tag 衝突）。
+        artifact_kind: ArtifactKind,
+        title: String,
+    },
 }
 
 impl Action {
@@ -438,6 +456,23 @@ pub async fn view(conn: &mut SqliteConnection, row: &ApprovalRow) -> Result<Appr
         Action::ResumeProject { project } => {
             ApprovalActionView::ResumeProject { project: *project }
         }
+        Action::DeleteSchedule { schedule, summary } => ApprovalActionView::DeleteSchedule {
+            schedule: *schedule,
+            summary: summary.clone(),
+        },
+        Action::DeleteListener { listener, summary } => ApprovalActionView::DeleteListener {
+            listener: *listener,
+            summary: summary.clone(),
+        },
+        Action::ArchiveArtifact {
+            artifact,
+            artifact_kind,
+            title,
+        } => ApprovalActionView::ArchiveArtifact {
+            artifact: *artifact,
+            kind: *artifact_kind,
+            title: title.clone(),
+        },
     };
     Ok(ApprovalView {
         id: row.id,
@@ -1332,6 +1367,41 @@ async fn execute_local(
             .await?;
             Ok(Ok("已恢復這個 project 的 run".into()))
         }
+        Action::DeleteSchedule { schedule, .. } => {
+            match automation::schedule(txn.conn(), *schedule).await? {
+                Some(s) if s.owner.project() == Some(row.project) => {}
+                _ => return Ok(Err("這個排程已經不在了".into())),
+            }
+            automation::delete_schedule(txn.conn(), *schedule).await?;
+            automation::push(txn, now).await?;
+            Ok(Ok("排程已刪除".into()))
+        }
+        Action::DeleteListener { listener, .. } => {
+            match automation::listener(txn.conn(), *listener).await? {
+                Some(l) if l.spec.project == row.project => {}
+                _ => return Ok(Err("這個 listener 已經不在了".into())),
+            }
+            automation::delete_listener(txn.conn(), *listener).await?;
+            // 刪掉的是還在等核准的提案時，那筆核准撤回。
+            sync_listeners(txn).await?;
+            automation::push(txn, now).await?;
+            Ok(Ok("listener 已刪除".into()))
+        }
+        Action::ArchiveArtifact { artifact, .. } => {
+            match artifacts::get(txn.conn(), *artifact).await? {
+                Some(a) if a.project == row.project => {}
+                _ => return Ok(Err("這份 artifact 已經不在了".into())),
+            }
+            artifacts::set_archived(txn.conn(), *artifact, now).await?;
+            let (project, artifact) = (row.project, *artifact);
+            txn.push(|seq| ServerEvent::ArtifactArchived {
+                seq,
+                project,
+                artifact,
+            })
+            .await?;
+            Ok(Ok("artifact 已封存".into()))
+        }
         Action::MergePr { .. } | Action::DeleteBranch { .. } | Action::ApplyChanges { .. } => {
             Ok(Err("這個動作要另外執行".into()))
         }
@@ -1729,6 +1799,63 @@ pub async fn propose_edit(
         "note": "已提案，使用者會看到一張 diff 卡片；核准後才會寫入。",
     })
     .to_string())
+}
+
+/// 對話 agent 申請刪除排程、listener 或封存 artifact。同一個對象已經有一筆等核准的申請時回
+/// `Ok(Err(說明))`。卡片由呼叫端在 commit 之後附上（回傳的 `bool`：要不要附在這次回覆下面）。
+pub async fn propose_removal(
+    txn: &mut LogTxn<'_>,
+    ctx: &ToolCtx,
+    action: Action,
+    title: String,
+    reason: &str,
+    now: Timestamp,
+) -> Result<Result<(ApprovalId, bool), String>, Error> {
+    let reason = match tasks::check_text("reason ", reason, MAX_NOTE_CHARS, true) {
+        Ok(r) => r,
+        Err(e) => return Ok(Err(e)),
+    };
+    // 動作的 JSON 以 kind 與對象的 ID 開頭（serde 依欄位宣告的順序）。
+    let prefix = match &action {
+        Action::DeleteSchedule { schedule, .. } => {
+            format!("{{\"kind\":\"delete_schedule\",\"schedule\":\"{schedule}\"%")
+        }
+        Action::DeleteListener { listener, .. } => {
+            format!("{{\"kind\":\"delete_listener\",\"listener\":\"{listener}\"%")
+        }
+        Action::ArchiveArtifact { artifact, .. } => {
+            format!("{{\"kind\":\"archive_artifact\",\"artifact\":\"{artifact}\"%")
+        }
+        _ => return Ok(Err("這個動作不能由對話 agent 申請".into())),
+    };
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM approvals WHERE state = 'pending' AND action LIKE ?",
+    )
+    .bind(&prefix)
+    .fetch_one(txn.conn())
+    .await?;
+    if pending > 0 {
+        return Ok(Err(format!(
+            "已經有一筆「{title}」等使用者核准；等它決定後再申請"
+        )));
+    }
+    let row = insert(
+        txn,
+        NewApproval {
+            project: ctx.project,
+            goal: None,
+            task: None,
+            action,
+            title,
+            reason,
+            by: ctx.actor.clone(),
+            notify: true,
+        },
+        now,
+    )
+    .await?;
+    let attach = place_card(txn, ctx, row.id).await?;
+    Ok(Ok((row.id, attach)))
 }
 
 /// `create_listener` 的提案：listener 先存成 `pending`，等這筆核准。

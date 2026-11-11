@@ -39,6 +39,8 @@ use crate::watcher::{self, WaitCond};
 use crate::worker::code::CodeAccess;
 use crate::worker::{self, WorkCtx, Worker, WorkerTrigger};
 
+mod manage;
+
 /// 里程碑最多幾個字。
 const MAX_MILESTONE_CHARS: usize = 500;
 /// 理由、摘要最多幾個字。
@@ -654,7 +656,10 @@ impl Tool for PlatformTool {
                     &["kind"],
                 ),
             ),
-            Kind::Granted(t) => unreachable!("{} 由 worker::tools 提供", t.as_str()),
+            Kind::Granted(t) => match manage::spec(t) {
+                Some(spec) => spec,
+                None => unreachable!("{} 由 worker::tools 提供", t.as_str()),
+            },
         };
         ToolSpec {
             name: name.into(),
@@ -778,6 +783,30 @@ impl PlatformTool {
                     &args.reason,
                 )
                 .await
+            }
+            Kind::Granted(ToolName::ListAutomations) => {
+                self.list_automations(parse(arguments)?).await
+            }
+            Kind::Granted(ToolName::UpdateSchedule) => {
+                self.update_schedule(parse(arguments)?).await
+            }
+            Kind::Granted(ToolName::DeleteSchedule) => {
+                self.delete_schedule(parse(arguments)?).await
+            }
+            Kind::Granted(ToolName::UpdateListener) => {
+                self.update_listener(parse(arguments)?).await
+            }
+            Kind::Granted(ToolName::DeleteListener) => {
+                self.delete_listener(parse(arguments)?).await
+            }
+            Kind::Granted(ToolName::ArtifactHistory) => {
+                self.artifact_history(parse(arguments)?).await
+            }
+            Kind::Granted(ToolName::RestoreArtifact) => {
+                self.restore_artifact(parse(arguments)?).await
+            }
+            Kind::Granted(ToolName::ArchiveArtifact) => {
+                self.archive_artifact(parse(arguments)?).await
             }
             Kind::Granted(t) => Err(bad(format!("{} 由 worker::tools 提供", t.as_str()))),
         }

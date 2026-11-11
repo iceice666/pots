@@ -43,6 +43,22 @@ pub enum ToolName {
     /// 總管（M6）的工具；內建的 profile 還沒有。
     PauseAutomations,
     ResumeAutomations,
+    /// 列出這個 project 的排程與 listener（對話 agent）。
+    ListAutomations,
+    /// 停用／啟用排程、改下一次與過期時間（對話 agent）。
+    UpdateSchedule,
+    /// 申請刪除排程（對話 agent；你核准後刪除）。
+    DeleteSchedule,
+    /// 停用／啟用 listener（對話 agent；等核准的提案不能用它啟用）。
+    UpdateListener,
+    /// 申請刪除 listener（對話 agent；你核准後刪除）。
+    DeleteListener,
+    /// 列出 artifact 的版本紀錄、讀某一版（對話 agent）。
+    ArtifactHistory,
+    /// 把 artifact 還原成某一版（新增一個版本；對話 agent）。
+    RestoreArtifact,
+    /// 申請封存 artifact（對話 agent；你核准後從列表移除，資料仍留著）。
+    ArchiveArtifact,
     /// 快速通道：直接派一個 worker，不經 Planner。
     QuickFix,
     /// 開唯讀的 subagent（explorer、reviewer）。
@@ -84,6 +100,14 @@ impl ToolName {
             Self::CreateListener => "create_listener",
             Self::PauseAutomations => "pause_automations",
             Self::ResumeAutomations => "resume_automations",
+            Self::ListAutomations => "list_automations",
+            Self::UpdateSchedule => "update_schedule",
+            Self::DeleteSchedule => "delete_schedule",
+            Self::UpdateListener => "update_listener",
+            Self::DeleteListener => "delete_listener",
+            Self::ArtifactHistory => "artifact_history",
+            Self::RestoreArtifact => "restore_artifact",
+            Self::ArchiveArtifact => "archive_artifact",
             Self::QuickFix => "quick_fix",
             Self::RunSubagent => "run_subagent",
             Self::PostToTeam => "post_to_team",
@@ -173,6 +197,15 @@ const CHAT_RULES: Rules = Rules {
         ToolName::ProposeProjectNote,
         // 使用者說「我們在哪個資料夾工作」時由對話 agent 設定。
         ToolName::SetWorkdir,
+        // 管理這個 project 的自動化與 artifact；刪除與封存要你核准。
+        ToolName::ListAutomations,
+        ToolName::UpdateSchedule,
+        ToolName::DeleteSchedule,
+        ToolName::UpdateListener,
+        ToolName::DeleteListener,
+        ToolName::ArtifactHistory,
+        ToolName::RestoreArtifact,
+        ToolName::ArchiveArtifact,
     ],
     kinds: &[ArtifactKind::Spec, ArtifactKind::Report],
 };
@@ -337,7 +370,22 @@ mod tests {
         let p = Profiles::builtin();
         assert_eq!(p.chat.memory, MemoryMode::Om);
         assert!(p.chat.has(ToolName::CreateGoal));
-        assert_eq!(p.chat.artifact_kinds, [ArtifactKind::Spec]);
+        assert_eq!(
+            p.chat.artifact_kinds,
+            [ArtifactKind::Spec, ArtifactKind::Report]
+        );
+        for t in [
+            ToolName::ListAutomations,
+            ToolName::UpdateSchedule,
+            ToolName::DeleteSchedule,
+            ToolName::UpdateListener,
+            ToolName::DeleteListener,
+            ToolName::ArtifactHistory,
+            ToolName::RestoreArtifact,
+            ToolName::ArchiveArtifact,
+        ] {
+            assert!(p.chat.has(t), "{}", t.as_str());
+        }
         assert!(p.planner.has(ToolName::CompleteGoal));
         assert!(p.planner.has(ToolName::RequestApproval));
         assert!(p.worker.has(ToolName::RequestApproval));

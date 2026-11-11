@@ -1158,3 +1158,273 @@ async fn user_md_and_project_notes_need_approval_and_reach_the_preamble() {
     );
     srv.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// 對話 agent 管理自動化與 artifact
+
+/// 送出一則帶 `CALL` 行的訊息，等這輪結束；回傳這輪的工具結果與期間的事件。
+async fn run_calls(
+    c: &mut Client,
+    model: &FnProvider,
+    project: ProjectId,
+    calls: &[String],
+) -> (Vec<String>, Vec<ServerEvent>) {
+    c.say(project, &calls.join("\n"), SendMode::Queue).await;
+    let events = c.until_idle(project).await;
+    let last = model.requests().last().cloned().unwrap();
+    let at = last
+        .input
+        .iter()
+        .rposition(|i| matches!(i, Item::User { .. }))
+        .unwrap_or(0);
+    let outputs = last.input[at..]
+        .iter()
+        .filter_map(|i| match i {
+            Item::ToolResult { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .collect();
+    (outputs, events)
+}
+
+fn field(output: &str, pointer: &str) -> String {
+    let v: Value = serde_json::from_str(output).unwrap_or_else(|_| panic!("不是 JSON：{output}"));
+    match v.pointer(pointer) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => panic!("{output} 沒有 {pointer}"),
+    }
+}
+
+/// 停用、改時間直接生效；刪除排程、listener 與封存 artifact 要核准。版本紀錄與還原直接做。
+#[tokio::test]
+async fn chat_agent_manages_automations_and_artifacts() {
+    let env = env().await;
+    let model = FnProvider::new("m", chat_turn);
+    let srv = launch(config(&env), model.clone()).await;
+    let mut c = srv.client().await;
+    let project = setup(&mut c).await;
+
+    // 排程：建立、列出、停用。
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "schedule",
+            json!({"kind": "once", "in_minutes": 60, "prompt": "提醒我看 CI"}),
+        )],
+    )
+    .await;
+    let schedule = field(&out[0], "/schedule_id");
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call("list_automations", json!({}))],
+    )
+    .await;
+    assert!(
+        out[0].contains(&schedule) && out[0].contains("提醒我看 CI"),
+        "{}",
+        out[0]
+    );
+    let (out, events) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "update_schedule",
+            json!({"schedule_id": schedule, "enabled": false}),
+        )],
+    )
+    .await;
+    assert_eq!(field(&out[0], "/schedule/enabled"), "false", "{}", out[0]);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::Automation { automation, .. }
+        if automation.schedules.iter().any(|s| s.id.to_string() == schedule && !s.enabled)))
+    );
+
+    // 刪除排程要核准；同一個排程同時只能有一筆申請。
+    let delete = call(
+        "delete_schedule",
+        json!({"schedule_id": schedule, "reason": "不需要了"}),
+    );
+    let (out, events) = run_calls(&mut c, &model, project, &[delete.clone(), delete]).await;
+    assert!(out[1].contains("已經有一筆"), "{}", out[1]);
+    let a = events
+        .iter()
+        .find_map(|e| match e {
+            ServerEvent::ApprovalChanged { approval, .. }
+                if matches!(approval.action, ApprovalActionView::DeleteSchedule { .. }) =>
+            {
+                Some((**approval).clone())
+            }
+            _ => None,
+        })
+        .expect("刪除排程的核准");
+    assert_eq!(a.id.to_string(), field(&out[0], "/approval_id"));
+    c.send(&decide(a.id, true, None)).await;
+    let (done, events) = until_approval(&mut c, |x| x.id == a.id).await;
+    assert_eq!(done.state, ApprovalState::Executed, "{:?}", done.result);
+    // 同一個 transaction 裡先送 `Automation`，再送 `ApprovalChanged`。
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::Automation { automation, .. }
+        if !automation.schedules.iter().any(|s| s.id.to_string() == schedule)))
+    );
+
+    // listener：等核准的提案不能直接啟用；核准後可以停用；刪除被拒絕時保留。
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "create_listener",
+            json!({"kinds": ["issue.labeled"], "fields": [{"field": "label", "any_of": ["agent"]}], "action": "notify_chat"}),
+        )],
+    )
+    .await;
+    let listener = field(&out[0], "/listener_id");
+    let proposal: ApprovalId = field(&out[0], "/approval_id").parse().unwrap();
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "update_listener",
+            json!({"listener_id": listener, "enabled": true}),
+        )],
+    )
+    .await;
+    assert!(out[0].contains("等使用者核准"), "{}", out[0]);
+    c.send(&decide(proposal, true, None)).await;
+    let (approved, _) = until_approval(&mut c, |x| x.id == proposal).await;
+    assert_eq!(approved.state, ApprovalState::Executed);
+    let (_, events) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "update_listener",
+            json!({"listener_id": listener, "enabled": false}),
+        )],
+    )
+    .await;
+    assert!(events.iter().any(|e| matches!(e, ServerEvent::Automation { automation, .. }
+        if automation.listeners.iter().any(|l| l.id.to_string() == listener && l.state == ListenerState::Disabled))));
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "delete_listener",
+            json!({"listener_id": listener, "reason": "改用排程"}),
+        )],
+    )
+    .await;
+    let del: ApprovalId = field(&out[0], "/approval_id").parse().unwrap();
+    c.send(&decide(del, false, Some("先留著"))).await;
+    let (rejected, _) = until_approval(&mut c, |x| x.id == del).await;
+    assert_eq!(rejected.state, ApprovalState::Rejected);
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call("list_automations", json!({}))],
+    )
+    .await;
+    assert!(
+        out[0].contains(&listener) && out[0].contains("disabled"),
+        "{}",
+        out[0]
+    );
+
+    // artifact：Report 可以寫；版本紀錄、讀舊版、還原（base_rev 要是目前的版本）。
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "write_artifact",
+            json!({"kind": "Report", "title": "調查", "edits": [{"op": "replace_all", "body_md": "## 結論\n\n舊的結論"}]}),
+        )],
+    )
+    .await;
+    let artifact = field(&out[0], "/written/artifact_id");
+    run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "write_artifact",
+            json!({"artifact_id": artifact, "base_rev": 1, "edits": [{"op": "replace_section", "heading": "結論", "body_md": "新的結論"}]}),
+        )],
+    )
+    .await;
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[
+            call("artifact_history", json!({"artifact_id": artifact})),
+            call(
+                "artifact_history",
+                json!({"artifact_id": artifact, "rev": 1}),
+            ),
+            call(
+                "restore_artifact",
+                json!({"artifact_id": artifact, "rev": 1, "base_rev": 1}),
+            ),
+            call(
+                "restore_artifact",
+                json!({"artifact_id": artifact, "rev": 1, "base_rev": 2}),
+            ),
+        ],
+    )
+    .await;
+    assert!(
+        out[0].contains("## v2") && out[0].contains("+新的結論"),
+        "{}",
+        out[0]
+    );
+    assert!(out[1].contains("舊的結論"), "{}", out[1]);
+    assert!(out[2].contains("不是目前的版本"), "{}", out[2]);
+    assert_eq!(field(&out[3], "/rev"), "3", "{}", out[3]);
+
+    // 封存要核准；核准後從列表與快照消失，也讀不到了。
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call(
+            "archive_artifact",
+            json!({"artifact_id": artifact, "reason": "已經過時"}),
+        )],
+    )
+    .await;
+    let archive: ApprovalId = field(&out[0], "/approval_id").parse().unwrap();
+    c.send(&decide(archive, true, None)).await;
+    c.until(|e| matches!(e, ServerEvent::ArtifactArchived { artifact: a, .. } if a.to_string() == artifact))
+        .await;
+    let mut c2 = srv.client().await;
+    let (_, snap) = c2.snapshot().await;
+    assert!(
+        !snap.projects[0]
+            .artifacts
+            .iter()
+            .any(|a| a.id.to_string() == artifact)
+    );
+    let (out, _) = run_calls(
+        &mut c,
+        &model,
+        project,
+        &[call("read_artifact", json!({"artifact_id": artifact}))],
+    )
+    .await;
+    assert!(out[0].contains("沒有 artifact"), "{}", out[0]);
+    srv.stop().await;
+}

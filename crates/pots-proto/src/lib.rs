@@ -28,7 +28,9 @@ use uuid::Uuid;
 /// - 11：模型 provider 的額外 headers（`ProviderView`／`ProviderDraft`）與 OpenCode Zen／Go preset。
 /// - 12：project 的工作資料夾（`WorkDir`、`ProjectWorkdir`、`SetProjectWorkdir`、`CreateProject`
 ///   帶 `workdir`、`ApprovalActionView::ApplyChanges`）。
-pub const PROTOCOL_VERSION: u32 = 12;
+/// - 13：對話 agent 管理自動化與 artifact（`ArtifactArchived`、`ApprovalActionView` 的
+///   `DeleteSchedule`／`DeleteListener`／`ArchiveArtifact`）。
+pub const PROTOCOL_VERSION: u32 = 13;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -1444,6 +1446,23 @@ pub enum ApprovalActionView {
     ResumeProject {
         project: ProjectId,
     },
+    /// 刪除一個排程（對話 agent 申請）。
+    DeleteSchedule {
+        schedule: ScheduleId,
+        /// 例如「每天 08:00：整理 CI 狀態」。
+        summary: String,
+    },
+    /// 刪除一個 listener（對話 agent 申請）。
+    DeleteListener {
+        listener: ListenerId,
+        summary: String,
+    },
+    /// 封存一份 artifact：從列表移除，資料仍留著（對話 agent 申請）。
+    ArchiveArtifact {
+        artifact: ArtifactId,
+        kind: ArtifactKind,
+        title: String,
+    },
 }
 
 /// 一筆核准（`proposal/approvals-and-notifications.md`）。
@@ -2193,6 +2212,12 @@ pub enum ServerEvent {
         project: ProjectId,
         artifact: ArtifactView,
     },
+    /// Artifact 被封存：從 project 列表移除（資料仍留著）。
+    ArtifactArchived {
+        seq: u64,
+        project: ProjectId,
+        artifact: ArtifactId,
+    },
     /// 回給送出 `ArtifactHistory` 的那條連線：最近的版本（最多 50 版），由新到舊。不寫入事件日誌。
     ArtifactHistory {
         artifact: ArtifactId,
@@ -2267,6 +2292,7 @@ impl ServerEvent {
             | Self::GoalChanged { seq, .. }
             | Self::GoalArchived { seq, .. }
             | Self::ArtifactChanged { seq, .. }
+            | Self::ArtifactArchived { seq, .. }
             | Self::Automation { seq, .. }
             | Self::Github { seq, .. }
             | Self::ProjectRepos { seq, .. }
