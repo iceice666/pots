@@ -3,13 +3,13 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::text::TextView;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 
+use super::text::{agent_stream, agent_text};
 use super::widgets::*;
 use crate::app::{AutomationSection, GoalTab, Panel, PotsApp};
 use crate::model::*;
@@ -291,21 +291,16 @@ impl PotsApp {
         });
 
         let body = (!msg.text.is_empty()).then(|| {
-            div()
-                .text_size(px(density.body()))
-                .line_height(relative(1.6))
-                // 訊息內文是 Markdown；串流中的訊息尾端接一個游標字元。
-                .child(
-                    TextView::markdown(
-                        SharedString::from(format!("msg-body-{}", id.0)),
-                        if streaming {
-                            format!("{}▍", msg.text)
-                        } else {
-                            msg.text.clone()
-                        },
-                    )
-                    .selectable(true),
-                )
+            // 訊息內文是 Markdown。串流中由 helper 收尾未閉合的區塊再接游標，
+            // 游標才不會被吸進 code fence／行內 code span 裡。
+            let text_id = SharedString::from(format!("msg-body-{}", id.0));
+            let text = if streaming {
+                agent_stream(text_id, &msg.text)
+            } else {
+                agent_text(text_id, msg.text.clone())
+            };
+            // 右欄 thread 的密度比頻道緊湊，字級沿用這裡的密度設定。
+            text.text_size(px(density.body()))
         });
 
         let row = div()
