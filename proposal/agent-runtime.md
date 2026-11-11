@@ -73,7 +73,7 @@ M6a 的實作：總管是 `kind = 'overseer'` 的內部 project（固定 ID，`S
 
 - `agent::run(config, history, events, cancel)`：一輪是一次模型串流。輸出項目收到 `Completed` 後才依序以 `AgentEvent::Item` 送出並加入歷史；串流失敗時這一輪的項目全部丟棄，歷史裡不會留下沒有結果的工具呼叫。模型要求工具時，依序問 `Hook::before_tool`、執行工具、把 `ToolResult` 放回歷史，再開下一輪；只回文字就以 `RunOutcome::Done` 結束。
 
-- `Hook`：`before_turn` 回 `false` 就乾淨結束（`Stopped`，用於預算、cancel、steer）；`before_tool` 回 `ToolDecision::{Allow, Deny, AllowThenStop, Stop}`；`after_tool` 用於追蹤。`AllowThenStop` 執行後結束本輪，`Stop` 不執行並結束本輪；同一輪剩下的呼叫各補一個「未執行」結果，run 以 `Suspended` 結束。用完 `max_turns` 是 `MaxTurns`。
+- `Hook`：`before_turn` 回 `false` 就乾淨結束（`Stopped`，用於預算、cancel、steer）；`before_tool` 回 `ToolDecision::{Allow, Deny, AllowThenStop, Stop}`；`after_tool` 用於追蹤。`AllowThenStop` 執行後結束本輪，`Stop` 不執行並結束本輪；同一輪剩下的呼叫各補一個「未執行」結果，run 以 `Suspended` 結束。`max_turns` 是 `Option<usize>`：`None` 不限制輪數，`Some(n)` 用完 n 輪是 `MaxTurns`。
 
 - 取消在每個 await 點生效；工具階段被取消時，還沒有結果的呼叫先補上「已取消」結果，持久化的歷史保持完整。
 
@@ -142,7 +142,7 @@ let chat = RunConfig {
         Arc::new(Recall::new(db.clone())),
     ],
     hook: Arc::new(Gate::new(&CHAT, &scope, budget)),
-    max_turns: 8,
+    max_turns: None, // 不限制輪數
 };
 // 歷史 = OM 的記憶區塊 + 未觀察的原始尾巴 + 觸發訊息，見 memory.md
 let mut history = om.load(project.id).await?;
@@ -161,7 +161,7 @@ let planner = RunConfig {
         Arc::new(PostMilestone::new(store.clone())),
     ],
     hook: Arc::new(Gate::new(&PLANNER, &scope, budget)),
-    max_turns: 12,
+    max_turns: None,
 };
 let history = vec![Item::User { text: render_brief_and_tree(&goal, &trigger) }];
 agent::run(&planner, history, events, cancel).await?;
