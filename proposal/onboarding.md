@@ -41,7 +41,7 @@ pub enum WorkDir {
 | 平台鏡像 | `repos/github.com/owner/repo.git` | `repos/local/<sha256 前 16 bytes>.git`，URL 就是該絕對路徑（git local transport） |
 | worker 的副本 | 每個任務一個獨立 repo，任務分支 `pots/<標題>-<任務 ID 後 8 碼>` | 相同；不是你資料夾裡的即時檔案 |
 | 完成方式 | push 任務分支、開 PR、等 CI | `open_pr` 只 commit、打 bundle、記下變更（`tasks.pr = local:/path`），不 push、不開 PR、不等 CI |
-| 核准 | `MergePr`，merge 後可能再接一筆刪除分支 | `ApplyChanges { path, branch, base, sha }`，核准後 fast-forward 進你的資料夾 |
+| 核准 | `MergePr`，merge 後可能再接一筆刪除分支 | `ApplyChanges { path, branch, base, sha }`，核准後線性套用進你的資料夾（能快轉就快轉，岔開時把任務 commit 接到後面） |
 | 後續 | CI 失敗自動修、合併後刪分支 | 沒有 CI、沒有 PR、沒有刪分支的後續核准 |
 
 ### 本機資料夾的 worker 生命週期
@@ -51,7 +51,8 @@ pub enum WorkDir {
 3. worker 呼叫 `request_approval`，平台建立 `Action::ApplyChanges { path, branch, base, sha }`。核准綁定任務分支與它開出來的分支，以及當時的 sha。
 4. 你核准後，平台先確認 project 的工作資料夾還是同一個路徑、任務分支還是核准的 sha、你的資料夾還停在 `base` 分支而且沒有未 commit 的修改。
 5. 平台在你的資料夾執行 `git fetch <mirror> +refs/pots/tasks/<task>:refs/pots/apply/<task>`，再 `git merge --ff-only`，最後刪掉暫時 ref。只動 `.git` 的 fetch 先完成，失敗時工作區不變。
-6. 不能 fast-forward 就失敗並回報原因（你的分支有任務分支沒有的 commit，或工作區衝突）。平台不會自動 merge、rebase、squash 或解衝突，也不會刪掉你的分支。
+6. 你的分支上有任務分支沒有的 commit（例如另一個平行任務先套用了）時，平台把任務分支在共同祖先之後的 commit 依序接到你的分支後面（等同 rebase）：每個 commit 用 `git merge-tree --write-tree --merge-base=<parent>` 算出 tree、`git commit-tree` 建 commit，保留原作者、時間與訊息，committer 是你；已經在你分支上的變更會略過。這一步只寫 `.git` 的物件，不動工作區、index 與分支，接完才 `merge --ff-only` 到新的頂端。套用後的 sha 和核准的不同，結果訊息會列出兩者。
+7. 任一個 commit 有衝突、任務分支有 merge commit，或 fast-forward 失敗，就整個不套用並回報原因；你的資料夾維持原樣。平台不會 merge commit、squash 或自動解衝突，也不會刪掉你的分支。需要 git 2.40 以上（`merge-tree --merge-base`）。
 
 ## 驗證規則
 
@@ -98,18 +99,18 @@ M9 之前的 project 沒有 `WorkDir`：任務只記在任務樹上、不派工�
 
 | 限制 | 影響 |
 | --- | --- |
-| 本機只支援 fast-forward | 不 squash、不 rebase、不自動解衝突；你的分支有額外 commit 時要自己處理 |
+| 本機只支援線性套用 | 不 squash、不建 merge commit、不自動解衝突；有衝突時要自己處理。接上去的 commit 不跑 hooks，會照 `commit.gpgSign` 簽章 |
 | 套用要求同一個基準分支 | 你的資料夾要還停在任務開出來的分支（核准卡片上看得到 `branch → base`），切走了就先切回來 |
 | 本機 repo 不能是 detached HEAD | 設定與同步時會拒絕，請先切到分支 |
 | 本機沒有 CI | CI 失敗自動修不適用；worker 直接申請套用 |
 | 本機沒有沙箱 | 沿用目前的執行環境設定，worker 仍需要 git |
 | 工作資料夾可以換掉 | 舊任務的核准會被拒絕，要求重新 `open_pr` |
 | 平台副本不是即時檔案 | 你資料夾裡的修改不會自動出現在任務中；核准前也不要手動改同一個分支 |
-| 套用會在你的 repo 跑 git | `merge --ff-only` 可能觸發你 repo 的 hooks；目前不隔離你的 git 設定 |
+| 套用會在你的 repo 跑 git | `merge --ff-only` 可能觸發你 repo 的 hooks（`commit-tree` 不跑 hooks）；目前不隔離你的 git 設定 |
 
 ## 待確認
 
 - 精靈與提示的文案、錯誤訊息是否足夠清楚；目前允許「稍後再設定」，頻道提示與自動化分頁都能補，需實際走一次 onboarding 驗證。
 - 多設備版的「本機資料夾」是伺服器主機上的路徑，不是手機或桌面客戶端的路徑；遠端實例要怎麼呈現與授權。
-- 套用失敗後的引導：直接顯示 git 的錯誤，或提供「先合併你的分支再重新 `open_pr`」的按鈕。
+- 有衝突而套用失敗後的引導：直接顯示衝突的 commit，或提供「讓 worker 在最新的分支上重做」的按鈕。
 - 本機資料夾的 hooks 與 git 設定要不要隔離；目前沿用使用者自己的環境。

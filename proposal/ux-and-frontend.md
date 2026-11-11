@@ -127,7 +127,7 @@ pub enum ClientCommand {
 
 - 任務樹與 artifact：快照裡每個 project 帶著所有 Goal（含任務樹與 Brief 全文）與 artifact；任何變化都送一筆 `GoalChanged` 或 `ArtifactChanged` 整筆替換，客戶端不用自己拼狀態。Planner 的里程碑是對話流裡的 `Card::Milestone`。`SaveArtifact` 被拒絕（同一段兩邊都改過）時只回 `Error`，草稿留在客戶端；`Cancel { task }` 取消一個還沒結束的任務。
 
-- 工作資料夾：快照的 `ProjectSnapshot` 帶 `workdir`；建立、設定或 agent 的 `set_workdir` 成功後送一筆 `ProjectWorkdir` 整份替換。自動化分頁的 `ProjectRepos` 只影響監看，不影響 worker 在哪工作。本機資料夾的核准是 `ApplyChanges`（路徑、分支、sha），核准後平台才 fast-forward 套用。
+- 工作資料夾：快照的 `ProjectSnapshot` 帶 `workdir`；建立、設定或 agent 的 `set_workdir` 成功後送一筆 `ProjectWorkdir` 整份替換。自動化分頁的 `ProjectRepos` 只影響監看，不影響 worker 在哪工作。本機資料夾的核准是 `ApplyChanges`（路徑、分支、sha），核准後平台才線性套用（岔開時把任務 commit 接到你的分支後面）。
 
 - 核准：快照帶著還沒決定與最近有變化的核准（`ApprovalView`：具體動作、hash、狀態、理由與結果），之後每次變化送一筆 `ApprovalChanged` 整筆替換；`Decide { approval, approve, note }` 核准或拒絕，已決定或逾時時回 `Error` 並重送目前的狀態。通知設定、USER.md 與 project 的 merge 方式也在快照裡，改了分別送 `Notifications`、`UserMd`、`ProjectMergeMethod`。
 
