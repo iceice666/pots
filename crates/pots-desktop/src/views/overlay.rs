@@ -127,10 +127,10 @@ impl PotsApp {
                             .gap(px(6.))
                             .text_size(px(13.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(if step.kind == "model" {
-                                format!("模型 · {}", step.name)
-                            } else {
-                                format!("工具 · {}", step.name)
+                            .child(match step.kind.as_str() {
+                                "model" => format!("模型 · {}", step.name),
+                                "text" => "模型說".to_string(),
+                                _ => format!("工具 · {}", step.name),
                             })
                             .child(
                                 div()
@@ -143,12 +143,18 @@ impl PotsApp {
                                     }),
                             ),
                     )
-                    .child(
+                    .child(if step.kind == "text" {
+                        // 模型在工具呼叫之間說的話：照一般內文顯示，不是 JSON。
+                        div()
+                            .text_size(px(13.))
+                            .line_height(relative(1.5))
+                            .child(step.detail.clone())
+                    } else {
                         div()
                             .text_size(px(12.))
                             .text_color(theme::text_muted())
-                            .child(step.detail.clone()),
-                    ),
+                            .child(step.detail.clone())
+                    }),
             );
         }
         let dialog = div()

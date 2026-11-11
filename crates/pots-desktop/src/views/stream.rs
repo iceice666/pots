@@ -278,6 +278,21 @@ impl PotsApp {
                 d.child(tag("失敗", theme::danger(), theme::danger_soft()))
             });
 
+        // 旁白：agent 在工具呼叫之間說的話，只在串流中由伺服器帶來，用淡色顯示它正在做什麼。
+        let narration = (!msg.narration.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .pl(px(10.))
+                .border_l_2()
+                .border_color(theme::border())
+                .text_size(px(density.body() - 1.))
+                .line_height(relative(1.5))
+                .text_color(theme::text_muted())
+                .children(msg.narration.iter().map(|line| div().child(line.clone())))
+        });
+
         let body = (!msg.text.is_empty()).then(|| {
             div()
                 .text_size(px(density.body()))
@@ -313,6 +328,7 @@ impl PotsApp {
                     .flex_col()
                     .gap(px(6.))
                     .child(header)
+                    .children(narration)
                     .children(body)
                     .children(msg.cards.iter().map(|c| self.render_card(id, c, cx))),
             );
