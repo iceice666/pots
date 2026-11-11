@@ -42,20 +42,20 @@
 
 - 「為什麼」面板：在 UI 的任何一則 agent 訊息上，可以展開看到它的觸發來源、當時的記憶區塊版本、工具呼叫順序。
 
-- 成本報表：依 project、Goal、agent、provider／runtime 彙總 token、時間、次數與可取得的費用，區分 OM 開銷與主要工作；訂閱用量與 API 金額分開呈現，估計值明確標示。
+- 成本報表：依 project、Goal、agent、provider／runtime 彙總 token、時間、次數與可取得的費用，區分 OM 開銷與主要工作；訂閱用量與 API 金額分開呈現，估計值明確標示。桌面版左欄的「用量」頁顯示這份報表（24 小時／7 天／30 天、依 project／Goal／模型／agent 分組，可從 models.dev 更新單價）。
 
 ### M6a 的實作
 
 M6a 依上面的設計實作在 `crates/pots-server/src/budget.rs`（加上 `0008_budget_trace.sql`），協定 v8；桌面版是總管 live、「為什麼」面板、Goal 卡片上的真實預算百分比與 Inbox 的預算核准。和你確認過的取捨：
 
 - **用量來源。** `pots_llm` 的 `Hook` 多了 `after_turn`，`Gate` 在每輪模型呼叫結束、處理工具之前同步記帳，所以下一輪的 `before_turn` 看得到剛用掉的 token。用量寫進 `agent_runs.input_tokens`／`output_tokens`，並累加到 `goals.spent_tokens` 與 `tasks.spent_tokens`；舊的「跑完才加一次」拿掉了，不會重複計算。缺少 usage 的 runtime（Claude Code）維持 0，不推算。
-- **階層預算。** Goal 預設 40 萬 token；`create_goal` 可以指定 `budget_tokens`，夾在 2 萬到 400 萬之間。沒有 Goal 的對話（chat、總管）不限制，只記用量。結構上限（深度、子任務數、每輪回合數）照舊。
+- **階層預算。** Goal 預設不限預算（`budget_tokens` 是 NULL），只記用量；`create_goal` 可以指定 `budget_tokens`，至少 2 萬、沒有上限。沒有 Goal 的對話（chat、總管）同樣不限制。原本的預設 40 萬與上限 400 萬拿掉了：先用桌面版的「用量」頁觀察實際用量，再決定要不要恢復預設預算。已經存在的 Goal 保留原本的預算。結構上限（深度、子任務數、每輪回合數）照舊。
 - **停下來與追加。** 預算用完時 `before_turn` 回 `false`（每輪讀 Goal 的總用量，不是 run 開始時的快照，同一個 Goal 的多個 Planner／worker／subagent run 不會合起來超過上限），run 以 `Stopped` 結束，`agent_runs.stop_reason` 記 `budget`；Planner 與 worker 的完成路徑看到它就把備註改成「預算用完」，並建立一筆 `IncreaseBudget` 核准（同一個 Goal 只會有一筆待決），Planner 不再被叫醒。核准後 `goals.budget_tokens` 追加原本的一半（至少 10 萬）、叫醒 Planner；拒絕或 72 小時逾時記下 `goals.budget_denied`，之後不再自動申請。對話 agent 的超預算只會停在回覆，不會產生核准。
-- **熔斷。** 一個 project 過去一小時（依 `agent_runs.started_at`）的 token 總和超過上限就熔斷，預設 200 萬，`projects.hourly_budget_tokens` 可以覆寫（還沒有設定 UI）。熔斷時把 `projects.breaker_until` 標起來、建立一筆不綁任務的 `ResumeProject` 核准並在 project 對話貼一張通知；排隊中的 run 留在佇列（claim 跳過熔斷中的 project），正在跑的在下一輪前停下（`stop_reason = breaker`）。核准後清掉熔斷、替所有進行中的 Goal 重排 Planner；拒絕或逾時維持暫停，冷卻一小時後 sweeper 再建一筆核准（不會永遠卡住），重啟也不會自己恢復。用量用 `run_trace` 每一輪模型的時間算滾動的一小時，不是 run 的開始時間。chat 的 `Send` 在熔斷期間照常擋下（run 一輪都開始不了）。
+- **熔斷。** 一個 project 過去一小時（依 `agent_runs.started_at`）的 token 總和超過上限就熔斷。預設關閉（原本是 200 萬），只有設了 `projects.hourly_budget_tokens` 的 project 才會熔斷（還沒有設定 UI）。熔斷時把 `projects.breaker_until` 標起來、建立一筆不綁任務的 `ResumeProject` 核准並在 project 對話貼一張通知；排隊中的 run 留在佇列（claim 跳過熔斷中的 project），正在跑的在下一輪前停下（`stop_reason = breaker`）。核准後清掉熔斷、替所有進行中的 Goal 重排 Planner；拒絕或逾時維持暫停，冷卻一小時後 sweeper 再建一筆核准（不會永遠卡住），重啟也不會自己恢復。用量用 `run_trace` 每一輪模型的時間算滾動的一小時，不是 run 的開始時間。chat 的 `Send` 在熔斷期間照常擋下（run 一輪都開始不了）。
 - **trace。** `run_trace` 每個 run 一列一列記模型輪與工具呼叫：模型輪帶 turn、input／output tokens 與 token 總和（熔斷用），工具帶名稱、遮蔽後的參數與結果（JSON 逐欄遮蔽、其他文字遮蔽 `key=value` 與 `Bearer …` 再截短）與成功與否；`agent_runs` 另記 `model` 與 run 開始時的 `memory_revision`（chat 與總管才有）。遮蔽只處理明顯的欄位名稱（key／token／secret／password／authorization／cookie），不是完整的秘密掃描；`tracing` 的 span 照舊，OpenTelemetry 匯出在 M6b 補上（見下面）。
 - **「為什麼」面板。** `ClientCommand::Why { item }` 依訊息的 `run_id` 回傳觸發來源（使用者訊息、排程、外部事件等）、記憶版本、模型、用量、停止原因與 trace 步驟；只回給問的連線，不寫事件日誌。
 - **「你不在期間」。** 客戶端打開 project 頻道時送 `MarkRead`；距上次看到超過兩小時而且期間有里程碑（新 Goal、完成的 Goal／任務、待決核准、需要你處理的任務）時，插入一張 `Card::CatchUp`。摘要由平台從資料庫產生，不含他人寫的內容，也不進 OM（`MemoryPolicy::Skip`）。目前只有一個 `last_read_at`，沒有逐裝置的已讀狀態。
-- **還沒做。** worker／Claude Code 的執行時間與次數預算、熔斷上限的設定 UI、`pause_automations` 與熔斷的互動（熔斷不會自動恢復，暫停也不會觸發熔斷）、成本報表與單價表的桌面版 UI、`archive_goal` 的還原與 `include_archived`。見 [M6b](roadmap-and-decisions.md)。
+- **還沒做。** worker／Claude Code 的執行時間與次數預算、熔斷上限的設定 UI、`pause_automations` 與熔斷的互動（熔斷不會自動恢復，暫停也不會觸發熔斷）、`archive_goal` 的還原與 `include_archived`。見 [M6b](roadmap-and-decisions.md)。
 
 以假的模型與手動時鐘驗證（`tests/budget.rs`）：Planner 用掉超過小預算 → 停下並申請 `IncreaseBudget` → 核准後追加並跑完；`Why` 回傳觸發、記憶版本與 trace；離開三小時後的 `MarkRead` 產生 catch-up 卡片；總管用 `create_goal` 在指定 project 開 Goal。
 
@@ -67,7 +67,7 @@ M6b 先做 M6a 留下的觀測收尾：`archive_goal`、成本報表與 OpenTele
 - **成本報表。** `agent_runs` 多了 `provider`（顯示名稱）、`billing`（`subscription`／`api`／`cli`／`unknown`）、`pricing_provider`（models.dev 的鍵）、`runtime`（`builtin`／`claude_code`）與 `cost_usd`。`Budget::for_run` 在 run 開始時從 `ProviderRouter` 的 `Route` 記下這些維度；Claude Code 在 CLI 回報 `total_cost_usd` 時累加到 `cost_usd`（同一個 run 重試會累加）。Observer／Reflector 的每次呼叫也寫一列已結束的 `agent_runs`（`agent = observer`／`reflector`），所以 OM 開銷與主要工作分得開。`ClientCommand::CostReport` 依 project、Goal、agent、provider／runtime 與模型彙總 token、時間、次數與費用；`since`／`until` 預設過去七天、最多一年，只回給問的連線。訂閱用量只算 token、不算金額；API 用單價表估算；CLI 只顯示 runner 回報的估計，三者分開呈現。
 - **單價表。** `model_prices` 以 models.dev 的 provider／model 為鍵，`RefreshPricing` 抓 `https://models.dev/api.json`（只留有 `cost` 的模型，忽略上下文分級的 `tiers`），`SetPrice`／`DeletePrice` 可以手動覆寫；重新整理不會蓋掉 `manual` 的列。查價先找同 provider，再找 `*` 後備，最後只在模型只出現在一個 provider 時才用；`estimated_cost_usd` 是估計值，不是帳單。
 - **OpenTelemetry。** `service::init_tracing` 在 `OTEL_EXPORTER_OTLP_ENDPOINT` 或 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` 設定時建立 OTLP/HTTP exporter（其餘的環境變數照 OpenTelemetry 標準），service name 預設 `pots`、可用 `OTEL_SERVICE_NAME` 改；`shutdown_tracing` 在程式結束前把佇列送完。span 是每次 agent run 一個 `agent.run`（chat、planner、worker、subagent），底下每次模型呼叫一個 `model.turn`、每次工具呼叫一個 `tool.call`。`run_trace` 的參數與結果照舊在寫入前遮蔽；OTel 由 tracing 的 span 與事件產生，不會另外把 `run_trace` 的內容送出去。
-- **還沒做。** 六個 connector；熔斷上限的設定 UI；worker／Claude Code 的執行時間與次數預算；`pause_automations` 與熔斷的互動；桌面版的成本報表與單價表 UI；`archive_goal` 的還原與列出封存 Goal。單價表的 models.dev 快照沒有版本紀錄，重新整理會直接換掉舊價。
+- **還沒做。** 六個 connector；熔斷上限的設定 UI；worker／Claude Code 的執行時間與次數預算；`pause_automations` 與熔斷的互動；單價表的明細編輯 UI；`archive_goal` 的還原與列出封存 Goal。單價表的 models.dev 快照沒有版本紀錄，重新整理會直接換掉舊價。
 
 以假模型與假的 API provider 驗證（`tests/cost.rs`）：封存完成的 Goal 後快照不再有它、`GoalArchived` 有送到、成本報表仍看得到 Planner 的用量；API provider 的對話用量套用手動單價表算出估計金額，訂閱與 API 分開；models.dev 的解析忽略沒有 `cost` 的模型。加上既有的 `tests/budget.rs` 與其他整合測試全部通過；真的 models.dev、OTLP collector 與桌面版畫面待使用者手動驗證。
 
