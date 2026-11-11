@@ -12,7 +12,7 @@ use pots_llm::reqwest::header::{HeaderMap, HeaderValue};
 use pots_llm::responses::{ModelInfo, ResponsesProvider};
 use pots_llm::testing::{FnTool, StaticTokenSource};
 use pots_llm::{
-    Item, LlmError, ModelProvider, ModelRequest, StreamEvent, ToolCall, ToolSpec, Usage,
+    Item, LlmError, ModelProvider, ModelRequest, Reasoning, StreamEvent, ToolCall, ToolSpec, Usage,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,7 @@ fn provider(fake: &FakeResponses, tokens: Arc<StaticTokenSource>) -> ResponsesPr
 
 fn request(text: &str) -> ModelRequest {
     ModelRequest {
+        reasoning: None,
         model: "gpt-test".into(),
         instructions: Some("你是 Pots".into()),
         input: vec![Item::User { text: text.into() }],
@@ -180,6 +181,7 @@ async fn namespaced_tool_roundtrip_through_agent_loop() {
     );
     let provider = Arc::new(provider(&fake, StaticTokenSource::new(["t1"])));
     let config = RunConfig {
+        reasoning: None,
         provider,
         model: "gpt-test".into(),
         instructions: Some("你是 Pots".into()),
@@ -491,6 +493,43 @@ async fn api_key_uses_flat_tools_and_bearer_auth() {
     // 推理用模型預設值；只要求回傳加密內容以便續接。
     assert!(sent.body.get("reasoning").is_none());
     assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[tokio::test]
+async fn reasoning_effort_is_sent_and_kept_on_include_retry() {
+    let ok = || Reply::Sse(sse(&[text_delta("ok"), message("ok"), completed(1, 1)]));
+    let fake = FakeResponses::start([
+        Reply::Status(
+            400,
+            json!({"error": {
+                "type": "invalid_request_error",
+                "code": "unsupported_parameter",
+                "param": "include",
+                "message": "include is not supported"
+            }}),
+        ),
+        ok(),
+        ok(),
+    ])
+    .await;
+    let provider = provider(&fake, StaticTokenSource::new(["t1"]));
+    let mut high = request("嗨");
+    high.reasoning = Some(Reasoning::High);
+    collect(&provider, high).await.unwrap();
+    let mut off = request("嗨");
+    off.reasoning = Some(Reasoning::Off);
+    collect(&provider, off).await.unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    for sent in &requests {
+        assert_siwc_body(&sent.body);
+    }
+    // 拿掉 include 重送時保留 reasoning。
+    assert_eq!(requests[0].body["reasoning"], json!({"effort": "high"}));
+    assert_eq!(requests[1].body["reasoning"], json!({"effort": "high"}));
+    assert!(requests[1].body.get("include").is_none());
+    assert_eq!(requests[2].body["reasoning"], json!({"effort": "none"}));
 }
 
 #[tokio::test]

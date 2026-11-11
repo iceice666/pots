@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
+use super::PROVIDER_NAME;
 use crate::api_common::{
     EventMapper, TRUNCATED_OUTPUT, arguments_complete, parse_event, stream_error,
 };
@@ -22,7 +23,16 @@ enum Block {
         /// 累積的 `input_json_delta.partial_json`。
         json: String,
     },
-    /// thinking 等不處理的 block。
+    /// `thinking`：累積 `thinking_delta` 與 `signature_delta`。`block` 是 `content_block_start`
+    /// 帶的物件（保留其他欄位），結束時放回累積的 `thinking` 與 `signature`。
+    Thinking {
+        block: Map<String, Value>,
+        thinking: String,
+        signature: String,
+    },
+    /// `redacted_thinking`：`content_block_start` 就帶了完整的加密 `data`。
+    Redacted(Value),
+    /// 其他不處理的 block。
     Ignored,
 }
 
@@ -31,6 +41,11 @@ enum Block {
 /// `text_delta` 即時送出；每個 block 在 `content_block_stop` 時送出 [`StreamEvent::ItemDone`]
 /// （文字或工具呼叫，工具參數是累積的 `partial_json`，空的時候是 `"{}"`）。只有 `message_stop`
 /// 是成功；`error` 事件是失敗；在那之前結束的串流是 [`LlmError::Interrupted`]。
+///
+/// `thinking` 與 `redacted_thinking` block 送成 [`Item::Opaque`]（provider 是 [`PROVIDER_NAME`]，
+/// 值是完整的 block JSON），順序與 block 順序一致，讓下一輪可以原樣回送。搭配工具時 API 要求
+/// 它們不經修改地回送；一直開著 thinking 的模型即使沒設定推理強度也會產生。thinking 內容不會送成
+/// [`StreamEvent::TextDelta`]。
 ///
 /// `stop_reason: "max_tokens"` 而且有工具呼叫的參數不是合法 JSON 時，`message_stop` 改送
 /// [`LlmError::Interrupted`]：agent loop 會丟掉這一輪已送出的項目，被截斷的參數不會交給工具。
@@ -130,6 +145,12 @@ impl MessagesEventMapper {
                             .cloned(),
                         json: String::new(),
                     },
+                    Some("thinking") => Block::Thinking {
+                        block: block.as_object().cloned().unwrap_or_default(),
+                        thinking: text("thinking"),
+                        signature: text("signature"),
+                    },
+                    Some("redacted_thinking") => Block::Redacted(block.clone()),
                     _ => Block::Ignored,
                 };
                 self.blocks.insert(index, block);
@@ -150,6 +171,12 @@ impl MessagesEventMapper {
                     }
                     (Some("input_json_delta"), Some(Block::ToolUse { json, .. })) => {
                         json.push_str(text("partial_json"));
+                    }
+                    (Some("thinking_delta"), Some(Block::Thinking { thinking, .. })) => {
+                        thinking.push_str(text("thinking"));
+                    }
+                    (Some("signature_delta"), Some(Block::Thinking { signature, .. })) => {
+                        signature.push_str(text("signature"));
                     }
                     _ => {}
                 }
@@ -178,6 +205,16 @@ impl MessagesEventMapper {
                         arguments,
                     }))));
                 }
+                Some(Block::Thinking {
+                    mut block,
+                    thinking,
+                    signature,
+                }) => {
+                    block.insert("thinking".into(), Value::String(thinking));
+                    block.insert("signature".into(), Value::String(signature));
+                    out.push(Ok(opaque(Value::Object(block))));
+                }
+                Some(Block::Redacted(block)) => out.push(Ok(opaque(block))),
                 _ => {}
             },
             "message_delta" => {
@@ -209,6 +246,14 @@ impl MessagesEventMapper {
             _ => {}
         }
     }
+}
+
+/// 要原樣回送的 block。
+fn opaque(block: Value) -> StreamEvent {
+    StreamEvent::ItemDone(Item::Opaque {
+        provider: PROVIDER_NAME.into(),
+        value: block,
+    })
 }
 
 impl EventMapper for MessagesEventMapper {
@@ -298,6 +343,10 @@ mod tests {
         assert_eq!(
             map_all(&stream),
             vec![
+                Ok(StreamEvent::ItemDone(Item::Opaque {
+                    provider: PROVIDER_NAME.into(),
+                    value: json!({"type": "thinking", "thinking": "hmm", "signature": ""}),
+                })),
                 Ok(StreamEvent::TextDelta("我查".into())),
                 Ok(StreamEvent::TextDelta("一下".into())),
                 Ok(StreamEvent::ItemDone(Item::Assistant {
@@ -317,6 +366,55 @@ mod tests {
                     usage: Usage {
                         input_tokens: 12,
                         output_tokens: 7
+                    }
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_blocks_become_opaque_in_order() {
+        let redacted = json!({"type": "redacted_thinking", "data": "EmwKAhgB..."});
+        let stream = sse(&[
+            json!({"type": "message_start", "message": {"usage": {"input_tokens": 1}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "先想"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "一下"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig-1"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": redacted}),
+            json!({"type": "content_block_stop", "index": 1}),
+            // display: omitted：空的 thinking_delta 加上 signature。
+            json!({"type": "content_block_start", "index": 2, "content_block": {"type": "thinking", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 2, "delta": {"type": "thinking_delta", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 2, "delta": {"type": "signature_delta", "signature": "sig-2"}}),
+            json!({"type": "content_block_stop", "index": 2}),
+            json!({"type": "content_block_start", "index": 3, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "noop", "input": {}}}),
+            json!({"type": "content_block_stop", "index": 3}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 3}}),
+            json!({"type": "message_stop"}),
+        ]);
+        let opaque = |value: Value| {
+            Ok(StreamEvent::ItemDone(Item::Opaque {
+                provider: PROVIDER_NAME.into(),
+                value,
+            }))
+        };
+        assert_eq!(
+            map_all(&stream),
+            vec![
+                opaque(json!({"type": "thinking", "thinking": "先想一下", "signature": "sig-1"})),
+                opaque(redacted),
+                opaque(json!({"type": "thinking", "thinking": "", "signature": "sig-2"})),
+                Ok(StreamEvent::ItemDone(Item::ToolCall(ToolCall {
+                    call_id: "toolu_1".into(),
+                    name: "noop".into(),
+                    arguments: "{}".into()
+                }))),
+                Ok(StreamEvent::Completed {
+                    usage: Usage {
+                        input_tokens: 1,
+                        output_tokens: 3
                     }
                 }),
             ]

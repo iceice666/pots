@@ -100,6 +100,7 @@ async fn main() -> Result<(), BoxError> {
 
     println!("\n== 串流 ==");
     let request = ModelRequest {
+        reasoning: None,
         model: model.clone(),
         instructions: Some("You are a friendly assistant.".into()),
         input: vec![Item::User {
@@ -122,6 +123,7 @@ async fn main() -> Result<(), BoxError> {
 
     println!("\n== 工具往返 ==");
     let config = RunConfig {
+        reasoning: None,
         provider: provider.clone(),
         model,
         instructions: Some(

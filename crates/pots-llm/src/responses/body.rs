@@ -45,11 +45,13 @@ impl Default for ResponsesOptions {
 /// 組出 `POST /responses` 的 body。
 ///
 /// 只送必要的欄位（也是 SIWC 允許的）：`model`、`instructions`（有才送）、`input`、`tools`（有才送）、
-/// `include`（見 [`ResponsesOptions::include_encrypted_reasoning`]）、`store: false`、
-/// `stream: true`。不送 `previous_response_id`、`temperature`、`max_output_tokens` 等，也不產生
-/// system message item。
+/// `reasoning`（有設定才送）、`include`（見 [`ResponsesOptions::include_encrypted_reasoning`]）、
+/// `store: false`、`stream: true`。不送 `previous_response_id`、`temperature`、
+/// `max_output_tokens` 等，也不產生 system message item。
 ///
-/// 不送 `reasoning`：讓伺服器用模型預設值（推理模型預設會推理，Responses API 允許工具與推理並用）。
+/// [`ModelRequest::reasoning`] 有設定時送 `reasoning: {"effort": ...}`（`Off` 是 `"none"`）；
+/// 沒設定時不送 `reasoning`，讓伺服器用模型預設值（推理模型預設會推理，Responses API 允許
+/// 工具與推理並用）。不接受某個 effort 的模型會回錯誤，不自動重送。
 pub fn build_request_body(request: &ModelRequest, options: &ResponsesOptions) -> Value {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
@@ -64,6 +66,12 @@ pub fn build_request_body(request: &ModelRequest, options: &ResponsesOptions) ->
     body.insert("input".into(), Value::Array(input));
     if !request.tools.is_empty() {
         body.insert("tools".into(), tools_field(&request.tools, options));
+    }
+    if let Some(reasoning) = request.reasoning {
+        body.insert(
+            "reasoning".into(),
+            json!({"effort": reasoning.openai_effort()}),
+        );
     }
     if options.include_encrypted_reasoning {
         body.insert("include".into(), json!(["reasoning.encrypted_content"]));
@@ -166,10 +174,11 @@ fn replay_opaque(value: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ToolCall;
+    use crate::provider::{Reasoning, ToolCall};
 
     fn request() -> ModelRequest {
         ModelRequest {
+            reasoning: None,
             model: "gpt-test".into(),
             instructions: Some("你是 Pots".into()),
             input: vec![
@@ -247,6 +256,7 @@ mod tests {
     #[test]
     fn minimal_body_omits_optional_fields() {
         let request = ModelRequest {
+            reasoning: None,
             model: "m".into(),
             instructions: None,
             input: vec![Item::User { text: "hi".into() }],
@@ -289,6 +299,24 @@ mod tests {
             vec![&json!({"type": "reasoning", "summary": [], "encrypted_content": "enc"})]
         );
     }
+    #[test]
+    fn reasoning_sets_effort() {
+        let mut request = request();
+        for (reasoning, effort) in [
+            (Reasoning::Off, "none"),
+            (Reasoning::Low, "low"),
+            (Reasoning::Medium, "medium"),
+            (Reasoning::High, "high"),
+        ] {
+            request.reasoning = Some(reasoning);
+            let body = build_request_body(&request, &ResponsesOptions::default());
+            assert_eq!(body["reasoning"], json!({"effort": effort}));
+        }
+        request.reasoning = None;
+        let body = build_request_body(&request, &ResponsesOptions::default());
+        assert!(body.get("reasoning").is_none());
+    }
+
     #[test]
     fn api_key_tools_are_flat_without_namespace() {
         let options = ResponsesOptions {

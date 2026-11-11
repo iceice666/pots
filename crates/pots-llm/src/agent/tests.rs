@@ -59,6 +59,7 @@ fn config(
     hook: Arc<dyn Hook>,
 ) -> RunConfig {
     RunConfig {
+        reasoning: None,
         provider,
         model: "test-model".into(),
         instructions: Some("你是測試".into()),

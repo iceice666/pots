@@ -3,7 +3,8 @@
 //! 請求限制（`proposal/agent-runtime.md`）：`store: false`、`stream: true`，完整歷史放
 //! `input`，不用 `previous_response_id`；指示放 `instructions`，不送 system item；工具放進
 //! namespace；不送 `temperature`、`max_output_tokens` 等不支援的參數。只有
-//! `response.completed` 代表成功。
+//! `response.completed` 代表成功。有設定 [`ModelRequest::reasoning`] 時送
+//! `reasoning: {"effort": ...}`，沒設定時用模型預設值。
 //!
 //! - [`build_request_body`]：純函式，把 [`ModelRequest`] 轉成請求 JSON。
 //! - [`SseDecoder`]／[`ResponsesEventMapper`]：純狀態機，把 SSE 位元組轉成 [`StreamEvent`]。
@@ -86,7 +87,8 @@ impl ResponsesProvider {
     /// 用一般 OpenAI 平台 API key 呼叫 Responses API（不是 ChatGPT plan）。
     ///
     /// 與 plan 的差別只在授權與工具形狀：Bearer key，工具平整地放在頂層 `tools`、
-    /// `function_call` 不帶 `namespace`。推理用模型預設值；Responses API 允許工具與推理並用。
+    /// `function_call` 不帶 `namespace`。沒有設定 [`ModelRequest::reasoning`] 時推理用模型預設值；
+    /// Responses API 允許工具與推理並用。
     pub fn with_api_key(base_url: Url, api_key: String, http: reqwest::Client) -> Self {
         Self::new(base_url, Arc::new(ApiKeyToken(api_key)), http).with_options(ResponsesOptions {
             namespace: None,

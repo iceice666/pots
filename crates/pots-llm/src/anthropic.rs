@@ -6,20 +6,42 @@
 //! - [`build_request_body`]：純函式，把 [`ModelRequest`] 轉成請求 JSON。
 //! - [`MessagesEventMapper`]：純狀態機，把 SSE 事件轉成 [`StreamEvent`](crate::StreamEvent)。
 //!
+//! 推理強度（[`ModelRequest::reasoning`]）：沒設定時不送 `thinking`，用模型預設值。`Low`／
+//! `Medium`／`High` 送 `thinking: {type: "adaptive"}` 加 `output_config: {effort}`（Claude 4.6
+//! 以後）；`Off` 送 `thinking: {type: "disabled"}`。被拒絕時重送一次，重送成功就記在 provider
+//! 上（依模型分開記），之後這個模型直接用後備：
+//!
+//! - adaptive 被拒（Claude 4.5 以前只支援 extended thinking）→ `thinking: {type: "enabled",
+//!   budget_tokens}`，不送 `output_config`，`max_tokens` 提高到放得下 budget
+//!   （[`ThinkingConfig::Budget`]）。
+//! - `disabled` 被拒（thinking 一直開著的模型）→ 不送 `thinking`。
+//!
+//! 重送也失敗時不記住，回報重送的錯誤；比對規則寫錯也不會讓之後的請求一直失敗。錯誤訊息的
+//! 比對規則寫在 `adaptive_rejected` 與 `disabled_rejected` 的說明。
+//!
+//! thinking／redacted_thinking block 送成 [`Item::Opaque`](crate::Item::Opaque)，下一輪原樣放回
+//! assistant message：搭配工具時 API 要求它們完整、不經修改地回送。
+//!
 //! API key 只放在 `x-api-key` header，不會出現在 `Debug`、log 或錯誤訊息。
 
 mod body;
 mod stream;
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use reqwest::header::{HeaderMap, HeaderName};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-pub use self::body::{DEFAULT_MAX_TOKENS, PROVIDER_NAME, build_request_body};
+pub use self::body::{
+    DEFAULT_MAX_TOKENS, PROVIDER_NAME, ThinkingConfig, build_request_body,
+    build_request_body_with_thinking,
+};
 pub use self::stream::MessagesEventMapper;
 use crate::api_common::{event_stream, read_json, send, with_extra_headers};
-use crate::provider::{EventStream, LlmError, ModelProvider, ModelRequest};
+use crate::provider::{EventStream, LlmError, ModelProvider, ModelRequest, Reasoning};
 pub use crate::responses::ModelInfo;
 
 /// Anthropic 官方的 base URL。
@@ -40,6 +62,17 @@ pub struct AnthropicProvider {
     headers: HeaderMap,
     /// 有設定時，把 [`ModelRequest::session_id`] 放進這個 header。
     session_header: Option<HeaderName>,
+    /// 各模型已經確認要用的 thinking 後備（見模組說明）。key 是模型 ID。
+    thinking_fallbacks: Mutex<HashMap<String, ThinkingFallback>>,
+}
+
+/// 一個模型被拒絕過、重送成功的 thinking 設定。
+#[derive(Clone, Copy, Debug, Default)]
+struct ThinkingFallback {
+    /// adaptive 被拒：改用 `enabled` + `budget_tokens`。
+    budget_instead_of_adaptive: bool,
+    /// `disabled` 被拒：不送 `thinking`。
+    omit_instead_of_disabled: bool,
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -65,6 +98,7 @@ impl AnthropicProvider {
             max_tokens: DEFAULT_MAX_TOKENS,
             headers: HeaderMap::new(),
             session_header: None,
+            thinking_fallbacks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -136,6 +170,127 @@ impl AnthropicProvider {
             .header("x-api-key", key)
             .header("anthropic-version", API_VERSION))
     }
+
+    fn fallback(&self, model: &str) -> ThinkingFallback {
+        self.thinking_fallbacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(model)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn remember(&self, model: &str, update: impl FnOnce(&mut ThinkingFallback)) {
+        let mut fallbacks = self
+            .thinking_fallbacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        update(fallbacks.entry(model.to_owned()).or_default());
+    }
+
+    /// 這個請求第一次要送的 thinking 設定：預設對應，套用已經記住的後備。
+    fn initial_thinking(&self, request: &ModelRequest) -> ThinkingConfig {
+        let Some(reasoning) = request.reasoning else {
+            return ThinkingConfig::ModelDefault;
+        };
+        let fallback = self.fallback(&request.model);
+        match reasoning {
+            Reasoning::Off if fallback.omit_instead_of_disabled => ThinkingConfig::ModelDefault,
+            reasoning if fallback.budget_instead_of_adaptive => ThinkingConfig::budget(reasoning)
+                .unwrap_or_else(|| ThinkingConfig::from_reasoning(Some(reasoning))),
+            reasoning => ThinkingConfig::from_reasoning(Some(reasoning)),
+        }
+    }
+
+    /// 送出一次 `POST /v1/messages`，回傳 2xx 的 response。
+    async fn post(
+        &self,
+        url: &Url,
+        body: &Value,
+        session: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<reqwest::Response, LlmError> {
+        // `.json()` 會設定 `content-type: application/json`；額外 header 最後套用，
+        // 讓使用者可以覆寫。
+        let builder = self
+            .authorized(self.http.post(url.clone()))?
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(body);
+        let builder = with_extra_headers(
+            builder,
+            &self.headers,
+            self.session_header.as_ref(),
+            session,
+        )?;
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(LlmError::Cancelled),
+            response = send(builder, &self.api_key) => response,
+        }
+    }
+}
+
+/// 被拒絕的 thinking 設定要改用什麼重送；不是 thinking 設定的問題時回 `None`。
+fn thinking_retry(
+    sent: ThinkingConfig,
+    reasoning: Option<Reasoning>,
+    error: &LlmError,
+) -> Option<ThinkingConfig> {
+    match (sent, reasoning) {
+        (ThinkingConfig::Adaptive { .. }, Some(reasoning)) if adaptive_rejected(error) => {
+            ThinkingConfig::budget(reasoning)
+        }
+        (ThinkingConfig::Disabled, _) if disabled_rejected(error) => {
+            Some(ThinkingConfig::ModelDefault)
+        }
+        _ => None,
+    }
+}
+
+/// 請求內容錯誤（HTTP 400 等）的訊息。
+fn unsupported_message(error: &LlmError) -> Option<&str> {
+    match error {
+        LlmError::Unsupported(message) => Some(message),
+        _ => None,
+    }
+}
+
+/// 模型不支援 adaptive thinking（或 `output_config.effort`）。
+///
+/// 比對規則（只看 [`LlmError::Unsupported`]，也就是 400／404／413／422）：
+/// - `adaptive thinking is not supported`：官方文件（thinking-troubleshooting）列出的 Claude 4.5
+///   以前模型的訊息「adaptive thinking is not supported on this model」。已對照文件，未實際打過 API。
+/// - 同時包含 `'adaptive'` 與 `does not match any of the expected tags`：推測。舊版 API 或相容服務
+///   不認得 `adaptive` 這個 tag 時的驗證錯誤格式，未驗證。
+/// - 同時包含 `output_config` 與 `Extra inputs are not permitted`：推測。不支援 effort 的模型（例如
+///   Claude Sonnet 4.5）對 `output_config` 的錯誤；文件只寫了逐則訊息的 `output_config` 會這樣回，
+///   未驗證。
+///
+/// 後備要重送成功才會記住，所以推測的規則誤判也只是多送一次請求。
+fn adaptive_rejected(error: &LlmError) -> bool {
+    unsupported_message(error).is_some_and(|message| {
+        message.contains("adaptive thinking is not supported")
+            || (message.contains("'adaptive'")
+                && message.contains("does not match any of the expected tags"))
+            || (message.contains("output_config")
+                && message.contains("Extra inputs are not permitted"))
+    })
+}
+
+/// 模型不接受 `thinking: {type: "disabled"}`（thinking 一直開著）。
+///
+/// 比對規則（只看 [`LlmError::Unsupported`]）：
+/// - `"thinking.type.disabled" is not supported`：官方文件（thinking-troubleshooting）列出的訊息，
+///   Claude Opus 5.5、Fable／Mythos 系列與 Mythos Preview 都以這段開頭。已對照文件，未實際打過 API。
+/// - `instead of {"type": "disabled"}`：官方文件列出的 Claude Sonnet 5.5 訊息（要改送
+///   `between_tools`）。這裡不送 `between_tools`，只是不送 `thinking`。未實際打過 API。
+///
+/// Opus 5／Haiku 5.5 在 effort `xhigh`／`max` 時拒絕 `disabled` 的訊息不比對：這裡不送那兩種 effort。
+fn disabled_rejected(error: &LlmError) -> bool {
+    unsupported_message(error).is_some_and(|message| {
+        message.contains("\"thinking.type.disabled\" is not supported")
+            || message.contains("instead of {\"type\": \"disabled\"}")
+    })
 }
 
 #[async_trait::async_trait]
@@ -150,24 +305,30 @@ impl ModelProvider for AnthropicProvider {
         cancel: CancellationToken,
     ) -> Result<EventStream, LlmError> {
         let url = endpoint(&self.base_url, "messages");
-        let session = request.session_id.clone();
-        let body = build_request_body(&request, self.max_tokens);
-        // `.json()` 會設定 `content-type: application/json`；額外 header 最後套用，
-        // 讓使用者可以覆寫。
-        let builder = self
-            .authorized(self.http.post(url))?
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&body);
-        let builder = with_extra_headers(
-            builder,
-            &self.headers,
-            self.session_header.as_ref(),
-            session.as_deref(),
-        )?;
-        let response = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Err(LlmError::Cancelled),
-            response = send(builder, &self.api_key) => response?,
+        let session = request.session_id.as_deref();
+        let first = self.initial_thinking(&request);
+        let body = build_request_body_with_thinking(&request, self.max_tokens, first);
+        let response = match self.post(&url, &body, session, &cancel).await {
+            Ok(response) => response,
+            Err(error) => {
+                let Some(retry) = thinking_retry(first, request.reasoning, &error) else {
+                    return Err(error);
+                };
+                tracing::warn!(
+                    model = %request.model,
+                    rejected = ?first,
+                    retry = ?retry,
+                    "Anthropic 不接受這個 thinking 設定，改用後備重送"
+                );
+                let body = build_request_body_with_thinking(&request, self.max_tokens, retry);
+                let response = self.post(&url, &body, session, &cancel).await?;
+                // 重送成功才記住，之後這個模型直接用後備。
+                self.remember(&request.model, |fallback| match first {
+                    ThinkingConfig::Adaptive { .. } => fallback.budget_instead_of_adaptive = true,
+                    _ => fallback.omit_instead_of_disabled = true,
+                });
+                response
+            }
         };
         Ok(Box::pin(event_stream(
             response,
@@ -264,6 +425,92 @@ mod tests {
             ]
         );
         assert!(parse_models(&json!({})).is_err());
+    }
+
+    /// 經過 [`crate::api_common::http_error`] 的 400 錯誤。
+    fn rejected(message: &str) -> LlmError {
+        crate::api_common::http_error(
+            400,
+            &json!({"type": "error", "error": {"type": "invalid_request_error", "message": message}})
+                .to_string(),
+            "",
+        )
+    }
+
+    #[test]
+    fn thinking_rejections_are_matched_conservatively() {
+        // 官方文件（thinking-troubleshooting）列出的訊息。
+        assert!(adaptive_rejected(&rejected(
+            "adaptive thinking is not supported on this model"
+        )));
+        for message in [
+            "\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior.",
+            "\"thinking.type.disabled\" is not supported for this model. Thinking defaults to adaptive mode when not specified; use \"thinking.type.enabled\" with \"budget_tokens\" for extended thinking.",
+            "To turn thinking off on this model, send \"thinking\": {\"type\": \"between_tools\"} instead of {\"type\": \"disabled\"}. The model does not think before responding.",
+        ] {
+            let error = rejected(message);
+            assert!(disabled_rejected(&error), "{message}");
+            assert!(!adaptive_rejected(&error), "{message}");
+        }
+        // 推測的格式。
+        assert!(adaptive_rejected(&rejected(
+            "thinking.type: Input tag 'adaptive' found using 'type' does not match any of the expected tags: 'disabled', 'enabled'"
+        )));
+        assert!(adaptive_rejected(&rejected(
+            "output_config: Extra inputs are not permitted"
+        )));
+        // 不相關的錯誤不重送。
+        for error in [
+            rejected(
+                "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior.",
+            ),
+            rejected("messages: roles must alternate"),
+            rejected(
+                "`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified",
+            ),
+            rejected(
+                "output_config.effort 'xhigh' is not supported when thinking is disabled on this model. Use effort 'high' or below, or enable thinking.",
+            ),
+            LlmError::Unavailable("adaptive thinking is not supported".into()),
+        ] {
+            assert!(!adaptive_rejected(&error), "{error:?}");
+            assert!(!disabled_rejected(&error), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn retry_depends_on_what_was_sent() {
+        let adaptive = ThinkingConfig::from_reasoning(Some(Reasoning::Medium));
+        let not_adaptive = rejected("adaptive thinking is not supported on this model");
+        assert_eq!(
+            thinking_retry(adaptive, Some(Reasoning::Medium), &not_adaptive),
+            Some(ThinkingConfig::Budget {
+                budget_tokens: 8192
+            })
+        );
+        assert_eq!(
+            thinking_retry(
+                ThinkingConfig::Disabled,
+                Some(Reasoning::Off),
+                &not_adaptive
+            ),
+            None
+        );
+        let always_on = rejected("\"thinking.type.disabled\" is not supported for this model.");
+        assert_eq!(
+            thinking_retry(ThinkingConfig::Disabled, Some(Reasoning::Off), &always_on),
+            Some(ThinkingConfig::ModelDefault)
+        );
+        // 已經是後備就不再重送。
+        let budget = ThinkingConfig::budget(Reasoning::Low).unwrap();
+        assert_eq!(
+            thinking_retry(budget, Some(Reasoning::Low), &not_adaptive),
+            None
+        );
+        assert_eq!(
+            thinking_retry(ThinkingConfig::ModelDefault, None, &always_on),
+            None
+        );
     }
 
     #[test]

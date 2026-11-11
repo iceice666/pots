@@ -886,6 +886,7 @@ impl Inner {
         cancel: &CancellationToken,
     ) -> Result<(String, Usage), OmError> {
         let request = ModelRequest {
+            reasoning: None,
             model: route.model.clone(),
             instructions: Some(instructions.to_string()),
             input: vec![Item::User { text: input }],

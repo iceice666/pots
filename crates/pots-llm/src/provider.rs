@@ -59,6 +59,33 @@ pub struct ModelRequest {
     /// 這次對話的穩定 ID，給需要 session affinity 的 provider（例如 OpenCode 的
     /// `x-opencode-session`）。沒有設定時不送。
     pub session_id: Option<String>,
+    /// 推理強度；`None` 不送，用模型預設值。
+    pub reasoning: Option<Reasoning>,
+}
+
+/// 要求模型推理（thinking）的強度。各 provider 依 API 轉換：
+/// Chat Completions 的 `reasoning_effort`、Responses 的 `reasoning.effort`、
+/// Anthropic Messages 的 `thinking` 與 `output_config.effort`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reasoning {
+    /// 明確關掉推理。
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl Reasoning {
+    /// OpenAI 的 effort 字串（`none`、`low`、`medium`、`high`）。
+    pub fn openai_effort(self) -> &'static str {
+        match self {
+            Self::Off => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

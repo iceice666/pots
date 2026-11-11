@@ -12,7 +12,7 @@ use pots_llm::openai_compat::{ModelInfo, OpenAiCompatProvider};
 use pots_llm::reqwest::header::{HeaderMap, HeaderValue};
 use pots_llm::testing::FnTool;
 use pots_llm::{
-    Item, LlmError, ModelProvider, ModelRequest, StreamEvent, ToolCall, ToolSpec, Usage,
+    Item, LlmError, ModelProvider, ModelRequest, Reasoning, StreamEvent, ToolCall, ToolSpec, Usage,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -25,6 +25,7 @@ fn provider(fake: &FakeApi, base: &str) -> OpenAiCompatProvider {
 
 fn request(text: &str) -> ModelRequest {
     ModelRequest {
+        reasoning: None,
         model: "gpt-test".into(),
         instructions: Some("你是 Pots".into()),
         input: vec![Item::User { text: text.into() }],
@@ -198,6 +199,7 @@ async fn tool_roundtrip_through_agent_loop() {
         |_| Ok("12:00".into()),
     );
     let config = RunConfig {
+        reasoning: None,
         provider: Arc::new(provider(&fake, "v1")),
         model: "gpt-test".into(),
         instructions: Some("你是 Pots".into()),
@@ -416,6 +418,7 @@ async fn truncated_tool_call_is_not_executed() {
     .await;
     let tool = FnTool::new("get_time", |_| Ok("12:00".into()));
     let config = RunConfig {
+        reasoning: None,
         provider: Arc::new(provider(&fake, "v1")),
         model: "gpt-test".into(),
         instructions: None,
@@ -518,4 +521,92 @@ async fn models_rejecting_none_point_at_responses_api() {
         "{error:?}"
     );
     assert_eq!(fake.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn requested_effort_is_sent_until_tools_force_none() {
+    let fake = FakeApi::start([
+        ok_stream(),
+        tools_with_reasoning_rejected("gpt-6-luna"),
+        ok_stream(),
+        ok_stream(),
+        ok_stream(),
+    ])
+    .await;
+    let provider = provider(&fake, "v1");
+    let with_effort = |mut request: ModelRequest, reasoning| {
+        request.reasoning = Some(reasoning);
+        request
+    };
+    // 沒有工具：照要求送。
+    collect(&provider, with_effort(request("嗨"), Reasoning::Low))
+        .await
+        .unwrap();
+    // 帶工具被拒 → none 重送並記住。
+    collect(
+        &provider,
+        with_effort(request_with_tool("嗨"), Reasoning::High),
+    )
+    .await
+    .unwrap();
+    // 記住之後：帶工具一律 none，沒有工具仍照要求。
+    collect(
+        &provider,
+        with_effort(request_with_tool("再一輪"), Reasoning::Medium),
+    )
+    .await
+    .unwrap();
+    collect(&provider, with_effort(request("嗨"), Reasoning::High))
+        .await
+        .unwrap();
+
+    let efforts: Vec<_> = fake
+        .requests()
+        .iter()
+        .map(|request| request.body["reasoning_effort"].clone())
+        .collect();
+    assert_eq!(
+        efforts,
+        vec![
+            json!("low"),
+            json!("high"),
+            json!("none"),
+            json!("none"),
+            json!("high")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn requested_off_rejected_explains_without_retry() {
+    let fake = FakeApi::start([
+        Reply::Status(
+            400,
+            json!({"error": {
+                "message": "Unsupported value: 'reasoning_effort' does not support 'none' with this model.",
+                "type": "invalid_request_error",
+                "param": "reasoning_effort",
+            }}),
+        ),
+        tools_with_reasoning_rejected("gpt-6-luna"),
+    ])
+    .await;
+    let provider = provider(&fake, "v1");
+    let mut off = request("嗨");
+    off.reasoning = Some(Reasoning::Off);
+    let error = collect(&provider, off).await.unwrap_err();
+    assert!(
+        matches!(&error, LlmError::Unsupported(m) if m.contains("low 以上")),
+        "{error:?}"
+    );
+    // 已經送 none 還被以「工具 + reasoning」拒絕：不會用同一個 body 重送。
+    let mut off_with_tool = request_with_tool("嗨");
+    off_with_tool.reasoning = Some(Reasoning::Off);
+    let error = collect(&provider, off_with_tool).await.unwrap_err();
+    assert!(matches!(error, LlmError::Unsupported(_)), "{error:?}");
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    for sent in &requests {
+        assert_eq!(sent.body["reasoning_effort"], json!("none"));
+    }
 }

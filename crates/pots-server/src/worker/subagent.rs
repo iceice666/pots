@@ -128,6 +128,7 @@ pub async fn run(
                             .push_str("\n\n這次沒有可以讀的程式碼，只能用平台狀態的工具。"),
                     }
                     let config = RunConfig {
+                        reasoning: None,
                         provider,
                         model: model_name.clone(),
                         instructions: Some(instructions),

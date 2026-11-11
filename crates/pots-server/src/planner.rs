@@ -625,6 +625,7 @@ impl Planner {
         });
         let gate = ctx.gate();
         let config = RunConfig {
+            reasoning: None,
             provider: route.provider,
             model: route.model,
             instructions: Some(instructions),

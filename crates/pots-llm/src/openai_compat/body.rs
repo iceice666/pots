@@ -14,9 +14,33 @@ pub const PROVIDER_NAME: &str = "openai-compatible";
 /// - [`Item::ToolResult`] 變成 `tool` message。
 /// - [`Item::Opaque`]（其他 provider 的專屬項目）略過。
 /// - 一律 `stream: true` 並要求最後一塊帶 usage；沒有工具時不送 `tools`。
-/// - 不主動送 `reasoning_effort`：不是每個模型都接受，只有被 Chat Completions 以
-///   「工具 + reasoning」拒絕時才用 [`build_request_body_with_effort`] 重送。
+/// - [`ModelRequest::reasoning`] 有設定時送 `reasoning_effort`（[`Reasoning::openai_effort`]，
+///   `Off` 是 `"none"`）；沒設定時不送，用模型預設值（不是每個模型都接受這個參數）。
+///   被 Chat Completions 以「工具 + reasoning」拒絕時，provider 會用
+///   [`build_request_body_with_effort`] 改成 `"none"` 重送。
+///
+/// [`Reasoning::openai_effort`]: crate::provider::Reasoning::openai_effort
 pub fn build_request_body(request: &ModelRequest) -> Value {
+    match request.reasoning {
+        Some(reasoning) => build_request_body_with_effort(request, reasoning.openai_effort()),
+        None => base_body(request),
+    }
+}
+
+/// 同 [`build_request_body`]，但不管 [`ModelRequest::reasoning`]，一律送這個 `reasoning_effort`。
+///
+/// GPT-5.4 以後的模型預設會推理，而 Chat Completions 不接受「工具 + reasoning」；被拒絕時
+/// 用 `"none"` 重送一次（見 [`super::OpenAiCompatProvider`]），用工具但關掉推理。
+pub fn build_request_body_with_effort(request: &ModelRequest, effort: &str) -> Value {
+    let mut body = base_body(request);
+    if let Some(map) = body.as_object_mut() {
+        map.insert("reasoning_effort".into(), json!(effort));
+    }
+    body
+}
+
+/// 不含 `reasoning_effort` 的 body。
+fn base_body(request: &ModelRequest) -> Value {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
     body.insert("messages".into(), Value::Array(messages(request)));
@@ -40,18 +64,6 @@ pub fn build_request_body(request: &ModelRequest) -> Value {
         body.insert("tools".into(), Value::Array(tools));
     }
     Value::Object(body)
-}
-
-/// 同 [`build_request_body`]，但明確送 `reasoning_effort`。
-///
-/// GPT-5.4 以後的模型預設會推理，而 Chat Completions 不接受「工具 + reasoning」；被拒絕時
-/// 用 `"none"` 重送一次（見 [`super::OpenAiCompatProvider`]），用工具但關掉推理。
-pub fn build_request_body_with_effort(request: &ModelRequest, effort: &str) -> Value {
-    let mut body = build_request_body(request);
-    if let Some(map) = body.as_object_mut() {
-        map.insert("reasoning_effort".into(), json!(effort));
-    }
-    body
 }
 
 /// 還沒送出的 assistant message：文字與同一輪的工具呼叫。
@@ -130,7 +142,7 @@ fn tool_call(call: &ToolCall) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ToolSpec;
+    use crate::provider::{Reasoning, ToolSpec};
 
     fn call(id: &str, name: &str, arguments: &str) -> Item {
         Item::ToolCall(ToolCall {
@@ -143,6 +155,7 @@ mod tests {
     #[test]
     fn maps_history_to_chat_messages() {
         let request = ModelRequest {
+            reasoning: None,
             model: "gpt-test".into(),
             instructions: Some("你是 Pots".into()),
             input: vec![
@@ -219,6 +232,7 @@ mod tests {
     #[test]
     fn minimal_body_omits_tools_and_system() {
         let request = ModelRequest {
+            reasoning: None,
             model: "m".into(),
             instructions: Some(String::new()),
             input: vec![Item::User { text: "hi".into() }],
@@ -227,6 +241,30 @@ mod tests {
         };
         let body = build_request_body(&request);
         assert!(body.get("tools").is_none());
+        assert!(body.get("reasoning_effort").is_none());
         assert_eq!(body["messages"], json!([{"role": "user", "content": "hi"}]));
+    }
+
+    #[test]
+    fn reasoning_maps_to_effort() {
+        let mut request = ModelRequest {
+            model: "m".into(),
+            input: vec![Item::User { text: "hi".into() }],
+            ..ModelRequest::default()
+        };
+        for (reasoning, effort) in [
+            (Reasoning::Off, "none"),
+            (Reasoning::Low, "low"),
+            (Reasoning::Medium, "medium"),
+            (Reasoning::High, "high"),
+        ] {
+            request.reasoning = Some(reasoning);
+            assert_eq!(build_request_body(&request)["reasoning_effort"], effort);
+            // 明確指定的 effort（降級重送）優先。
+            assert_eq!(
+                build_request_body_with_effort(&request, "none")["reasoning_effort"],
+                "none"
+            );
+        }
     }
 }

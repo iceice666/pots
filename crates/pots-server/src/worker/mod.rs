@@ -1429,6 +1429,7 @@ impl Worker {
         let meta = route.meta("builtin");
         let ctx = self.tool_ctx(job, task, work, true, meta).await?;
         let config = RunConfig {
+            reasoning: None,
             provider: route.provider,
             model: route.model,
             instructions: Some(instructions),

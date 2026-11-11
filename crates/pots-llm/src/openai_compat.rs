@@ -7,9 +7,11 @@
 //! - [`build_request_body`]：純函式，把 [`ModelRequest`] 轉成請求 JSON。
 //! - [`ChatCompletionsMapper`]：純狀態機，把 SSE chunk 轉成 [`StreamEvent`](crate::StreamEvent)。
 //!
-//! GPT-5.4 以後的模型預設會推理，而 Chat Completions 不接受「工具 + reasoning」。請求帶工具時
-//! 若被以那個理由拒絕，會改成 `reasoning_effort: "none"` 重送一次，並記住這個 provider
-//! 之後都直接這樣送；連 `none` 都不接受的模型則回報要改用 Responses API。
+//! 推理強度：[`ModelRequest::reasoning`] 有設定時送 `reasoning_effort`（`none`／`low`／`medium`／
+//! `high`），沒設定時不送。GPT-5.4 以後的模型預設會推理，而 Chat Completions 不接受「工具 +
+//! reasoning」。請求帶工具時若被以那個理由拒絕，會改成 `reasoning_effort: "none"` 重送一次，並記住
+//! 這個 provider 之後帶工具的請求都直接這樣送（不管要求的強度）；連 `none` 都不接受的模型則回報
+//! 要改用 Responses API。使用者自己選 `Off` 而被拒絕 `none` 時，提示改用其他強度。
 //!
 //! API key 只放在 `Authorization: Bearer` header，不會出現在 `Debug`、log 或錯誤訊息；
 //! key 是空字串時不送 `Authorization`（例如本機的 Ollama）。
@@ -27,7 +29,7 @@ use url::Url;
 pub use self::body::{PROVIDER_NAME, build_request_body, build_request_body_with_effort};
 pub use self::stream::ChatCompletionsMapper;
 use crate::api_common::{event_stream, read_json, send, with_extra_headers};
-use crate::provider::{EventStream, LlmError, ModelProvider, ModelRequest};
+use crate::provider::{EventStream, LlmError, ModelProvider, ModelRequest, Reasoning};
 pub use crate::responses::ModelInfo;
 use crate::responses::endpoint;
 
@@ -120,6 +122,8 @@ impl ModelProvider for OpenAiCompatProvider {
     ) -> Result<EventStream, LlmError> {
         let url = endpoint(&self.base_url, "chat/completions");
         let session = request.session_id.clone();
+        // 已經送 `none`（使用者選 `Off`）就不必再降級重送。
+        let requested_off = request.reasoning == Some(Reasoning::Off);
         let mut downgraded =
             !request.tools.is_empty() && self.tools_without_reasoning.load(Ordering::Relaxed);
         let mut body = if downgraded {
@@ -152,7 +156,7 @@ impl ModelProvider for OpenAiCompatProvider {
                         &self.api_key,
                     )));
                 }
-                Err(error) if !downgraded && tools_need_no_reasoning(&error) => {
+                Err(error) if !downgraded && !requested_off && tools_need_no_reasoning(&error) => {
                     tracing::warn!(
                         model = %request.model,
                         "Chat Completions 不接受工具與推理並用，改成 reasoning_effort=none 重送"
@@ -163,7 +167,9 @@ impl ModelProvider for OpenAiCompatProvider {
                 }
                 Err(error) => {
                     return Err(if downgraded {
-                        explain_none_rejected(error)
+                        explain_none_rejected(error, NONE_REJECTED_WITH_TOOLS)
+                    } else if requested_off {
+                        explain_none_rejected(error, NONE_REJECTED_OFF)
                     } else {
                         error
                     });
@@ -179,16 +185,20 @@ fn tools_need_no_reasoning(error: &LlmError) -> bool {
         if message.contains("Function tools with reasoning_effort are not supported"))
 }
 
-/// 關掉推理後仍被拒：模型連 `reasoning_effort: "none"` 都不接受，只能改用 Responses API。
-fn explain_none_rejected(error: LlmError) -> LlmError {
+/// 為了工具降級成 `none` 後仍被拒的提示。
+const NONE_REJECTED_WITH_TOOLS: &str =
+    "這個模型不能用 Chat Completions 搭配工具：請改用 ChatGPT 方案（Responses API）或換一個模型";
+
+/// 使用者選 `Off` 而 `none` 被拒的提示。
+const NONE_REJECTED_OFF: &str = "這個模型不能關掉推理：請把推理強度改成 low 以上或不設定";
+
+/// 送 `reasoning_effort: "none"` 被拒：模型不接受 `none`。在訊息後面加上 `hint`。
+fn explain_none_rejected(error: LlmError, hint: &str) -> LlmError {
     match &error {
         LlmError::Unsupported(message)
             if message.contains("reasoning_effort") && message.contains("none") =>
         {
-            LlmError::Unsupported(format!(
-                "{message}（這個模型不能用 Chat Completions 搭配工具：請改用 ChatGPT 方案\
-                 （Responses API）或換一個模型）"
-            ))
+            LlmError::Unsupported(format!("{message}（{hint}）"))
         }
         _ => error,
     }

@@ -8,11 +8,11 @@ use common::api::FakeApi;
 use common::{Reply, sse};
 use futures::StreamExt;
 use pots_llm::agent::{self, AllowAll, RunConfig, RunOutcome};
-use pots_llm::anthropic::{AnthropicProvider, ModelInfo};
+use pots_llm::anthropic::{AnthropicProvider, ModelInfo, PROVIDER_NAME};
 use pots_llm::reqwest::header::{HeaderMap, HeaderValue};
 use pots_llm::testing::FnTool;
 use pots_llm::{
-    Item, LlmError, ModelProvider, ModelRequest, StreamEvent, ToolCall, ToolSpec, Usage,
+    Item, LlmError, ModelProvider, ModelRequest, Reasoning, StreamEvent, ToolCall, ToolSpec, Usage,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -25,6 +25,7 @@ fn provider(fake: &FakeApi, base: &str) -> AnthropicProvider {
 
 fn request(text: &str) -> ModelRequest {
     ModelRequest {
+        reasoning: None,
         model: "claude-test".into(),
         instructions: Some("你是 Pots".into()),
         input: vec![Item::User { text: text.into() }],
@@ -199,6 +200,7 @@ async fn tool_roundtrip_through_agent_loop() {
         |_| Ok("12:00".into()),
     );
     let config = RunConfig {
+        reasoning: None,
         provider: Arc::new(provider(&fake, "").with_max_tokens(1024)),
         model: "claude-test".into(),
         instructions: Some("你是 Pots".into()),
@@ -424,6 +426,248 @@ async fn list_models_reads_ids_and_display_names_across_pages() {
     assert_eq!(requests[0].header("anthropic-version"), Some("2023-06-01"));
 }
 
+fn ok_stream() -> Reply {
+    Reply::Sse(stream(vec![
+        vec![message_start(1)],
+        text_block(0, &["ok"]),
+        message_end("end_turn", 1).to_vec(),
+    ]))
+}
+
+fn invalid_request(message: &str) -> Reply {
+    Reply::Status(
+        400,
+        json!({"type": "error", "error": {"type": "invalid_request_error", "message": message}}),
+    )
+}
+
+fn with_reasoning(model: &str, reasoning: Reasoning) -> ModelRequest {
+    let mut request = request("嗨");
+    request.model = model.into();
+    request.reasoning = Some(reasoning);
+    request
+}
+
+#[tokio::test]
+async fn adaptive_rejected_falls_back_to_budget_per_model() {
+    let fake = FakeApi::start([
+        invalid_request("adaptive thinking is not supported on this model"),
+        ok_stream(),
+        ok_stream(),
+        ok_stream(),
+    ])
+    .await;
+    let provider = provider(&fake, "");
+    for request in [
+        with_reasoning("claude-old", Reasoning::High),
+        with_reasoning("claude-old", Reasoning::Low),
+        with_reasoning("claude-new", Reasoning::Medium),
+    ] {
+        let events = collect(&provider, request).await.unwrap();
+        assert!(matches!(
+            events.last(),
+            Some(Ok(StreamEvent::Completed { .. }))
+        ));
+    }
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    let first = &requests[0].body;
+    assert_eq!(first["thinking"], json!({"type": "adaptive"}));
+    assert_eq!(first["output_config"], json!({"effort": "high"}));
+    assert_eq!(first["max_tokens"], 8192);
+    // 重送：enabled + budget，不送 output_config，max_tokens 放得下 budget；歷史不變。
+    let retry = &requests[1].body;
+    assert_eq!(
+        retry["thinking"],
+        json!({"type": "enabled", "budget_tokens": 16384})
+    );
+    assert!(retry.get("output_config").is_none());
+    assert_eq!(retry["max_tokens"], 16384 + 8192);
+    assert_eq!(retry["messages"], first["messages"]);
+    // 同一個模型之後直接用 budget。
+    assert_eq!(
+        requests[2].body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 2048})
+    );
+    // 其他模型不受影響。
+    assert_eq!(requests[3].body["model"], "claude-new");
+    assert_eq!(requests[3].body["thinking"], json!({"type": "adaptive"}));
+    assert_eq!(
+        requests[3].body["output_config"],
+        json!({"effort": "medium"})
+    );
+}
+
+#[tokio::test]
+async fn disabled_rejected_omits_thinking() {
+    let fake = FakeApi::start([
+        invalid_request(
+            "\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior.",
+        ),
+        ok_stream(),
+        ok_stream(),
+        ok_stream(),
+    ])
+    .await;
+    let provider = provider(&fake, "");
+    collect(
+        &provider,
+        with_reasoning("claude-always-on", Reasoning::Off),
+    )
+    .await
+    .unwrap();
+    collect(
+        &provider,
+        with_reasoning("claude-always-on", Reasoning::Off),
+    )
+    .await
+    .unwrap();
+    // 記住的只有 disabled 的後備；其他強度照常送 adaptive。
+    collect(
+        &provider,
+        with_reasoning("claude-always-on", Reasoning::Low),
+    )
+    .await
+    .unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].body["thinking"], json!({"type": "disabled"}));
+    for sent in &requests[1..3] {
+        assert!(sent.body.get("thinking").is_none(), "{}", sent.body);
+        assert!(sent.body.get("output_config").is_none());
+    }
+    assert_eq!(requests[3].body["thinking"], json!({"type": "adaptive"}));
+}
+
+#[tokio::test]
+async fn failed_fallback_is_not_remembered() {
+    let rate_limited = Reply::Status(
+        429,
+        json!({"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}),
+    );
+    let fake = FakeApi::start([
+        invalid_request("adaptive thinking is not supported on this model"),
+        rate_limited,
+        ok_stream(),
+        // 不相關的 400 不重送。
+        invalid_request("messages: roles must alternate"),
+    ])
+    .await;
+    let provider = provider(&fake, "");
+    let error = collect(&provider, with_reasoning("claude-test", Reasoning::Low))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LlmError::Unavailable(_)), "{error:?}");
+    collect(&provider, with_reasoning("claude-test", Reasoning::Low))
+        .await
+        .unwrap();
+    let error = collect(&provider, with_reasoning("claude-x", Reasoning::Low))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, LlmError::Unsupported(m) if m.contains("alternate")),
+        "{error:?}"
+    );
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[1].body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 2048})
+    );
+    // 重送失敗沒有記住：下一次還是先試 adaptive。
+    assert_eq!(requests[2].body["thinking"], json!({"type": "adaptive"}));
+}
+
+#[tokio::test]
+async fn thinking_blocks_roundtrip_through_agent_loop() {
+    let redacted = json!({"type": "redacted_thinking", "data": "EmwKAhgBEgy3va3pzix"});
+    let fake = FakeApi::start([
+        Reply::Sse(stream(vec![
+            vec![
+                message_start(10),
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "要查"}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "時間"}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "EqQBCgIYAh"}}),
+                json!({"type": "content_block_stop", "index": 0}),
+                json!({"type": "content_block_start", "index": 1, "content_block": redacted}),
+                json!({"type": "content_block_stop", "index": 1}),
+            ],
+            text_block(2, &["我查一下"]),
+            vec![
+                json!({"type": "content_block_start", "index": 3, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "get_time", "input": {}}}),
+                json!({"type": "content_block_delta", "index": 3, "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+                json!({"type": "content_block_stop", "index": 3}),
+            ],
+            message_end("tool_use", 4).to_vec(),
+        ])),
+        Reply::Sse(stream(vec![
+            vec![message_start(20)],
+            text_block(0, &["12:00"]),
+            message_end("end_turn", 2).to_vec(),
+        ])),
+    ])
+    .await;
+    let tool = FnTool::new("get_time", |_| Ok("12:00".into()));
+    let config = RunConfig {
+        reasoning: Some(Reasoning::Medium),
+        provider: Arc::new(provider(&fake, "")),
+        model: "claude-test".into(),
+        instructions: None,
+        tools: vec![tool.clone()],
+        hook: Arc::new(AllowAll),
+        max_turns: 4,
+        session_id: None,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = agent::run(&config, request("幾點").input, tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, RunOutcome::Done);
+    let thinking = json!({"type": "thinking", "thinking": "要查時間", "signature": "EqQBCgIYAh"});
+    let opaque = |value: &Value| Item::Opaque {
+        provider: PROVIDER_NAME.into(),
+        value: value.clone(),
+    };
+    assert_eq!(result.new_items[0], opaque(&thinking));
+    assert_eq!(result.new_items[1], opaque(&redacted));
+
+    // thinking 內容不會變成文字 delta。
+    while let Ok(event) = rx.try_recv() {
+        let debug = format!("{event:?}");
+        assert!(
+            !(debug.contains("TextDelta") && debug.contains("要查")),
+            "{debug}"
+        );
+    }
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    for sent in &requests {
+        assert_eq!(sent.body["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(sent.body["output_config"], json!({"effort": "medium"}));
+    }
+    // 第二輪把 thinking block 原樣、依序放回 assistant message。
+    assert_eq!(
+        requests[1].body["messages"],
+        json!([
+            {"role": "user", "content": [{"type": "text", "text": "幾點"}]},
+            {"role": "assistant", "content": [
+                thinking,
+                redacted,
+                {"type": "text", "text": "我查一下"},
+                {"type": "tool_use", "id": "toolu_1", "name": "get_time", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "12:00"},
+            ]},
+        ])
+    );
+}
+
 #[tokio::test]
 async fn truncated_tool_call_is_not_executed() {
     let fake = FakeApi::start([Reply::Sse(stream(vec![
@@ -438,6 +682,7 @@ async fn truncated_tool_call_is_not_executed() {
     .await;
     let tool = FnTool::new("get_time", |_| Ok("12:00".into()));
     let config = RunConfig {
+        reasoning: None,
         provider: Arc::new(provider(&fake, "")),
         model: "claude-test".into(),
         instructions: None,

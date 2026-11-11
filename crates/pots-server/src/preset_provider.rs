@@ -211,6 +211,7 @@ mod tests {
         let error = match provider
             .stream(
                 ModelRequest {
+                    reasoning: None,
                     model: "not-in-the-catalog".into(),
                     instructions: None,
                     input: Vec::new(),

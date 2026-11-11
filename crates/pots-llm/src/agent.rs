@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use crate::provider::{
-    Item, LlmError, ModelProvider, ModelRequest, StreamEvent, ToolCall, ToolSpec, Usage,
+    Item, LlmError, ModelProvider, ModelRequest, Reasoning, StreamEvent, ToolCall, ToolSpec, Usage,
 };
 
 /// 平台工具。
@@ -94,6 +94,9 @@ pub struct RunConfig {
     pub max_turns: usize,
     /// 這次對話的穩定 ID；provider 需要 session affinity 時會變成 header。
     pub session_id: Option<String>,
+    /// 推理強度；`None` 不送，用模型預設值。整個 run 不變（Anthropic 要求同一個工具迴圈
+    /// 用同一組 thinking 設定）。
+    pub reasoning: Option<Reasoning>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,6 +174,7 @@ pub async fn run(
             input: state.history.clone(),
             tools: specs.clone(),
             session_id: config.session_id.clone(),
+            reasoning: config.reasoning,
         };
         let turn_span = tracing::info_span!("model.turn", turn, model = %config.model);
         let (items, usage) = stream_turn(config.provider.as_ref(), request, &state.events, &cancel)
