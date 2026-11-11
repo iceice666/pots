@@ -1622,6 +1622,47 @@ mod tests {
     }
 
     #[test]
+    fn draft_goals_start_or_discard_once() {
+        let mut store = store();
+        let (inst, goal) = store
+            .instances
+            .iter()
+            .find_map(|i| {
+                i.projects
+                    .iter()
+                    .flat_map(|p| p.goals.iter())
+                    .find(|g| g.state.is_active())
+                    .map(|g| (i.id, g.id))
+            })
+            .expect("假資料有進行中的 Goal");
+        store.outbox.clear();
+        // 不是草稿：不送。
+        assert!(!store.start_goal(inst, goal));
+        assert!(!store.discard_goal(inst, goal));
+        assert!(store.outbox.is_empty());
+
+        store.goal_mut(inst, goal).unwrap().state = GoalState::Draft;
+        assert!(store.start_goal(inst, goal));
+        assert_eq!(store.goal(inst, goal).unwrap().state, GoalState::Active);
+        assert!(!store.start_goal(inst, goal), "開始之後不再送");
+
+        store.goal_mut(inst, goal).unwrap().state = GoalState::Draft;
+        assert!(store.discard_goal(inst, goal));
+        assert!(matches!(
+            store.goal(inst, goal).unwrap().state,
+            GoalState::Cancelled { .. }
+        ));
+        let sent: Vec<_> = store.outbox.iter().map(|(_, c)| c.clone()).collect();
+        assert!(matches!(
+            sent.as_slice(),
+            [
+                ClientCommand::StartGoal { goal: a },
+                ClientCommand::DiscardGoal { goal: b },
+            ] if *a == goal && *b == goal
+        ));
+    }
+
+    #[test]
     fn observation_edits_update_locally_and_queue_commands() {
         let mut store = store();
         let (inst, project) = store

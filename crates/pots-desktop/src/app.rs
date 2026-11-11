@@ -2076,8 +2076,15 @@ impl PotsApp {
             self.panel = self
                 .store
                 .project(instance, project)
-                .and_then(|p| p.goals.iter().find(|g| g.state.is_active()))
-                .map(|g| Panel::Goal(g.id, GoalTab::Tasks));
+                .and_then(|p| p.goals.iter().find(|g| g.state.is_open()))
+                .map(|g| {
+                    let tab = if g.state.is_draft() {
+                        GoalTab::Brief
+                    } else {
+                        GoalTab::Tasks
+                    };
+                    Panel::Goal(g.id, tab)
+                });
         }
         if let Some(p) = self.store.project_mut(instance, project) {
             p.unread = 0;
@@ -2793,6 +2800,19 @@ impl PotsApp {
 
     pub fn cancel_task(&mut self, task: TaskId, cx: &mut Context<Self>) {
         self.store.cancel_task(self.instance, task);
+        cx.notify();
+    }
+
+    /// 開始草稿 Goal：交給 Planner。
+    pub fn start_goal(&mut self, goal: GoalId, cx: &mut Context<Self>) {
+        if self.store.start_goal(self.instance, goal) {
+            self.open_panel(Some(Panel::Goal(goal, GoalTab::Tasks)), cx);
+        }
+        cx.notify();
+    }
+
+    pub fn discard_goal(&mut self, goal: GoalId, cx: &mut Context<Self>) {
+        self.store.discard_goal(self.instance, goal);
         cx.notify();
     }
 

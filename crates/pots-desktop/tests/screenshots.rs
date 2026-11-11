@@ -145,7 +145,7 @@ mod shots {
     }
 
     /// 連到真正的服務（腳本化的模型）：還沒設定 provider → 在設定頁新增 OpenAI 相容 API
-    /// → 測試連線 → 儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開 Goal、Planner
+    /// → 測試連線 → 儲存 → 建立 project → 傳訊息 → 收到串流回覆 → agent 開草稿 Goal → 開始、Planner
     /// 拆任務 → 在編輯器改 Brief 並儲存 → 版本紀錄 → 設定 GitHub token → Worker 設定（被拒絕、
     /// 改好後儲存）→ project 監看 repo、agent 建立排程 → 自動化頁新增 listener。
     fn live_screens() {
@@ -272,7 +272,7 @@ mod shots {
                     "create_goal",
                     r###"{"title":"Google 登入","brief_md":"## 目標\n\n使用者可以用 Google 帳號登入。\n\n## 約束\n\n- 既有的密碼登入保留\n\n## 已決定\n\n- 用 OAuth 2.0 授權碼流程"}"###,
                 ),
-                (_, n) if n > 0 => ScriptedTurn::reply("開好了，Planner 會在右邊拆任務。"),
+                (_, n) if n > 0 => ScriptedTurn::reply("開好了草稿，看一下右邊的 Brief，沒問題就按「開始」。"),
                 _ => ScriptedTurn::new().text_deltas([
                     "收到！",
                     "這是接上本機服務後的第一則回覆，",
@@ -417,12 +417,32 @@ mod shots {
         });
         s.shot("14-live-chat");
 
-        // agent 開 Goal → Planner 拆任務：對話裡出現 Goal 卡片與里程碑，右欄是 Goal 面板。
+        // agent 開 Goal：先是草稿，卡片上有「開始」「看 Brief」「捨棄」，右欄是草稿的 Brief。
         s.update(|app, window, cx| {
             app.close_settings(cx);
             app.composer
                 .update(cx, |state, cx| state.set_value("開 Goal 吧", window, cx));
             app.send_composer(window, cx);
+        });
+        s.wait_until("草稿 Goal", |app| {
+            app.current_project().is_some_and(|p| {
+                p.goals.first().is_some_and(|g| g.state.is_draft())
+                    && p.agent_state == AgentState::Idle
+            })
+        });
+        s.update(|app, _, cx| {
+            let goal = app.current_project().unwrap().goals[0].id;
+            app.open_panel(
+                Some(Panel::Goal(goal, pots_desktop::app::GoalTab::Brief)),
+                cx,
+            );
+        });
+        s.shot("15a-live-goal-draft");
+
+        // 按「開始」→ Planner 拆任務：對話裡出現里程碑，右欄是 Goal 面板。
+        s.update(|app, _, cx| {
+            let goal = app.current_project().unwrap().goals[0].id;
+            app.start_goal(goal, cx);
         });
         s.wait_until("Planner 拆完任務", |app| {
             app.current_project().is_some_and(|p| {

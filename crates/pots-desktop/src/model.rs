@@ -70,6 +70,14 @@ impl Store {
             .find_map(|g| g.tasks.iter().find(|t| t.id == task).map(|t| (g, t)))
     }
 
+    pub fn goal_mut(&mut self, instance: InstanceId, goal: GoalId) -> Option<&mut GoalView> {
+        self.instance_mut(instance)?
+            .projects
+            .iter_mut()
+            .flat_map(|p| p.goals.iter_mut())
+            .find(|g| g.id == goal)
+    }
+
     pub fn task_mut(&mut self, instance: InstanceId, task: TaskId) -> Option<&mut TaskView> {
         self.instance_mut(instance)?
             .projects
@@ -603,6 +611,32 @@ impl Store {
             self.outbox
                 .push((instance, ClientCommand::RetryTask { task }));
         }
+    }
+
+    /// 開始草稿 Goal：先改成進行中，服務接受後由 `GoalChanged` 整筆替換（被拒絕時回 `Error`
+    /// 並重送目前的 Goal）。不是草稿時不送，回 `false`。
+    pub fn start_goal(&mut self, instance: InstanceId, goal: GoalId) -> bool {
+        let Some(g) = self.goal_mut(instance, goal).filter(|g| g.state.is_draft()) else {
+            return false;
+        };
+        g.state = GoalState::Active;
+        g.planner_note = "等待 Planner…".into();
+        self.outbox
+            .push((instance, ClientCommand::StartGoal { goal }));
+        true
+    }
+
+    /// 捨棄草稿 Goal（變成已取消）。
+    pub fn discard_goal(&mut self, instance: InstanceId, goal: GoalId) -> bool {
+        let Some(g) = self.goal_mut(instance, goal).filter(|g| g.state.is_draft()) else {
+            return false;
+        };
+        g.state = GoalState::Cancelled {
+            reason: "你捨棄了這份草稿".into(),
+        };
+        self.outbox
+            .push((instance, ClientCommand::DiscardGoal { goal }));
+        true
     }
 
     pub fn cancel_task(&mut self, instance: InstanceId, task: TaskId) {

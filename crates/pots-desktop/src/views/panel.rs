@@ -421,8 +421,26 @@ impl PotsApp {
                     .when(g.quick, |d| {
                         d.child(tag("快速修改", theme::violet(), theme::violet_soft()).flex_none())
                     })
+                    .when(g.state.is_draft(), |d| {
+                        d.child(tag("草稿", theme::text_muted(), theme::track()).flex_none())
+                    })
                     .child(self.close_button(cx)),
             )
+            .when(g.state.is_draft(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(theme::text_muted())
+                                .child("這是草稿：看一下 Brief，可以直接改，或在對話裡和 agent 再討論。按「開始」才交給 Planner。"),
+                        )
+                        .child(self.render_draft_actions("panel", gid, cx)),
+                )
+            })
             .child(
                 div()
                     .flex()

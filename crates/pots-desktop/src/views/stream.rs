@@ -108,7 +108,7 @@ fn goal_progress(goal: &GoalView) -> Div {
 /// Goal 卡片最後一行：Planner 備註（結束的 Goal 是結果），有預算時加上已用比例。
 pub fn goal_note(goal: &GoalView) -> String {
     let mut note = match &goal.state {
-        GoalState::Active => goal.planner_note.clone(),
+        GoalState::Draft | GoalState::Active => goal.planner_note.clone(),
         GoalState::Done { summary } => format!("已完成：{summary}"),
         GoalState::Cancelled { reason } => format!("已取消：{reason}"),
     };
@@ -652,12 +652,71 @@ impl PotsApp {
                         )
                     }),
             )
-            .child(goal_progress(goal))
-            .child(goal_counts(goal))
+            .when(!goal.state.is_draft(), |d| {
+                d.child(goal_progress(goal)).child(goal_counts(goal))
+            })
             .child(muted(goal_note(goal)))
+            .when(goal.state.is_draft(), |d| {
+                d.child(self.render_draft_actions("card", gid, cx))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_panel(Some(Panel::Goal(gid, GoalTab::Tasks)), cx)
+                let tab = if this
+                    .store
+                    .goal(this.instance, gid)
+                    .is_some_and(|g| g.state.is_draft())
+                {
+                    GoalTab::Brief
+                } else {
+                    GoalTab::Tasks
+                };
+                this.open_panel(Some(Panel::Goal(gid, tab)), cx)
             }))
+    }
+
+    /// 草稿 Goal 的按鈕：開始（交給 Planner）、看 Brief（只在卡片上）、捨棄。
+    pub fn render_draft_actions(
+        &self,
+        scope: &str,
+        gid: GoalId,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                primary_button(
+                    SharedString::from(format!("{scope}-goal-start-{}", gid.0)),
+                    "開始",
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.start_goal(gid, cx);
+                })),
+            )
+            // 右欄的 Goal 面板本身就有 Brief 分頁，只有卡片上需要這個按鈕。
+            .when(scope == "card", |d| {
+                d.child(
+                    secondary_button(
+                        SharedString::from(format!("{scope}-goal-brief-{}", gid.0)),
+                        "看 Brief",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_panel(Some(Panel::Goal(gid, GoalTab::Brief)), cx)
+                    })),
+                )
+            })
+            .child(
+                secondary_button(
+                    SharedString::from(format!("{scope}-goal-discard-{}", gid.0)),
+                    "捨棄",
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.discard_goal(gid, cx);
+                })),
+            )
     }
 
     /// agent 問題的選項：一個選項一個按鈕，按下就回答。不是問題、或已經回答時是 `None`。
