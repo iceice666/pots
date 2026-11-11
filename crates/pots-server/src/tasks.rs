@@ -250,7 +250,8 @@ pub async fn insert_goal(
     .bind(outcome)
     .bind(to_json(created_by)?)
     .bind(&goal.planner_note)
-    .bind(crate::budget::DEFAULT_GOAL_BUDGET_TOKENS as i64)
+    // 預設不限預算（NULL）；agent 建立時可以用 `set_goal_budget` 指定。
+    .bind(None::<i64>)
     .bind(goal.created_at.0)
     .bind(goal.created_at.0)
     .execute(conn)
@@ -352,16 +353,13 @@ pub async fn add_spent(conn: &mut SqliteConnection, id: GoalId, tokens: u64) -> 
     Ok(())
 }
 
-/// 建立 Goal 時指定的預算（夾在上下限之間）。
+/// 建立 Goal 時指定的預算（至少下限，沒有上限）。
 pub async fn set_goal_budget(
     conn: &mut SqliteConnection,
     id: GoalId,
     tokens: u64,
 ) -> Result<(), Error> {
-    let tokens = tokens.clamp(
-        crate::budget::MIN_GOAL_BUDGET_TOKENS,
-        crate::budget::MAX_GOAL_BUDGET_TOKENS,
-    );
+    let tokens = tokens.clamp(crate::budget::MIN_GOAL_BUDGET_TOKENS, i64::MAX as u64);
     sqlx::query("UPDATE goals SET budget_tokens = ?, updated_at = ? WHERE id = ?")
         .bind(tokens as i64)
         .bind(Timestamp::now().0)

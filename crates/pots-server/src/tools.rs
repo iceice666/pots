@@ -418,7 +418,7 @@ impl Tool for PlatformTool {
                     json!({
                         "title": {"type": "string", "description": "簡短的 Goal 標題"},
                         "brief_md": {"type": "string", "description": "Brief 的 Markdown 全文"},
-                        "budget_tokens": {"type": "integer", "description": "這個 Goal 的預算（token）；不填用預設值，夾在 2 萬到 400 萬之間"},
+                        "budget_tokens": {"type": "integer", "description": "這個 Goal 的預算（token）；不填就不限，只記用量。指定時至少 2 萬"},
                         "project": {"type": "string", "description": "總管用：project 名稱或 ID；其他 agent 不用給"},
                     }),
                     &["title", "brief_md"],

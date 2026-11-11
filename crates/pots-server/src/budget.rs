@@ -20,13 +20,10 @@ use crate::tasks;
 use crate::tasks::Principal;
 use crate::{Error, Hub};
 
-/// 沒有設定時，一個 Goal 的預設預算（token）。
-pub const DEFAULT_GOAL_BUDGET_TOKENS: u64 = 400_000;
-/// agent 可以自己要求的預算下限與上限。
+// 預設不限：新 Goal 的 `budget_tokens` 是 NULL、project 沒設 `hourly_budget_tokens` 就不熔斷。
+// 先只記用量（成本報表／用量頁）觀察一陣子，再決定要不要設預設預算。
+/// agent 自己要求預算時的下限（沒有上限）。
 pub const MIN_GOAL_BUDGET_TOKENS: u64 = 20_000;
-pub const MAX_GOAL_BUDGET_TOKENS: u64 = 4_000_000;
-/// 沒有設定時，一個 project 一小時內用掉這麼多 token 就熔斷。
-pub const DEFAULT_HOURLY_BUDGET_TOKENS: u64 = 2_000_000;
 /// 追加預算時預設加多少：原本預算的一半，至少 10 萬。
 const MIN_BUDGET_STEP_TOKENS: u64 = 100_000;
 /// trace 裡工具參數與結果最多留幾個字。
@@ -166,12 +163,13 @@ impl Budget {
             Ok(None) => {}
             Err(e) => tracing::warn!(error = %e, "讀取熔斷狀態失敗"),
         }
+        // 沒設每小時上限的 project 不熔斷（只記用量）。
         let limit = match self.store.project_hourly_budget(self.project).await {
             Ok(Some(limit)) => limit,
-            Ok(None) => DEFAULT_HOURLY_BUDGET_TOKENS,
+            Ok(None) => return None,
             Err(e) => {
                 tracing::warn!(error = %e, "讀取每小時預算失敗");
-                DEFAULT_HOURLY_BUDGET_TOKENS
+                return None;
             }
         };
         let since = Timestamp(self.clock.now().0.saturating_sub(3600));
@@ -564,7 +562,8 @@ pub async fn request_increase(
     project: ProjectId,
     goal: GoalId,
 ) -> Result<bool, Error> {
-    let Some((budget, _, denied)) = store.goal_budget(goal).await? else {
+    // 不限預算的 Goal 不會用完，也就不用申請。
+    let Some((Some(budget), _, denied)) = store.goal_budget(goal).await? else {
         return Ok(false);
     };
     if denied {
@@ -582,7 +581,6 @@ pub async fn request_increase(
     if pending > 0 {
         return Ok(false);
     }
-    let budget = budget.unwrap_or(DEFAULT_GOAL_BUDGET_TOKENS);
     let tokens = (budget / 2).max(MIN_BUDGET_STEP_TOKENS);
     approvals::insert(
         &mut txn,
