@@ -17,6 +17,7 @@ use crate::store::{ItemStatus, ProjectRow, Store};
 use crate::tasks::{self, Cause, Principal, TaskState};
 
 const MAX_PROJECT_NAME: usize = 100;
+const MAX_AGENT_NAME: usize = 40;
 
 pub(crate) async fn handle(app: &App, text: &str, reply: &mpsc::Sender<ServerEvent>) {
     let result = match serde_json::from_str::<ClientCommand>(text) {
@@ -115,6 +116,7 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
         ClientCommand::SetProjectWorkdir { project, workdir } => {
             set_project_workdir(app, project, workdir).await
         }
+        ClientCommand::RenameAgent { project, name } => rename_agent(app, project, name).await,
         ClientCommand::Send {
             project,
             id,
@@ -528,9 +530,9 @@ async fn create_project(app: &App, name: String, workdir: Option<WorkDir>) -> Re
     };
     let row = ProjectRow {
         id: ProjectId::new(),
+        agent_name: crate::store::default_agent_name(&name),
         name,
         instructions: String::new(),
-        agent_name: app.agent_name.clone(),
         workdir,
         created_at: Timestamp::now(),
     };
@@ -580,6 +582,33 @@ async fn set_project_workdir(
             seq,
             project,
             workdir: event,
+        })
+        .await?;
+        txn.commit().await
+    }
+    .await;
+    result.map_err(internal)
+}
+
+/// 幫 project 的負責人改名字。之後的回覆與 instructions 都用新名字；舊訊息的作者欄不改寫。
+async fn rename_agent(app: &App, project: ProjectId, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("負責人的名字不能是空的".into());
+    }
+    if name.chars().count() > MAX_AGENT_NAME {
+        return Err(format!("負責人的名字最多 {MAX_AGENT_NAME} 個字"));
+    }
+    if !owns(app, project).await.map_err(internal)? {
+        return Err("找不到這個 project".into());
+    }
+    let result: Result<(), crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        Store::set_agent_name(txn.conn(), project, &name).await?;
+        txn.push(|seq| ServerEvent::ProjectAgentName {
+            seq,
+            project,
+            agent_name: name,
         })
         .await?;
         txn.commit().await

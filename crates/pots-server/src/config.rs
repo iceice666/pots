@@ -27,8 +27,6 @@ pub struct Config {
     pub auth: AuthConfig,
     /// 事件日誌保留的筆數。
     pub event_retention: u64,
-    /// 新 project 的對話 agent 顯示名稱。
-    pub agent_name: String,
     /// 實例名稱；`None` 時用主機名稱，取不到就是「本機」。只在第一次初始化時寫入。
     pub instance_name: Option<String>,
     /// 資料庫還沒記錄過使用中的 provider 時（第一次啟動）要選的 provider。
@@ -196,7 +194,6 @@ impl Config {
             listen: ListenConfig::Loopback { port: 0 },
             auth: AuthConfig::LocalToken,
             event_retention: DEFAULT_EVENT_RETENTION,
-            agent_name: "Pots".into(),
             instance_name: None,
             default_provider: None,
             memory: OmConfig::default(),
@@ -228,9 +225,6 @@ impl Config {
         }
         if self.event_retention == 0 {
             return Err(Error::Config("事件日誌至少要保留 1 筆".into()));
-        }
-        if self.agent_name.trim().is_empty() {
-            return Err(Error::Config("agent 名稱不能是空的".into()));
         }
         if self.watcher.poll_interval.is_zero() || self.watcher.sweep_interval.is_zero() {
             return Err(Error::Config("輪詢與 sweeper 的間隔不能是 0".into()));

@@ -687,7 +687,14 @@ async fn drive_loop(
             .map_err(RunError::Server)?
     };
     let mut instructions = format!("{head}{}{NARRATION_PROMPT}", profile.role_prompt());
-    instructions.push_str(&format!("\n\n這個 project 叫「{}」。", project.name));
+    if project.id == crate::store::OVERSIGHT_PROJECT_ID {
+        instructions.push_str(&format!("\n\n這個 project 叫「{}」。", project.name));
+    } else {
+        instructions.push_str(&format!(
+            "\n\n這個 project 叫「{}」，你是它的負責人，名字是「{}」。",
+            project.name, project.agent_name
+        ));
+    }
     if !project.instructions.trim().is_empty() {
         instructions.push_str("\n\n# Project 指示\n\n");
         instructions.push_str(project.instructions.trim());

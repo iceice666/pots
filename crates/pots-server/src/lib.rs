@@ -139,7 +139,6 @@ pub(crate) struct App {
     pub providers: Arc<ProviderRegistry>,
     pub model_auth: Arc<dyn ModelAuthControl>,
     pub shutdown: CancellationToken,
-    pub agent_name: String,
 }
 
 /// 執行中的服務。
@@ -371,7 +370,6 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
         providers: registry,
         model_auth: deps.model_auth,
         shutdown: shutdown.clone(),
-        agent_name: config.agent_name.clone(),
     });
 
     // 每個 project 一份 Project Notes（你可以直接編輯；agent 只能提案）。

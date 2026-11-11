@@ -196,7 +196,9 @@ async fn chat_round_trip() {
     let msg = agent_msg(agent);
     assert_eq!(msg.status, MsgStatus::Streaming);
     assert_eq!(msg.text, "");
-    assert!(matches!(&msg.author, pots_proto::Author::Agent { label, .. } if label == "Pots"));
+    assert!(
+        matches!(&msg.author, pots_proto::Author::Agent { label, .. } if label == "測試 負責人")
+    );
     assert!(is_state(&evs[3], project, AgentState::Thinking));
     let deltas: Vec<&str> = evs
         .iter()
@@ -213,7 +215,12 @@ async fn chat_round_trip() {
 
     let req = &srv.provider.requests()[0];
     assert_eq!(req.model, "test-model");
-    assert!(req.instructions.as_deref().unwrap().contains("測試"));
+    assert!(
+        req.instructions
+            .as_deref()
+            .unwrap()
+            .contains("這個 project 叫「測試」，你是它的負責人，名字是「測試 負責人」。")
+    );
     assert_eq!(req.input, [Item::User { text: "嗨".into() }]);
     assert!(req.tools.iter().any(|t| t.name == "get_status"));
 
@@ -906,5 +913,77 @@ async fn sends_while_run_writes_history() {
         "{:?}",
         user_texts(&last.input)
     );
+    srv.stop().await;
+}
+
+/// 每個 project 有自己的負責人：預設從 project 名稱推導，可以改名，之後的回覆與
+/// instructions 都用新名字。
+#[tokio::test]
+async fn each_project_has_its_own_lead() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = TestServer::start(tmp.path(), [ScriptedTurn::reply("收到")]).await;
+    let mut c = srv.client().await;
+    c.snapshot().await;
+    let auth = c.create_project("auth-service").await;
+    let web = c.create_project("web").await;
+
+    let (_, snap) = Client::connect(&srv, 0).await.snapshot().await;
+    let name = |id| {
+        snap.projects
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.agent_name.clone())
+            .unwrap()
+    };
+    assert_eq!(name(auth), "auth-service 負責人");
+    assert_eq!(name(web), "web 負責人");
+
+    // 空白或太長的名字被拒絕，不寫入。
+    for bad in ["  ".to_string(), "長".repeat(41)] {
+        c.send(&ClientCommand::RenameAgent {
+            project: auth,
+            name: bad,
+        })
+        .await;
+        let evs = c.until(|e| matches!(e, ServerEvent::Error { .. })).await;
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, ServerEvent::ProjectAgentName { .. }))
+        );
+    }
+
+    c.send(&ClientCommand::RenameAgent {
+        project: auth,
+        name: "  阿認  ".into(),
+    })
+    .await;
+    let evs = c
+        .until(|e| matches!(e, ServerEvent::ProjectAgentName { .. }))
+        .await;
+    assert!(matches!(
+        evs.last(),
+        Some(ServerEvent::ProjectAgentName { project, agent_name, .. })
+            if *project == auth && agent_name == "阿認"
+    ));
+
+    c.say(auth, "你是誰", SendMode::Queue).await;
+    let evs = c.until_idle(auth).await;
+    let reply = done_item(&evs);
+    assert!(matches!(
+        &agent_msg(reply).author,
+        pots_proto::Author::Agent { label, .. } if label == "阿認"
+    ));
+    let instructions = srv.provider.requests()[0].instructions.clone().unwrap();
+    assert!(instructions.contains("名字是「阿認」"), "{instructions}");
+
+    // 另一個 project 不受影響；新連線的快照也是新名字。
+    let (_, snap) = Client::connect(&srv, 0).await.snapshot().await;
+    let names: Vec<_> = snap
+        .projects
+        .iter()
+        .map(|p| (p.id, p.agent_name.as_str()))
+        .collect();
+    assert!(names.contains(&(auth, "阿認")));
+    assert!(names.contains(&(web, "web 負責人")));
     srv.stop().await;
 }

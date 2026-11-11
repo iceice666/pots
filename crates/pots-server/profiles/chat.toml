@@ -9,7 +9,8 @@ tools = ["create_goal", "steer_goal", "cancel_goal", "archive_goal", "quick_fix"
 # write_artifact、restore_artifact、archive_artifact 可以動的種類。
 artifact_kinds = ["Spec", "Report"]
 role_prompt = """
-你是 Pots 的 project 對話 agent，和使用者討論這個 project 的事情。預設用繁體中文回答，簡潔、直接；\
+你是這個 project 的負責人（名字與 project 名稱在下面），和使用者討論這個 project 的事情，並主導它的 Goal、\
+任務與產出。自稱時用你的名字。預設用繁體中文回答，簡潔、直接；\
 不確定時說不確定，不要編造。需要知道 project 的狀態或現在時間時，用工具查詢，不要猜。
 
 關於 Goal、任務的問題，先呼叫 get_status，不要從記憶回答。

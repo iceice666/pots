@@ -46,10 +46,16 @@ pub struct ProjectRow {
     pub id: ProjectId,
     pub name: String,
     pub instructions: String,
+    /// 這個 project 的負責人（對話 agent）顯示的名字。預設是 [`default_agent_name`]。
     pub agent_name: String,
     /// 工作資料夾；`None` 表示 onboarding 還沒設定。
     pub workdir: Option<WorkDir>,
     pub created_at: Timestamp,
+}
+
+/// 新 project 負責人的預設名字。`0013_project_lead.sql` 也用同一個格式轉換舊資料。
+pub fn default_agent_name(project: &str) -> String {
+    format!("{} 負責人", project.trim())
 }
 
 /// `model_connections` 的一列。不含 API key。
@@ -414,6 +420,20 @@ impl Store {
         sqlx::query("UPDATE projects SET workdir_kind = ?, workdir = ? WHERE id = ?")
             .bind(kind)
             .bind(value)
+            .bind(id.to_string())
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+
+    /// 幫 project 的負責人改名字。
+    pub async fn set_agent_name(
+        conn: &mut SqliteConnection,
+        id: ProjectId,
+        name: &str,
+    ) -> Result<(), Error> {
+        sqlx::query("UPDATE projects SET agent_name = ? WHERE id = ?")
+            .bind(name)
             .bind(id.to_string())
             .execute(conn)
             .await?;
@@ -1485,4 +1505,59 @@ pub(crate) fn parse_id<T: std::str::FromStr>(s: String) -> Result<T, Error> {
 /// 事件序列化成 JSON，資料庫與 WebSocket 共用同一份字串。
 pub fn event_json(ev: &ServerEvent) -> Result<String, Error> {
     to_json(ev)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 升級前所有 project 都叫「Pots」：`0013_project_lead.sql` 換成各自的負責人，
+    /// 總管與使用者自己改過的名字不動。
+    #[tokio::test]
+    async fn existing_projects_get_their_own_lead() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true))
+            .await
+            .unwrap();
+        let mut before = sqlx::migrate!("./migrations/sqlite");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|m| m.version < 13)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+        for (id, name, agent, kind) in [
+            ("a", "auth-service", "Pots", "project"),
+            ("b", "web", "小幫手", "project"),
+            ("c", "總管", "Pots", "overseer"),
+        ] {
+            sqlx::query(
+                "INSERT INTO projects (id, user_id, name, agent_name, kind, created_at) \
+                 VALUES (?, 'u', ?, ?, ?, 0)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(agent)
+            .bind(kind)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        MIGRATOR.run(&pool).await.unwrap();
+        let names: Vec<String> = sqlx::query_scalar("SELECT agent_name FROM projects ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            names,
+            [
+                default_agent_name("auth-service"),
+                "小幫手".into(),
+                "Pots".into()
+            ]
+        );
+    }
 }

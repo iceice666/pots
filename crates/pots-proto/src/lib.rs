@@ -31,7 +31,8 @@ use uuid::Uuid;
 /// - 13：對話 agent 管理自動化與 artifact（`ArtifactArchived`、`ApprovalActionView` 的
 ///   `DeleteSchedule`／`DeleteListener`／`ArchiveArtifact`）。
 /// - 14：依角色設定模型與 thinking（`ProvidersView::roles`、`SetRoleModel`）。
-pub const PROTOCOL_VERSION: u32 = 14;
+/// - 15：每個 project 有自己的負責人（`ProjectAgentName`、`RenameAgent`）。
+pub const PROTOCOL_VERSION: u32 = 15;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -2403,6 +2404,12 @@ pub enum ServerEvent {
         project: ProjectId,
         workdir: Option<WorkDir>,
     },
+    /// project 負責人（對話 agent）的名字改了。
+    ProjectAgentName {
+        seq: u64,
+        project: ProjectId,
+        agent_name: String,
+    },
     /// worker 設定有變。
     Worker {
         seq: u64,
@@ -2449,6 +2456,7 @@ impl ServerEvent {
             | Self::Github { seq, .. }
             | Self::ProjectRepos { seq, .. }
             | Self::ProjectWorkdir { seq, .. }
+            | Self::ProjectAgentName { seq, .. }
             | Self::Worker { seq, .. } => Some(*seq),
             Self::GithubTest { .. }
             | Self::Delta { .. }
@@ -2481,6 +2489,11 @@ pub enum ClientCommand {
     SetProjectWorkdir {
         project: ProjectId,
         workdir: Option<WorkDir>,
+    },
+    /// 幫 project 的負責人（對話 agent）改名字。
+    RenameAgent {
+        project: ProjectId,
+        name: String,
     },
     Send {
         project: ProjectId,
