@@ -506,6 +506,8 @@ pub struct PotsApp {
     pub expanded_tools: HashSet<ItemId>,
     /// 「為什麼」面板的內容（`ClientCommand::Why` 的結果）。
     pub why: Option<WhyView>,
+    /// 問「為什麼」的那則訊息附帶的工具摘要。
+    pub why_tools: Option<ToolSummary>,
     /// 底部短暫顯示的提示，例如「看 diff 尚未實作」。
     pub toast: Option<String>,
 
@@ -632,6 +634,7 @@ impl PotsApp {
             send_mode: SendMode::Queue,
             expanded_tools: HashSet::new(),
             why: None,
+            why_tools: None,
             toast: None,
             composer,
             goal_note,
@@ -2133,10 +2136,17 @@ impl PotsApp {
         self.open_overseer(window, cx);
     }
 
-    /// 問一則 agent 訊息為什麼這樣回答。
-    pub fn request_why(&mut self, item: ItemId, cx: &mut Context<Self>) {
+    /// 問一則 agent 訊息為什麼這樣回答；帶著那則訊息已呼叫的工具摘要。
+    pub fn request_why(
+        &mut self,
+        item: ItemId,
+        tools: Option<ToolSummary>,
+        cx: &mut Context<Self>,
+    ) {
         self.why = None;
+        self.why_tools = None;
         if self.live.is_some() {
+            self.why_tools = tools;
             self.store
                 .outbox
                 .push((self.instance, ClientCommand::Why { item }));
@@ -2149,6 +2159,7 @@ impl PotsApp {
 
     pub fn close_why(&mut self, cx: &mut Context<Self>) {
         self.why = None;
+        self.why_tools = None;
         cx.notify();
     }
 

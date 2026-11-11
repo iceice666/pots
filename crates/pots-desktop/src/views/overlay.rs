@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px, relative,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 
 use gpui_kit::component::input::Input;
@@ -43,6 +43,66 @@ impl PotsApp {
                         .unwrap_or_default(),
                 )),
         );
+        // 訊息上的工具摘要搬進這裡：點 chip 展開每一次工具呼叫。
+        if let Some(tools) = self.why_tools.as_ref() {
+            let item = why.item;
+            let expanded = self.expanded_tools.contains(&item);
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(super::widgets::section_label("已呼叫的工具"))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("why-tools-{}", item.0)))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .self_start()
+                            .px(px(10.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(theme::border())
+                            .bg(theme::subtle_bg())
+                            .text_size(px(13.))
+                            .text_color(theme::text_muted())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::track()))
+                            .child(icon(IconName::Wrench, 13., theme::text_muted()))
+                            .child(tools.text.clone())
+                            .child(icon(
+                                if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                13.,
+                                theme::text_muted(),
+                            ))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_tools(item, cx)),
+                            ),
+                    )
+                    .when(expanded, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .pl(px(12.))
+                                .border_l_2()
+                                .border_color(theme::border())
+                                .text_size(px(12.))
+                                .text_color(theme::text_muted())
+                                .children(
+                                    tools.details.iter().map(|line| div().child(line.clone())),
+                                ),
+                        )
+                    }),
+            );
+        }
         if why.steps.is_empty() {
             body = body.child(
                 div()

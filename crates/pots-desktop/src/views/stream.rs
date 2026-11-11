@@ -2,6 +2,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -283,74 +284,14 @@ impl PotsApp {
                 })
         });
 
-        let tools = msg.tools.as_ref().map(|t| {
-            let expanded = self.expanded_tools.contains(&id);
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("tools-{}", id.0)))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .self_start()
-                        .px(px(10.))
-                        .py(px(4.))
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .bg(theme::subtle_bg())
-                        .text_size(px(13.))
-                        .text_color(theme::text_muted())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::track()))
-                        .child(icon(IconName::Wrench, 13., theme::text_muted()))
-                        .child(t.text.clone())
-                        .child(icon(
-                            if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            },
-                            13.,
-                            theme::text_muted(),
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_tools(id, cx))),
-                )
-                .when(expanded, |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .pl(px(12.))
-                            .border_l_2()
-                            .border_color(theme::border())
-                            .text_size(px(12.))
-                            .text_color(theme::text_muted())
-                            .children(t.details.iter().map(|line| div().child(line.clone()))),
-                    )
-                })
-        });
-
-        let why_link = matches!(msg.author, Author::Agent { .. }).then(|| {
-            div()
-                .id(SharedString::from(format!("why-{}", id.0)))
-                .text_size(px(12.))
-                .text_color(theme::text_muted())
-                .cursor_pointer()
-                .hover(|s| s.text_color(theme::accent()))
-                .child("為什麼這樣回答")
-                .on_click(cx.listener(move |this, _, _, cx| this.request_why(id, cx)))
-        });
-
-        div()
+        let row = div()
+            .id(SharedString::from(format!("msg-{}", id.0)))
             .flex()
             .gap(px(12.))
             .px(px(density.pad_x()))
             .py(px(8.))
+            .rounded(px(8.))
+            .hover(|s| s.bg(theme::subtle_bg()))
             .child(author_avatar(&msg.author, density.avatar()))
             .child(
                 div()
@@ -361,11 +302,27 @@ impl PotsApp {
                     .gap(px(6.))
                     .child(header)
                     .children(body)
-                    .children(tools)
-                    .children(why_link)
                     .children(msg.cards.iter().map(|c| self.render_card(id, c, cx))),
-            )
+            );
+
+        // 只有 agent 訊息能問「為什麼這樣回答」；右鍵叫出選單。
+        if matches!(msg.author, Author::Agent { .. }) {
+            let app = cx.entity().downgrade();
+            let tools = msg.tools.clone();
+            row.context_menu(move |menu, _, _| {
+                let app = app.clone();
+                let tools = tools.clone();
+                menu.item(
+                    PopupMenuItem::new("為什麼這樣回答").on_click(move |_, _, cx| {
+                        app.update(cx, |this, cx| this.request_why(id, tools.clone(), cx))
+                            .ok();
+                    }),
+                )
+            })
             .into_any_element()
+        } else {
+            row.into_any_element()
+        }
     }
 
     pub fn render_card(&self, item: ItemId, card: &Card, cx: &mut Context<Self>) -> AnyElement {
