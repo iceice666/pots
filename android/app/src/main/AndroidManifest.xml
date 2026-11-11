@@ -15,7 +15,7 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- 推播落地：pots://approval/{id}、pots://gui-approval/{id} -->
+            <!-- 推播落地：pots://approval/{id}、pots://gui-approval/{id}；另有 pots://usage -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

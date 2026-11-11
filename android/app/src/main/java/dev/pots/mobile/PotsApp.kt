@@ -57,6 +57,7 @@ import dev.pots.mobile.ui.screens.InboxScreen
 import dev.pots.mobile.ui.screens.OverseerScreen
 import dev.pots.mobile.ui.screens.ProjectsScreen
 import dev.pots.mobile.ui.screens.SettingsScreen
+import dev.pots.mobile.ui.screens.UsageScreen
 import dev.pots.mobile.ui.theme.Pots
 import kotlinx.coroutines.launch
 
@@ -68,6 +69,7 @@ object Routes {
     const val CHANNEL = "channel/{project}"
     const val APPROVAL = "approval/{approval}"
     const val GUI_APPROVAL = "gui-approval/{approval}"
+    const val USAGE = "usage"
 
     fun channel(id: ProjectId) = "channel/${id.raw}"
     fun approval(id: ApprovalId) = "approval/${id.raw}"
@@ -90,6 +92,7 @@ class PotsNav(private val controller: NavHostController) {
     fun channel(id: ProjectId) = controller.navigate(Routes.channel(id)) { launchSingleTop = true }
     fun approval(id: ApprovalId) = controller.navigate(Routes.approval(id)) { launchSingleTop = true }
     fun guiApproval(id: ApprovalId) = controller.navigate(Routes.guiApproval(id)) { launchSingleTop = true }
+    fun usage() = controller.navigate(Routes.USAGE) { launchSingleTop = true }
 
     fun back() {
         if (!controller.popBackStack()) tab(Routes.PROJECTS)
@@ -156,6 +159,10 @@ fun PotsApp(
                 ) { backStack ->
                     GuiApprovalScreen(store, nav, ApprovalId(backStack.arguments!!.getLong("approval")))
                 }
+                composable(
+                    Routes.USAGE,
+                    deepLinks = listOf(navDeepLink { uriPattern = "pots://usage" }),
+                ) { UsageScreen(store, nav) }
             }
         }
     }

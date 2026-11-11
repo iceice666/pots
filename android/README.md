@@ -21,6 +21,7 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 ```sh
 adb shell am start -d pots://approval/1 dev.pots.mobile
 adb shell am start -d pots://gui-approval/3 dev.pots.mobile
+adb shell am start -d pots://usage dev.pots.mobile
 ```
 
 ## 已有的畫面
@@ -34,7 +35,8 @@ adb shell am start -d pots://gui-approval/3 dev.pots.mobile
 | 核准專頁 | 將被執行的動作、檢查結果、diff 摘要、附理由；`pots://approval/{id}` |
 | GUI 核准 | 託管電腦截圖示意、要點擊的位置、接手畫面；`pots://gui-approval/{id}` |
 | 總管 | 跨 project 的對話、專案概況（點了進該 project）、建議與輸入框 |
-| 設定 | 實例、通知、推播落地頁預覽（設計稿沒有，先放最少的內容） |
+| 設定 | 實例、用量入口、通知、推播落地頁預覽（設計稿沒有，先放最少的內容） |
+| 用量 | 今天／7 天／30 天切換；總 token（input／output）、run 數、估計金額與 CLI 回報金額；訂閱／API／CLI 分帳與主要工作／記憶整理（OM）比例；依 project、模型、Goal 彙總（Goal 預算以 token 計，顯示已用／預算，沒設顯示「不限」）；沒有單價的 token 數提示。從設定進入或 `pots://usage`。資料形狀照 `pots-proto` 的 `CostReport` |
 
 同一筆核准在 Inbox、對話卡片、狀態抽屜、核准專頁任一處決定後，其他地方、底部 Inbox 徽章與專案列表的橫幅一起更新。「搜尋」「新增專案」「看完整 diff」「任務 thread」「接手畫面」等還沒實作，點了會在底部提示。
 

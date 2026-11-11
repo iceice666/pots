@@ -8,6 +8,12 @@ import dev.pots.mobile.model.MsgStatus
 import dev.pots.mobile.model.PotsStore
 import dev.pots.mobile.model.SendMode
 import dev.pots.mobile.model.StreamItem
+import dev.pots.mobile.model.UsageRange
+import dev.pots.mobile.model.byGoal
+import dev.pots.mobile.model.byModel
+import dev.pots.mobile.model.byProject
+import dev.pots.mobile.model.formatTokens
+import dev.pots.mobile.model.formatUsd
 import dev.pots.mobile.model.ageLabel
 import dev.pots.mobile.model.formatDollars
 import org.junit.Assert.assertEquals
@@ -74,7 +80,42 @@ class PotsStoreTest {
     }
 
     @Test
+    fun usageReportAddsUp() {
+        val store = PotsStore()
+        assertEquals(UsageRange.Today, store.usageRange)
+        val today = store.usage
+        assertEquals(1_352_400L, today.totals.tokens)
+        assertEquals(today.rows.sumOf { it.tokens }, today.totals.tokens)
+        assertEquals(171_500L, today.totals.pricedTokens)
+        assertEquals(today.totals.tokens, today.totals.pricedTokens + today.totals.unpricedTokens)
+        assertEquals(74_300L, today.totals.omTokens)
+        assertEquals(today.totals.tokens, today.totals.omTokens + today.totals.workTokens)
+        // 彙總不會漏掉或重算任何一列。
+        assertEquals(today.totals.tokens, today.byProject().sumOf { it.tokens })
+        assertEquals(today.totals.tokens, today.byModel().sumOf { it.tokens })
+        assertEquals("auth-service", today.byProject().first().title)
+
+        val oauth = today.byGoal().first()
+        assertEquals("OAuth 登入遷移" to 656_300L, oauth.title to oauth.tokens)
+        assertNull(store.goalBudgetTokens(oauth.goal!!))
+
+        store.selectUsageRange(UsageRange.Month)
+        val month = store.usage
+        assertTrue(month.totals.tokens > today.totals.tokens)
+        // 舊的 run 沒有 billing，不算進任何一種帳。
+        assertTrue(month.totals.subscriptionTokens + month.totals.apiTokens + month.totals.cliTokens < month.totals.tokens)
+        assertEquals(2_000_000L, store.goalBudgetTokens(Mock.DocsThemeGoal))
+    }
+
+    @Test
     fun formatting() {
+        assertEquals("850", formatTokens(850))
+        assertEquals("12.4K", formatTokens(12_400))
+        assertEquals("1.4M", formatTokens(1_352_400))
+        assertEquals("2M", formatTokens(2_000_000))
+        assertEquals("$1.92", formatUsd(1.92))
+        assertEquals("<$0.01", formatUsd(0.004))
+        assertEquals("$0", formatUsd(0.0))
         assertEquals("$4.20", formatDollars(420))
         assertEquals("$20", formatDollars(2000))
         assertEquals("2 分鐘前", ageLabel(2))

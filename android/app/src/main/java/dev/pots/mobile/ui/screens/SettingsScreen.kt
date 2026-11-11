@@ -21,6 +21,8 @@ import dev.pots.mobile.LocalNotice
 import dev.pots.mobile.PotsNav
 import dev.pots.mobile.model.Mock
 import dev.pots.mobile.model.PotsStore
+import dev.pots.mobile.model.formatTokens
+import dev.pots.mobile.model.formatUsd
 import dev.pots.mobile.ui.components.GroupedList
 import dev.pots.mobile.ui.components.HeaderBar
 import dev.pots.mobile.ui.components.IconTile
@@ -58,6 +60,18 @@ fun SettingsScreen(store: PotsStore, nav: PotsNav) {
                     trailing = { Icon(PotsIcons.ChevronRight, contentDescription = null, tint = Pots.Muted, modifier = Modifier.size(18.dp)) },
                 )
             }
+
+            SectionLabel("用量", Modifier.padding(start = 4.dp, top = 12.dp))
+            val usage = store.usage
+            Rows(
+                listOf(
+                    SettingRow(
+                        "Token 用量",
+                        "${store.usageRange.label} ${formatTokens(usage.totals.tokens)} token · 估計 ${formatUsd(usage.totals.estimatedCostUsd)}",
+                        nav::usage,
+                    ),
+                ),
+            )
 
             SectionLabel("通知", Modifier.padding(start = 4.dp, top = 12.dp))
             Rows(

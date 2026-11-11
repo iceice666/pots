@@ -163,4 +163,102 @@ object Mock {
     )
 
     val overseerSuggestions = listOf("幫 web-app 開 Goal", "本週成本報表")
+
+    // -- 用量 ----------------------------------------------------------------
+
+    val Overseer = ProjectId(0)
+    val OauthGoal = GoalId(1)
+    val DocsThemeGoal = GoalId(2)
+    val FlakyTestGoal = GoalId(3)
+
+    /** Goal 的預算上限（token，對應伺服器 `goals.budget_tokens`）；沒列的是「不限」。Goal 預算預設不限，只有 docs-site 那個設了上限。 */
+    val goalBudgetTokens: Map<GoalId, Long> = mapOf(DocsThemeGoal to 2_000_000L)
+
+    private fun row(
+        project: ProjectId,
+        name: String,
+        agent: String,
+        billing: Billing,
+        provider: String,
+        runtime: String,
+        model: String,
+        runs: Long,
+        input: Long,
+        output: Long,
+        goal: Pair<GoalId, String>? = null,
+        reported: Double? = null,
+        /** 每 100 萬 token 的 input／output 單價；只有 API 的 run 會換算。 */
+        price: Pair<Double, Double>? = null,
+    ): CostRow {
+        val estimated = price?.takeIf { billing == Billing.Api }?.let { (i, o) -> input / 1e6 * i + output / 1e6 * o }
+        val tokens = input + output
+        return CostRow(
+            project = project,
+            projectName = name,
+            goal = goal?.first,
+            goalTitle = goal?.second,
+            agent = agent,
+            category = if (agent == "observer" || agent == "reflector") CostCategory.Om else CostCategory.Work,
+            provider = provider,
+            billing = billing,
+            runtime = runtime,
+            model = model,
+            runs = runs,
+            inputTokens = input,
+            outputTokens = output,
+            durationSecs = runs * 95,
+            reportedCostUsd = reported,
+            estimatedCostUsd = estimated,
+            pricedTokens = if (estimated != null) tokens else 0,
+            unpricedTokens = if (estimated != null) 0 else tokens,
+        )
+    }
+
+    private fun CostRow.times(k: Int): CostRow = copy(
+        runs = runs * k,
+        inputTokens = inputTokens * k,
+        outputTokens = outputTokens * k,
+        durationSecs = durationSecs * k,
+        reportedCostUsd = reportedCostUsd?.times(k),
+        estimatedCostUsd = estimatedCostUsd?.times(k),
+        pricedTokens = pricedTokens * k,
+        unpricedTokens = unpricedTokens * k,
+    )
+
+    private val gpt5 = 1.25 to 10.0
+    private val gpt5Mini = 0.25 to 2.0
+    private val oauth = OauthGoal to "OAuth 登入遷移"
+
+    /** 今天的用量；7 天與 30 天是放大後再加上較早的 run。 */
+    private val todayRows = listOf(
+        row(AuthService, "auth-service", "chat", Billing.Subscription, "anthropic", "pi", "claude-sonnet-4-5", 6, 182_000, 21_400),
+        row(AuthService, "auth-service", "planner", Billing.Api, "openai", "pi", "gpt-5", 2, 64_000, 9_800, oauth, price = gpt5),
+        row(AuthService, "auth-service", "worker", Billing.Cli, "anthropic", "claude-code", "claude-sonnet-4-5", 3, 410_000, 38_500, oauth, reported = 1.92),
+        // 單價表沒有這個模型：算不出金額。
+        row(AuthService, "auth-service", "worker", Billing.Api, "openrouter", "rig", "qwen3-coder", 2, 120_000, 14_000, oauth),
+        row(AuthService, "auth-service", "observer", Billing.Api, "openai", "pi", "gpt-5-mini", 4, 52_000, 3_100, price = gpt5Mini),
+        row(AuthService, "auth-service", "reflector", Billing.Api, "openai", "pi", "gpt-5-mini", 1, 18_000, 1_200, price = gpt5Mini),
+        row(WebApp, "web-app", "chat", Billing.Subscription, "anthropic", "pi", "claude-sonnet-4-5", 3, 74_000, 6_200),
+        row(WebApp, "web-app", "worker", Billing.Cli, "anthropic", "claude-code", "claude-sonnet-4-5", 3, 260_000, 22_000, FlakyTestGoal to "穩定 e2e/checkout 測試", reported = 1.14),
+        row(Infra, "infra", "chat", Billing.Api, "openai", "pi", "gpt-5", 1, 21_000, 2_400, price = gpt5),
+        row(Overseer, "總管（全域）", "chat", Billing.Subscription, "anthropic", "pi", "claude-sonnet-4-5", 2, 30_000, 2_800),
+    )
+
+    private val docsThemeRow =
+        row(DocsSite, "docs-site", "worker", Billing.Cli, "anthropic", "claude-code", "claude-sonnet-4-5", 9, 980_000, 88_000, DocsThemeGoal to "遷移到新版文件主題", reported = 4.37)
+
+    /** 舊的 run 沒有記錄 provider。 */
+    private val legacyRow =
+        row(WebApp, "web-app", "worker", Billing.Unknown, "", "", "claude-3-5-sonnet", 4, 300_000, 25_000)
+
+    fun costReports(): Map<UsageRange, CostReport> {
+        val pricing = PricingInfo(source = "models.dev", models = 412, updatedAt = "今天 03:00")
+        fun report(since: String, rows: List<CostRow>) =
+            CostReport(since = since, until = "11:30", generatedAt = "11:30", rows = rows, totals = CostTotals.of(rows), pricing = pricing)
+        return mapOf(
+            UsageRange.Today to report("今天 00:00", todayRows),
+            UsageRange.Week to report("11/05", todayRows.map { it.times(5) } + docsThemeRow),
+            UsageRange.Month to report("10/13", todayRows.map { it.times(19) } + docsThemeRow + legacyRow),
+        )
+    }
 }

@@ -65,4 +65,6 @@ class ScreenshotTest {
     @Test fun overseer() = app(Routes.OVERSEER, "07-overseer")
 
     @Test fun settings() = app(Routes.SETTINGS, "08-settings")
+
+    @Test fun usage() = app(Routes.USAGE, "09-usage")
 }

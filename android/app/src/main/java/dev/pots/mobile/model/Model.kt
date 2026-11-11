@@ -12,6 +12,7 @@ package dev.pots.mobile.model
 @JvmInline value class ProjectId(val raw: Long)
 @JvmInline value class InboxItemId(val raw: Long)
 @JvmInline value class ApprovalId(val raw: Long)
+@JvmInline value class GoalId(val raw: Long)
 
 /** `$4.20` 這類金額顯示，和桌面版 `format_dollars` 一致。 */
 fun formatDollars(cents: Int): String =
@@ -246,6 +247,180 @@ sealed interface OverseerItem {
 }
 
 data class OverviewRow(val project: ProjectId, val kind: InboxKind, val text: String)
+
+// ---------------------------------------------------------------------------
+// 用量（成本報表）
+//
+// 形狀照 `crates/pots-proto` 的 `CostReport`／`CostRow`／`CostTotals`／`PricingInfo`。
+// 時間戳在這裡是已格式化的字串，和其他 view model 一致。
+
+/** 成本報表的分類：主要工作或 Observational Memory 的開銷。 */
+enum class CostCategory(val label: String) {
+    Work("主要工作"),
+    Om("記憶整理"),
+}
+
+/** 費用屬於哪一種帳：訂閱用量、API 金額或 CLI 回報的估計。 */
+enum class Billing(val label: String) {
+    Subscription("訂閱"),
+    Api("API"),
+    Cli("CLI"),
+
+    /** 舊的 run 沒有記錄 provider。 */
+    Unknown("未知"),
+}
+
+/** 成本報表的一列：同一個 project、Goal、agent、provider／runtime 與模型的彙總。 */
+data class CostRow(
+    val project: ProjectId,
+    val projectName: String,
+    val goal: GoalId?,
+    val goalTitle: String?,
+    /** `chat`、`planner`、`worker`、`observer`、`reflector` 等。 */
+    val agent: String,
+    val category: CostCategory,
+    val provider: String,
+    val billing: Billing,
+    val runtime: String,
+    val model: String,
+    val runs: Long,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val durationSecs: Long,
+    /** CLI 回報的費用（Claude Code 的 `total_cost_usd`）；不是帳單。 */
+    val reportedCostUsd: Double?,
+    /** 依單價表算出的估計金額；沒有單價或訂閱用量時是 `null`。 */
+    val estimatedCostUsd: Double?,
+    val pricedTokens: Long,
+    val unpricedTokens: Long,
+) {
+    val tokens: Long get() = inputTokens + outputTokens
+}
+
+/** 成本報表的總計。 */
+data class CostTotals(
+    val runs: Long = 0,
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val durationSecs: Long = 0,
+    val reportedCostUsd: Double = 0.0,
+    val estimatedCostUsd: Double = 0.0,
+    val pricedTokens: Long = 0,
+    val unpricedTokens: Long = 0,
+    /** 依計費方式分開的 token（訂閱用量與 API 金額分帳）。 */
+    val subscriptionTokens: Long = 0,
+    val apiTokens: Long = 0,
+    val cliTokens: Long = 0,
+    /** OM 與主要工作分開。 */
+    val omTokens: Long = 0,
+    val workTokens: Long = 0,
+) {
+    val tokens: Long get() = inputTokens + outputTokens
+
+    companion object {
+        /** 和伺服器 `cost.rs` 的加總方式一樣；假資料用它算總計。 */
+        fun of(rows: List<CostRow>): CostTotals = rows.fold(CostTotals()) { t, r ->
+            t.copy(
+                runs = t.runs + r.runs,
+                inputTokens = t.inputTokens + r.inputTokens,
+                outputTokens = t.outputTokens + r.outputTokens,
+                durationSecs = t.durationSecs + r.durationSecs,
+                reportedCostUsd = t.reportedCostUsd + (r.reportedCostUsd ?: 0.0),
+                estimatedCostUsd = t.estimatedCostUsd + (r.estimatedCostUsd ?: 0.0),
+                pricedTokens = t.pricedTokens + r.pricedTokens,
+                unpricedTokens = t.unpricedTokens + r.unpricedTokens,
+                subscriptionTokens = t.subscriptionTokens + if (r.billing == Billing.Subscription) r.tokens else 0,
+                apiTokens = t.apiTokens + if (r.billing == Billing.Api) r.tokens else 0,
+                cliTokens = t.cliTokens + if (r.billing == Billing.Cli) r.tokens else 0,
+                omTokens = t.omTokens + if (r.category == CostCategory.Om) r.tokens else 0,
+                workTokens = t.workTokens + if (r.category == CostCategory.Work) r.tokens else 0,
+            )
+        }
+    }
+}
+
+/** 單價表的摘要。 */
+data class PricingInfo(
+    /** `models.dev` 或 `manual`；空字串表示還沒有任何單價。 */
+    val source: String,
+    val models: Long,
+    val updatedAt: String?,
+)
+
+data class CostReport(
+    val since: String,
+    val until: String,
+    val generatedAt: String,
+    val rows: List<CostRow>,
+    val totals: CostTotals,
+    val pricing: PricingInfo,
+)
+
+/** 用量畫面的時間範圍。 */
+enum class UsageRange(val label: String, val days: Int) {
+    Today("今天", 1),
+    Week("7 天", 7),
+    Month("30 天", 30),
+}
+
+/** 用量畫面上依 project／模型／Goal 彙總後的一列。 */
+data class UsageGroup(
+    val key: String,
+    val title: String,
+    val runs: Long,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val estimatedCostUsd: Double,
+    val reportedCostUsd: Double,
+    val unpricedTokens: Long,
+    val billing: List<Billing>,
+    /** 依 Goal 彙總時才有。 */
+    val goal: GoalId? = null,
+) {
+    val tokens: Long get() = inputTokens + outputTokens
+}
+
+private fun List<CostRow>.groups(key: (CostRow) -> String, title: (CostRow) -> String): List<UsageGroup> =
+    groupBy(key)
+        .map { (k, rows) ->
+            UsageGroup(
+                key = k,
+                title = title(rows.first()),
+                runs = rows.sumOf { it.runs },
+                inputTokens = rows.sumOf { it.inputTokens },
+                outputTokens = rows.sumOf { it.outputTokens },
+                estimatedCostUsd = rows.sumOf { it.estimatedCostUsd ?: 0.0 },
+                reportedCostUsd = rows.sumOf { it.reportedCostUsd ?: 0.0 },
+                unpricedTokens = rows.sumOf { it.unpricedTokens },
+                billing = rows.map { it.billing }.distinct().sorted(),
+                goal = rows.first().goal,
+            )
+        }
+        .sortedByDescending { it.tokens }
+
+fun CostReport.byProject(): List<UsageGroup> = rows.groups({ "p${it.project.raw}" }, { it.projectName })
+
+fun CostReport.byModel(): List<UsageGroup> = rows.groups({ "${it.provider}/${it.model}" }, { it.model })
+
+/** 只算掛在 Goal 底下的 run；對話、OM 這類不屬於 Goal 的不列。 */
+fun CostReport.byGoal(): List<UsageGroup> =
+    rows.filter { it.goal != null }.groups({ "g${it.goal!!.raw}" }, { it.goalTitle ?: "未命名 Goal" })
+
+/** `850`、`12.4K`、`3.2M` 這類 token 數。 */
+fun formatTokens(n: Long): String = when {
+    n < 1_000 -> "$n"
+    n < 1_000_000 -> trimmed(n / 1_000.0) + "K"
+    else -> trimmed(n / 1_000_000.0) + "M"
+}
+
+private fun trimmed(v: Double): String = "%.1f".format(java.util.Locale.ROOT, v).removeSuffix(".0")
+
+/** `$1.23`；小於一分錢顯示 `<$0.01`。 */
+fun formatUsd(usd: Double): String = when {
+    usd <= 0.0 -> "$0"
+    usd < 0.01 -> "<$0.01"
+    else -> "$" + "%.2f".format(java.util.Locale.ROOT, usd)
+}
 
 // ---------------------------------------------------------------------------
 // 送給伺服器的指令

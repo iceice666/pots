@@ -11,6 +11,7 @@ import dev.pots.mobile.model.ClientCommand
 import dev.pots.mobile.model.Decision
 import dev.pots.mobile.model.Mock
 import dev.pots.mobile.model.PotsStore
+import dev.pots.mobile.model.UsageRange
 import dev.pots.mobile.ui.theme.PotsTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -41,6 +42,26 @@ class FlowTest {
 
         compose.onNode(hasContentDescription("返回專案列表")).performClick()
         compose.onNodeWithText("1 筆待核准 · 1 項需要你").assertExists()
+    }
+
+    /** 從設定進用量，切到 7 天後出現有預算的 Goal；沒預算的顯示不限。 */
+    @Test
+    fun usageFromSettings() {
+        val store = PotsStore()
+        compose.setContent { PotsTheme { PotsApp(store = store, startRoute = Routes.SETTINGS) } }
+
+        compose.onNodeWithText("Token 用量").performClick()
+        compose.onNodeWithText("1.4M").assertExists()
+        compose.onNodeWithText("預算 不限 · 7 次 run").assertExists()
+        compose.onAllNodesWithText("遷移到新版文件主題").assertCountEquals(0)
+
+        compose.onNodeWithText("7 天").performClick()
+        assertEquals(UsageRange.Week, store.usageRange)
+        compose.onNodeWithText("遷移到新版文件主題").assertExists()
+        compose.onNodeWithText("已用 1.1M / 預算 2M token · 9 次 run").assertExists()
+
+        compose.onNode(hasContentDescription("返回")).performClick()
+        compose.onNodeWithText("推播方式").assertExists()
     }
 
     @Test

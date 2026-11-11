@@ -127,6 +127,24 @@ class PotsStore : ViewModel() {
         outbox += ClientCommand.StopRun(project)
     }
 
+    // -- 用量 ----------------------------------------------------------------
+
+    private val costReports = Mock.costReports()
+    private val goalBudgetTokens = Mock.goalBudgetTokens
+
+    var usageRange: UsageRange by mutableStateOf(UsageRange.Today)
+        private set
+
+    /** 之後切換範圍會向伺服器要新的 `CostReport`；現在三個範圍都是假資料。 */
+    fun selectUsageRange(range: UsageRange) {
+        usageRange = range
+    }
+
+    val usage: CostReport get() = costReports.getValue(usageRange)
+
+    /** Goal 的預算上限（token）；`null` 是不限。 */
+    fun goalBudgetTokens(goal: GoalId): Long? = goalBudgetTokens[goal]
+
     // -- 總管 ----------------------------------------------------------------
 
     fun askOverseer(text: String, time: String) {
