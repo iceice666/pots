@@ -71,23 +71,7 @@ impl PotsApp {
         let sections = members(project, &inst.providers, &inst.worker);
         let total: usize = sections.iter().map(|s| s.members.len()).sum();
 
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .px(px(20.))
-            .pt(px(14.))
-            .pb(px(14.))
-            .border_b_1()
-            .border_color(theme::border())
-            .child(div().font_weight(FontWeight::BOLD).child("成員"))
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(theme::text_muted())
-                    .child(total.to_string()),
-            )
-            .child(self.close_button(cx));
+        let header = self.list_panel_header("成員", total, cx);
 
         let mut body = div().flex().flex_col();
         let mut index = 0;

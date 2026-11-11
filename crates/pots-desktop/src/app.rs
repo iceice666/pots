@@ -416,15 +416,6 @@ pub enum AutomationSection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChannelTab {
-    Chat,
-    Goals,
-    Artifacts,
-    Automations,
-    Memory,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GoalTab {
     Tasks,
     Brief,
@@ -447,6 +438,36 @@ pub enum Panel {
     NewSource,
     /// 目前 project 的成員列表（頻道標題列的「成員」按鈕切換）。
     Members,
+    /// 目前 project 的 Goal 列表。
+    Goals,
+    /// 目前 project 的 artifact 列表。
+    Artifacts,
+    /// 目前 project 的自動化（監看設定、排程與 listener）。
+    Automations,
+    /// 目前 project 對話 agent 的記憶。
+    Memory,
+}
+
+impl Panel {
+    /// 頻道標題列按鈕開的「整個 project」類面板：換 project 時留著，換成新 project 的內容。
+    pub fn is_project_list(self) -> bool {
+        matches!(
+            self,
+            Self::Members | Self::Goals | Self::Artifacts | Self::Automations | Self::Memory
+        )
+    }
+
+    /// 列表面板的名稱（「返回」按鈕的提示用）。
+    pub fn list_label(self) -> &'static str {
+        match self {
+            Self::Members => "成員列表",
+            Self::Goals => "Goals 列表",
+            Self::Artifacts => "Artifacts 列表",
+            Self::Automations => "自動化",
+            Self::Memory => "記憶",
+            _ => "列表",
+        }
+    }
 }
 
 /// 右欄正在編輯的 artifact：每個 `##` 區段一個編輯器。
@@ -530,8 +551,9 @@ pub struct PotsApp {
     /// 側欄目前顯示的實例。
     pub instance: InstanceId,
     pub screen: Screen,
-    pub channel_tab: ChannelTab,
     pub panel: Option<Panel>,
+    /// 從列表面板點進細節時記住那個列表，細節面板顯示「返回」按鈕。只在 `panel` 是細節時有意義。
+    pub panel_back: Option<Panel>,
     pub inbox_filter: InboxFilter,
     pub automation_section: AutomationSection,
     /// 自動化頁的專案篩選；`None` 是所有專案。
@@ -662,8 +684,8 @@ impl PotsApp {
             live: None,
             instance,
             screen: project.map_or(Screen::Inbox(None), Screen::Project),
-            channel_tab: ChannelTab::Chat,
             panel: None,
+            panel_back: None,
             inbox_filter: InboxFilter::All,
             automation_section: AutomationSection::Schedules,
             automation_filter: None,
@@ -1779,10 +1801,10 @@ impl PotsApp {
         self.store
             .outbox
             .push((instance, ClientCommand::MarkRead { project }));
-        self.channel_tab = ChannelTab::Chat;
         self.observation_editor = None;
-        // 成員列表開著就留著（換成新 project 的成員）；否則有進行中的 Goal 時預設在右欄打開。
-        if self.panel != Some(Panel::Members) {
+        // 成員、Goals 等列表開著就留著（換成新 project 的內容）；否則有進行中的 Goal 時預設在右欄打開。
+        if !self.panel.is_some_and(Panel::is_project_list) {
+            self.panel_back = None;
             self.panel = self
                 .store
                 .project(instance, project)
@@ -1833,23 +1855,50 @@ impl PotsApp {
             !matches!(panel, Some(Panel::Artifact(_))),
             "artifact 面板要用 open_artifact 打開"
         );
-        self.panel = panel;
+        self.set_panel(panel);
         cx.notify();
     }
 
-    /// 頻道標題列的「成員」：右欄在成員列表與關閉之間切換。右欄一次只有一種內容，
-    /// 打開成員列表就換掉 Goal 面板（或任務 thread、artifact 編輯器，草稿留在編輯器裡）。
-    pub fn toggle_members(&mut self, cx: &mut Context<Self>) {
-        self.panel = if self.panel == Some(Panel::Members) {
+    /// 換右欄內容並維護「返回」：從列表點進細節時記住列表，細節之間切換（Goal 分頁、
+    /// Goal → 任務）沿用，打開列表或關閉時清掉。
+    pub(crate) fn set_panel(&mut self, panel: Option<Panel>) {
+        let is_detail = |p: Option<Panel>| p.is_some_and(|p| !p.is_project_list());
+        self.panel_back = match self.panel {
+            Some(list) if list.is_project_list() && is_detail(panel) => Some(list),
+            current if is_detail(current) && is_detail(panel) => self.panel_back,
+            _ => None,
+        };
+        self.panel = panel;
+    }
+
+    /// 細節面板的「返回」：回到點進來的那個列表。
+    pub fn panel_go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(list) = self.panel_back.take() {
+            self.panel = Some(list);
+            cx.notify();
+        }
+    }
+
+    /// 目前的細節面板可以返回哪個列表。
+    pub fn panel_back_target(&self) -> Option<Panel> {
+        self.panel_back
+            .filter(|_| self.panel.is_some_and(|p| !p.is_project_list()))
+    }
+
+    /// 頻道標題列的按鈕（成員、Goals、Artifacts、自動化、記憶）：右欄在這個列表與關閉之間
+    /// 切換。右欄一次只有一種內容，打開列表就換掉 Goal 面板（或任務 thread、artifact 編輯器，
+    /// 草稿留在編輯器裡）。
+    pub fn toggle_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
+        debug_assert!(panel.is_project_list(), "只有列表面板用切換");
+        self.set_panel(if self.panel == Some(panel) {
             None
         } else {
-            Some(Panel::Members)
-        };
+            Some(panel)
+        });
         cx.notify();
     }
 
-    /// 在右欄開啟 artifact 編輯器。artifact 不在目前的 project 時，先切到它所屬的
-    /// project 的 Artifacts 分頁。
+    /// 在右欄開啟 artifact 編輯器。artifact 不在目前的 project 時，先切到它所屬的 project。
     pub fn open_artifact(&mut self, id: ArtifactId, window: &mut Window, cx: &mut Context<Self>) {
         let Some((project, _)) = self.store.artifact(self.instance, id) else {
             self.toast = Some("找不到這份 artifact，可能已經刪除。".into());
@@ -1877,7 +1926,6 @@ impl PotsApp {
 
         if self.screen != Screen::Project(project) {
             self.open_project(self.instance, project, window, cx);
-            self.channel_tab = ChannelTab::Artifacts;
         }
 
         // 同一份已經開著就沿用，保留游標、復原紀錄與草稿。
@@ -1888,7 +1936,7 @@ impl PotsApp {
         {
             self.artifact_editor = self.build_artifact_editor(id, window, cx);
         }
-        self.panel = Some(Panel::Artifact(id));
+        self.set_panel(Some(Panel::Artifact(id)));
         cx.notify();
     }
 
@@ -2437,7 +2485,7 @@ impl PotsApp {
             return;
         }
         self.store.post_goal_note(self.instance, goal, text);
-        self.panel = Some(Panel::Goal(goal, GoalTab::Team));
+        self.set_panel(Some(Panel::Goal(goal, GoalTab::Team)));
         self.goal_note.update(cx, |s, cx| s.clean(window, cx));
         cx.notify();
     }

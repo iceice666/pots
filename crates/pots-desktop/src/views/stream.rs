@@ -592,6 +592,16 @@ impl PotsApp {
     }
 
     pub fn render_goal_card(&self, goal: &GoalView, cx: &mut Context<Self>) -> impl IntoElement {
+        self.goal_card(goal, true, cx)
+    }
+
+    /// Goal 卡片。`hint` 是對話裡的「在右側開啟」提示；右欄的 Goals 列表本身就在右側，不顯示。
+    pub(super) fn goal_card(
+        &self,
+        goal: &GoalView,
+        hint: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let gid = goal.id;
         let open = matches!(self.panel, Some(Panel::Goal(g, _)) if g == gid);
         card_frame(560.)
@@ -608,31 +618,39 @@ impl PotsApp {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(tag("GOAL", theme::accent(), theme::accent_soft()))
+                    .child(tag("GOAL", theme::accent(), theme::accent_soft()).flex_none())
+                    // 標題可以縮、換行：右欄的 Goals 列表只有 380px，長標題不能撑破卡片。
                     .child(
                         div()
+                            .min_w_0()
                             .text_size(px(16.))
                             .font_weight(FontWeight::BOLD)
                             .child(goal.title.clone()),
                     )
                     .when(goal.quick, |d| {
-                        d.child(tag("快速修改", theme::violet(), theme::violet_soft()))
+                        d.child(tag("快速修改", theme::violet(), theme::violet_soft()).flex_none())
                     })
                     .when(!goal.state.is_active(), |d| {
-                        d.child(tag(goal.state.label(), theme::text_muted(), theme::track()))
+                        d.child(
+                            tag(goal.state.label(), theme::text_muted(), theme::track())
+                                .flex_none(),
+                        )
                     })
-                    .child(
-                        div()
-                            .ml_auto()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::accent())
-                            .child(if open {
-                                "在右側開啟中"
-                            } else {
-                                "在右側開啟"
-                            }),
-                    ),
+                    .when(hint, |d| {
+                        d.child(
+                            div()
+                                .ml_auto()
+                                .flex_none()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::accent())
+                                .child(if open {
+                                    "在右側開啟中"
+                                } else {
+                                    "在右側開啟"
+                                }),
+                        )
+                    }),
             )
             .child(goal_progress(goal))
             .child(goal_counts(goal))

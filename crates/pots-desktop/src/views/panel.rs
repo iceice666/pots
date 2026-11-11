@@ -200,7 +200,66 @@ impl PotsApp {
                 let p = self.current_project()?;
                 Some(self.render_members_panel(p, cx).into_any_element())
             }
+            Panel::Goals => {
+                let p = self.current_project()?;
+                Some(self.list_panel("Goals", p.goals.len(), self.render_goal_list(p, cx), cx))
+            }
+            Panel::Artifacts => {
+                let p = self.current_project()?;
+                let body = self.render_artifact_list(p, cx);
+                Some(self.list_panel("Artifacts", p.artifacts.len(), body, cx))
+            }
+            Panel::Automations => {
+                let p = self.current_project()?;
+                let count = self.current_instance().automation_count(p.id);
+                let body = self.render_project_automations(p, cx);
+                Some(self.list_panel("自動化", count, body, cx))
+            }
+            Panel::Memory => {
+                let p = self.current_project()?;
+                let body = self.render_memory_tab(p, cx);
+                Some(self.list_panel("記憶", p.memory.observations.len(), body, cx))
+            }
         }
+    }
+
+    /// 列表類面板的標題列：名稱、數量與關閉。成員、Goals、Artifacts、自動化、記憶共用。
+    pub(super) fn list_panel_header(
+        &self,
+        title: &'static str,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(20.))
+            .py(px(14.))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(div().font_weight(FontWeight::BOLD).child(title))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(theme::text_muted())
+                    .child(count.to_string()),
+            )
+            .child(self.close_button(cx))
+    }
+
+    /// 列表類面板：標題列加上自己捲動的內容。
+    fn list_panel(
+        &self,
+        title: &'static str,
+        count: usize,
+        body: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        panel_frame()
+            .child(self.list_panel_header(title, count, cx))
+            .child(body)
+            .into_any_element()
     }
 
     /// Goal 上指定種類的 artifact（Brief、Ledger）。
@@ -301,11 +360,26 @@ impl PotsApp {
             }))
     }
 
+    /// 右欄標題列右側：從列表點進來的細節多一個「返回列表」，再來是關閉。
     pub(super) fn close_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        icon_button("panel-close", IconName::X)
+        div()
             .ml_auto()
-            .tip("關閉面板")
-            .on_click(cx.listener(|this, _, _, cx| this.open_panel(None, cx)))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .when_some(self.panel_back_target(), |d, list| {
+                d.child(
+                    icon_button("panel-back", IconName::ArrowLeft)
+                        .tip(format!("返回{}", list.list_label()))
+                        .on_click(cx.listener(|this, _, _, cx| this.panel_go_back(cx))),
+                )
+            })
+            .child(
+                icon_button("panel-close", IconName::X)
+                    .tip("關閉面板")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_panel(None, cx))),
+            )
     }
 
     fn render_goal_panel(

@@ -540,7 +540,7 @@ impl PotsApp {
             listeners_before: 0,
             error: None,
         });
-        self.panel = Some(Panel::NewListener);
+        self.set_panel(Some(Panel::NewListener));
         cx.notify();
     }
 
@@ -888,7 +888,7 @@ impl PotsApp {
             saving: false,
             error: None,
         });
-        self.panel = Some(Panel::NewSource);
+        self.set_panel(Some(Panel::NewSource));
         cx.notify();
     }
 
@@ -1468,6 +1468,7 @@ impl PotsApp {
                         .when(p.repos.is_empty(), |d| {
                             d.child(
                                 div()
+                                    .w_full()
                                     .text_size(px(13.))
                                     .text_color(theme::text_muted())
                                     .child("還沒有。加上 repo 後，agent 可以等它的 CI 與 PR，listener 也收得到它的事件。"),

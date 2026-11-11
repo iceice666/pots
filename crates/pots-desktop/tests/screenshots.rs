@@ -24,7 +24,7 @@ mod shots {
         WindowOptions, px, size,
     };
     use markdown_editor::{EditorCommand, MarkKind};
-    use pots_desktop::app::{AutomationSection, ChannelTab, GoalTab, Panel, PotsApp, SettingsTab};
+    use pots_desktop::app::{AutomationSection, GoalTab, Panel, PotsApp, SettingsTab};
     use pots_desktop::members::MemberTarget;
     use pots_desktop::mock;
     use pots_desktop::model::{
@@ -516,8 +516,7 @@ mod shots {
             }) && app.current_instance().schedules.len() == 1
         });
         s.update(|app, _, cx| {
-            app.channel_tab = pots_desktop::app::ChannelTab::Automations;
-            cx.notify();
+            app.open_panel(Some(Panel::Automations), cx);
         });
         s.shot("19-live-project-automations");
 
@@ -571,7 +570,7 @@ mod shots {
             let instance = app.instance;
             let project = app.current_instance().projects[0].id;
             app.open_project(instance, project, window, cx);
-            app.channel_tab = pots_desktop::app::ChannelTab::Chat;
+            app.open_panel(None, cx);
         });
         s.wait_until("回覆完成", |app| {
             app.current_project()
@@ -699,7 +698,7 @@ mod shots {
 
         // 成員列表：和 Goal 面板、任務 thread 共用右欄。點 Planner 或 worker 換成那個內容。
         s.update(|app, _, cx| {
-            app.toggle_members(cx);
+            app.toggle_panel(Panel::Members, cx);
             assert_eq!(app.panel, Some(Panel::Members));
         });
         s.shot("02a-members");
@@ -708,13 +707,13 @@ mod shots {
             app.open_member(MemberTarget::Goal(goal), cx);
             assert_eq!(app.panel, Some(Panel::Goal(goal, GoalTab::Tasks)));
             let task = app.current_project().unwrap().goals[0].tasks[0].id;
-            app.toggle_members(cx);
+            app.toggle_panel(Panel::Members, cx);
             app.open_member(MemberTarget::Task(task), cx);
             assert_eq!(app.panel, Some(Panel::Task(task)));
-            app.toggle_members(cx);
-            app.toggle_members(cx);
+            app.toggle_panel(Panel::Members, cx);
+            app.toggle_panel(Panel::Members, cx);
             assert_eq!(app.panel, None, "再按一次關掉");
-            app.toggle_members(cx);
+            app.toggle_panel(Panel::Members, cx);
         });
         // 筆電的 dotfiles：agent 等你核准、worker 等待中，快速修改沒有 Planner。
         // 成員列表開著換 project 時留著。
@@ -777,7 +776,25 @@ mod shots {
         });
         s.shot("07-queued-message");
 
-        // 對話裡的 Spec 卡片→右欄編輯器；切到 Artifacts 分頁看列表。
+        // 標題列的 Goals、Artifacts 按鈕：列表在右欄，點了右欄換成那個內容。
+        s.update(|app, _, cx| app.toggle_panel(Panel::Goals, cx));
+        s.shot("08-goal-list");
+        // 從列表點進 Goal：右欄有「返回」，Goal 分頁之間切換仍可返回，按了回到列表。
+        s.update(|app, _, cx| {
+            let goal = app.current_project().unwrap().goals[0].id;
+            app.open_panel(Some(Panel::Goal(goal, GoalTab::Tasks)), cx);
+            assert_eq!(app.panel_back_target(), Some(Panel::Goals));
+            app.open_panel(Some(Panel::Goal(goal, GoalTab::Team)), cx);
+            assert_eq!(app.panel_back_target(), Some(Panel::Goals));
+        });
+        s.shot("08-goal-from-list");
+        s.update(|app, _, cx| {
+            app.panel_go_back(cx);
+            assert_eq!(app.panel, Some(Panel::Goals));
+            assert_eq!(app.panel_back_target(), None, "列表本身沒有返回");
+        });
+        s.update(|app, _, cx| app.toggle_panel(Panel::Artifacts, cx));
+        s.shot("08-artifact-list");
         s.update(|app, window, cx| {
             let spec = app
                 .current_project()
@@ -785,7 +802,6 @@ mod shots {
                 .map(|a| a.id)
                 .expect("auth-service 有 Spec");
             app.open_artifact(spec, window, cx);
-            app.channel_tab = ChannelTab::Artifacts;
         });
         s.shot("08-artifact-editor");
 
@@ -848,7 +864,11 @@ mod shots {
             let home = app.store.instances[1].id;
             let auth = app.store.instances[1].projects[0].id;
             app.open_project(home, auth, window, cx);
-            app.channel_tab = ChannelTab::Automations;
+            app.toggle_panel(Panel::Automations, cx);
+        });
+        s.shot("10-channel-automations");
+        s.update(|app, _, cx| {
+            let auth = app.current_project().unwrap().id;
             let schedule = app
                 .current_instance()
                 .schedules_for(Some(auth))
@@ -857,12 +877,12 @@ mod shots {
                 .expect("auth-service 有排程");
             app.open_panel(Some(Panel::Schedule(schedule)), cx);
         });
-        s.shot("10-channel-automations");
+        s.update(|app, _, _| assert_eq!(app.panel_back_target(), Some(Panel::Automations)));
+        s.shot("10-channel-schedule");
 
         // 「記憶」分頁：觀察紀錄，修正其中一條。
         s.update(|app, window, cx| {
-            app.channel_tab = ChannelTab::Memory;
-            app.open_panel(None, cx);
+            app.toggle_panel(Panel::Memory, cx);
             let second = app
                 .current_project()
                 .and_then(|p| p.memory.observations.get(1))

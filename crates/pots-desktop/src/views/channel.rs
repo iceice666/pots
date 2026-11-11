@@ -5,12 +5,13 @@ use gpui_kit::component::input::Textarea;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px, relative,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    relative,
 };
 
 use super::stream::Density;
 use super::widgets::*;
-use crate::app::{ChannelTab, Panel, PotsApp};
+use crate::app::{Panel, PotsApp};
 use crate::model::*;
 use crate::theme;
 
@@ -40,6 +41,39 @@ pub fn empty_state(title: impl Into<SharedString>, body: impl Into<SharedString>
         )
 }
 
+/// 標題列右側的圖示按鈕（分頁切換與「成員」）：選取時是淡色底與強調色圖示，文字放在 tooltip。
+fn header_icon_button(
+    id: &'static str,
+    icon_name: IconName,
+    selected: bool,
+    tip: impl Into<SharedString>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(32.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .when_else(
+            selected,
+            |d| d.bg(theme::accent_soft()),
+            |d| d.hover(|s| s.bg(theme::track())),
+        )
+        .child(icon(
+            icon_name,
+            18.,
+            if selected {
+                theme::accent()
+            } else {
+                theme::text_muted()
+            },
+        ))
+        .tip(tip)
+}
+
 impl PotsApp {
     pub fn render_channel(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(p) = self.current_project() else {
@@ -47,22 +81,58 @@ impl PotsApp {
         };
         let busy = p.agent_state.is_busy();
 
-        let tab_item =
-            |id: &'static str, label: String, tab: ChannelTab, cx: &mut Context<Self>| {
-                super::widgets::tab(id, label, self.channel_tab == tab).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.channel_tab = tab;
-                        cx.notify();
-                    },
-                ))
-            };
+        let counted = |label: &str, n: usize| {
+            if n == 0 {
+                label.to_string()
+            } else {
+                format!("{label} {n}")
+            }
+        };
+        let inst = self.current_instance();
+        // 右欄切換：成員、Goals、Artifacts、自動化、記憶都在右欄開，和「成員」同樣的圖示按鈕。
+        let panel_buttons = div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .child(self.panel_button(
+                "toggle-goals",
+                IconName::Flag,
+                counted("Goals", p.goals.len()),
+                Panel::Goals,
+                cx,
+            ))
+            .child(self.panel_button(
+                "toggle-artifacts",
+                IconName::FileText,
+                counted("Artifacts", p.artifacts.len()),
+                Panel::Artifacts,
+                cx,
+            ))
+            .child(self.panel_button(
+                "toggle-automations",
+                IconName::CalendarClock,
+                counted("自動化", inst.automation_count(p.id)),
+                Panel::Automations,
+                cx,
+            ))
+            .child(self.panel_button(
+                "toggle-memory",
+                IconName::Brain,
+                counted("記憶", p.memory.observations.len()),
+                Panel::Memory,
+                cx,
+            ))
+            .child(self.panel_button(
+                "toggle-members",
+                IconName::Users,
+                "成員列表".to_string(),
+                Panel::Members,
+                cx,
+            ));
 
         let header = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
             .px(px(24.))
-            .pt(px(12.))
+            .py(px(12.))
             .border_b_1()
             .border_color(theme::border())
             .child(
@@ -105,45 +175,10 @@ impl PotsApp {
                                 .on_click(cx.listener(|this, _, _, cx| this.stop_agent(cx))),
                         )
                     })
-                    .child(self.members_button(cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(20.))
-                    .child(tab_item("tab-chat", "對話".into(), ChannelTab::Chat, cx))
-                    .child(tab_item(
-                        "tab-goals",
-                        format!("Goals {}", p.goals.len()),
-                        ChannelTab::Goals,
-                        cx,
-                    ))
-                    .child(tab_item(
-                        "tab-artifacts",
-                        format!("Artifacts {}", p.artifacts.len()),
-                        ChannelTab::Artifacts,
-                        cx,
-                    ))
-                    .child(tab_item(
-                        "tab-automations",
-                        format!("自動化 {}", self.current_instance().automation_count(p.id)),
-                        ChannelTab::Automations,
-                        cx,
-                    ))
-                    .child(tab_item(
-                        "tab-memory",
-                        if p.memory.observations.is_empty() {
-                            "記憶".to_string()
-                        } else {
-                            format!("記憶 {}", p.memory.observations.len())
-                        },
-                        ChannelTab::Memory,
-                        cx,
-                    )),
+                    .child(panel_buttons),
             );
 
-        let body: AnyElement = match self.channel_tab {
-            ChannelTab::Chat => div()
+        let body = div()
                 .flex_1()
                 .min_h_0()
                 .flex()
@@ -184,13 +219,7 @@ impl PotsApp {
                     )
                 })
                 .child(self.render_project_stream(p, cx))
-                .child(self.render_composer(p, window, cx))
-                .into_any_element(),
-            ChannelTab::Goals => self.render_goal_list(p, cx).into_any_element(),
-            ChannelTab::Artifacts => self.render_artifact_list(p, cx),
-            ChannelTab::Automations => self.render_project_automations(p, cx),
-            ChannelTab::Memory => self.render_memory_tab(p, cx),
-        };
+                .child(self.render_composer(p, window, cx));
 
         div()
             .flex_1()
@@ -204,38 +233,18 @@ impl PotsApp {
             .into_any_element()
     }
 
-    /// 標題列的「成員」切換按鈕：成員列表開著時是選取狀態。
-    fn members_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let open = self.panel == Some(Panel::Members);
-        div()
-            .id("toggle-members")
-            .flex_none()
-            .size(px(32.))
-            .rounded(px(6.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .when_else(
-                open,
-                |d| d.bg(theme::accent_soft()),
-                |d| d.hover(|s| s.bg(theme::track())),
-            )
-            .child(icon(
-                IconName::Users,
-                18.,
-                if open {
-                    theme::accent()
-                } else {
-                    theme::text_muted()
-                },
-            ))
-            .tip(if open {
-                "隱藏成員列表"
-            } else {
-                "顯示成員列表"
-            })
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_members(cx)))
+    /// 標題列的右欄切換按鈕：那個列表開著時是選取狀態，再按一次關掉。
+    fn panel_button(
+        &self,
+        id: &'static str,
+        icon_name: IconName,
+        label: String,
+        panel: Panel,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.panel == Some(panel);
+        header_icon_button(id, icon_name, open, label)
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_panel(panel, cx)))
     }
 
     fn render_project_stream(&self, p: &ProjectView, cx: &mut Context<Self>) -> impl IntoElement {
@@ -337,7 +346,8 @@ impl PotsApp {
             )
     }
 
-    fn render_goal_list(&self, p: &ProjectView, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 右欄「Goals」：這個 project 的 Goal 卡片，點了右欄換成那個 Goal。
+    pub(super) fn render_goal_list(&self, p: &ProjectView, cx: &mut Context<Self>) -> AnyElement {
         if p.goals.is_empty() {
             return empty_state(
                 "沒有進行中的 Goal",
@@ -350,14 +360,14 @@ impl PotsApp {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p(px(24.))
+            .p(px(16.))
             .flex()
             .flex_col()
             .gap(px(12.))
             .children(
                 p.goals
                     .iter()
-                    .map(|g| self.render_goal_card(g, cx).into_any_element()),
+                    .map(|g| self.goal_card(g, false, cx).into_any_element()),
             )
             .into_any_element()
     }

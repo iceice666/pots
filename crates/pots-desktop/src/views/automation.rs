@@ -261,7 +261,7 @@ impl PotsApp {
             .child(body)
     }
 
-    /// 頻道的「自動化」分頁。
+    /// 右欄「自動化」：這個 project 的監看設定、排程與 listener。
     pub fn render_project_automations(
         &self,
         p: &ProjectView,
@@ -284,7 +284,7 @@ impl PotsApp {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(24.))
+            .px(px(16.))
             .py(px(16.))
             .flex()
             .flex_col()
@@ -307,6 +307,8 @@ impl PotsApp {
                 div()
                     .flex()
                     .items_center()
+                    // 右欄很窄：說明換到下一行。
+                    .flex_wrap()
                     .gap(px(10.))
                     .px(px(18.))
                     .py(px(12.))
@@ -324,7 +326,7 @@ impl PotsApp {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(200.))
                             .child(format!("{}，錯過的觸發不會補跑。", pause.by)),
                     )
                     .child(
@@ -430,10 +432,13 @@ impl PotsApp {
 
         let head = table_head()
             .child(div().flex_1().min_w_0().child("要做什麼"))
-            .when(show_project, |d| d.child(cell(COL_PROJECT).child("專案")))
-            .child(cell(COL_CREATOR).child("建立者"))
-            .child(cell(COL_CADENCE).child("頻率"))
-            .child(cell(COL_NEXT).child("下一次"))
+            // 右欄（project 的自動化）太窄放不下欄位，頻率與下一次併到第一欄的第二行。
+            .when(show_project, |d| {
+                d.child(cell(COL_PROJECT).child("專案"))
+                    .child(cell(COL_CREATOR).child("建立者"))
+                    .child(cell(COL_CADENCE).child("頻率"))
+                    .child(cell(COL_NEXT).child("下一次"))
+            })
             .child(div().flex_none().w(px(COL_SWITCH)).child("啟用"));
 
         let rows = schedules.iter().map(|s| {
@@ -480,25 +485,43 @@ impl PotsApp {
                                 .text_size(px(12.))
                                 .text_color(theme::text_muted())
                                 .child(s.note.clone()),
-                        ),
+                        )
+                        .when(!show_project, |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme::text_muted())
+                                    .child(format!("{} · {} · ", s.creator.label(), s.cadence))
+                                    .child(
+                                        div()
+                                            .text_color(next_color)
+                                            .when(next_color == theme::warn(), |d| {
+                                                d.font_weight(FontWeight::SEMIBOLD)
+                                            })
+                                            .child(next.clone()),
+                                    )
+                                    .flex()
+                                    .flex_wrap(),
+                            )
+                        }),
                 )
                 .when(show_project, |d| {
                     d.child(cell(COL_PROJECT).child(self.project_label(s.project, "總管")))
+                        .child(
+                            cell(COL_CREATOR)
+                                .text_color(theme::text_muted())
+                                .child(s.creator.label()),
+                        )
+                        .child(cell(COL_CADENCE).child(s.cadence.clone()))
+                        .child(
+                            cell(COL_NEXT)
+                                .text_color(next_color)
+                                .when(next_color == theme::warn(), |d| {
+                                    d.font_weight(FontWeight::SEMIBOLD)
+                                })
+                                .child(next),
+                        )
                 })
-                .child(
-                    cell(COL_CREATOR)
-                        .text_color(theme::text_muted())
-                        .child(s.creator.label()),
-                )
-                .child(cell(COL_CADENCE).child(s.cadence.clone()))
-                .child(
-                    cell(COL_NEXT)
-                        .text_color(next_color)
-                        .when(next_color == theme::warn(), |d| {
-                            d.font_weight(FontWeight::SEMIBOLD)
-                        })
-                        .child(next),
-                )
                 .child(
                     // 開關自己處理點擊，不要連帶選取整列。
                     div()
@@ -594,75 +617,98 @@ impl PotsApp {
 
         let head = table_head()
             .child(div().flex_1().min_w_0().child("條件 → 動作"))
-            .when(show_project, |d| d.child(cell(COL_PROJECT).child("專案")))
-            .child(cell(COL_SOURCE).child("來源 · 信任"))
-            .child(cell(COL_COUNT).child("本週觸發"))
-            .child(cell(COL_COUNT).child("每次上限"))
+            // 右欄太窄：來源、觸發次數與上限併到第一欄的第二行。
+            .when(show_project, |d| {
+                d.child(cell(COL_PROJECT).child("專案"))
+                    .child(cell(COL_SOURCE).child("來源 · 信任"))
+                    .child(cell(COL_COUNT).child("本週觸發"))
+                    .child(cell(COL_COUNT).child("每次上限"))
+            })
             .child(div().flex_none().w(px(COL_STATE)).child("狀態"));
 
-        let rows =
-            listeners.iter().map(|l| {
-                let id = l.id;
-                let selected = self.panel == Some(Panel::Listener(id));
-                div()
-                    .id(SharedString::from(format!("listener-{}", id.0)))
-                    .flex()
-                    .items_center()
-                    .px(px(16.))
-                    .py(px(12.))
-                    .border_t_1()
-                    .border_color(theme::border())
-                    .text_size(px(14.))
-                    .cursor_pointer()
-                    .when_else(
-                        selected,
-                        |d| d.bg(theme::accent_soft()),
-                        |d| d.hover(|s| s.bg(theme::subtle_bg())),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .pr(px(12.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(l.title()))
-                            // 頻道分頁沒有專案欄，套用到所有專案的另外標示。
-                            .when(!show_project && l.project.is_none(), |d| {
-                                d.child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .text_color(theme::text_muted())
-                                        .child("套用到所有專案"),
-                                )
-                            }),
-                    )
-                    .when(show_project, |d| {
-                        d.child(cell(COL_PROJECT).child(self.project_label(l.project, "所有專案")))
-                    })
-                    .child(cell(COL_SOURCE).child(format!("{} · {}", l.source, l.trust.label())))
-                    .child(cell(COL_COUNT).child(if l.triggers_this_week == 0 {
-                        "—".to_string()
-                    } else {
-                        format!("{} 次", l.triggers_this_week)
-                    }))
-                    .child(
-                        cell(COL_COUNT).child(
-                            l.budget_per_trigger_cents
-                                .map_or("—".to_string(), format_dollars),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(COL_STATE))
-                            .child(self.listener_state(l)),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
+        let rows = listeners.iter().map(|l| {
+            let id = l.id;
+            let selected = self.panel == Some(Panel::Listener(id));
+            div()
+                .id(SharedString::from(format!("listener-{}", id.0)))
+                .flex()
+                .items_center()
+                .px(px(16.))
+                .py(px(12.))
+                .border_t_1()
+                .border_color(theme::border())
+                .text_size(px(14.))
+                .cursor_pointer()
+                .when_else(
+                    selected,
+                    |d| d.bg(theme::accent_soft()),
+                    |d| d.hover(|s| s.bg(theme::subtle_bg())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .pr(px(12.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(l.title()))
+                        // 頻道分頁沒有專案欄，套用到所有專案的另外標示。
+                        .when(!show_project && l.project.is_none(), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme::text_muted())
+                                    .child("套用到所有專案"),
+                            )
+                        })
+                        .when(!show_project, |d| {
+                            let mut meta = format!("{} · {}", l.source, l.trust.label());
+                            if l.triggers_this_week > 0 {
+                                meta.push_str(&format!(" · 本週 {} 次", l.triggers_this_week));
+                            }
+                            if let Some(cents) = l.budget_per_trigger_cents {
+                                meta.push_str(&format!(" · 每次上限 {}", format_dollars(cents)));
+                            }
+                            d.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme::text_muted())
+                                    .child(meta),
+                            )
+                        }),
+                )
+                .when(show_project, |d| {
+                    d.child(cell(COL_PROJECT).child(self.project_label(l.project, "所有專案")))
+                        .child(cell(COL_SOURCE).child(format!(
+                            "{} · {}",
+                            l.source,
+                            l.trust.label()
+                        )))
+                        .child(cell(COL_COUNT).child(if l.triggers_this_week == 0 {
+                            "—".to_string()
+                        } else {
+                            format!("{} 次", l.triggers_this_week)
+                        }))
+                        .child(
+                            cell(COL_COUNT).child(
+                                l.budget_per_trigger_cents
+                                    .map_or("—".to_string(), format_dollars),
+                            ),
+                        )
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(COL_STATE))
+                        .child(self.listener_state(l)),
+                )
+                .on_click(
+                    cx.listener(move |this, _, _, cx| {
                         this.open_panel(Some(Panel::Listener(id)), cx)
-                    }))
-            });
+                    }),
+                )
+        });
 
         div()
             .flex()

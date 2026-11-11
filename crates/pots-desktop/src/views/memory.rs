@@ -1,4 +1,4 @@
-//! project 頻道的「記憶」分頁：對話 agent 記得什麼（Observational Memory 的觀察紀錄）。
+//! project 的右欄「記憶」：對話 agent 記得什麼（Observational Memory 的觀察紀錄）。
 //! 可以釘選、修正或刪除觀察；修正與刪除在下一次回覆生效，原本的內容服務會保留作稽核。
 
 use gpui_kit::assets::IconName;
@@ -68,7 +68,7 @@ impl PotsApp {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .child(div().px(px(24.)).pt(px(20.)).child(body))
+                .child(div().px(px(16.)).pt(px(16.)).child(body))
                 .child(empty_state(
                     "還沒有觀察",
                     "對話累積到一定長度後（預設約 3 萬 token），Observer 會在背景整理出第一批觀察；\
@@ -133,8 +133,8 @@ impl PotsApp {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(24.))
-            .py(px(20.))
+            .px(px(16.))
+            .py(px(16.))
             .child(body)
             .into_any_element()
     }
@@ -197,59 +197,59 @@ impl PotsApp {
                     }),
             };
 
-        let actions = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .when(editing.is_none(), |d| {
-                d.child(
-                    link_button(key("pin"), if pinned { "取消釘選" } else { "釘選" }).on_click(
-                        cx.listener(move |this, _, _, cx| this.pin_observation(id, !pinned, cx)),
-                    ),
-                )
-                .child(link_button(key("edit"), "修正").on_click(
-                    cx.listener(move |this, _, window, cx| this.edit_observation(id, window, cx)),
-                ))
-                .child(
-                    link_button(key("delete"), "刪除")
-                        .text_color(theme::danger())
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.delete_observation(id, cx)),
+        let actions =
+            div()
+                .ml_auto()
+                .flex_none()
+                .flex()
+                .items_center()
+                .when(editing.is_none(), |d| {
+                    d.child(
+                        link_button(key("pin"), if pinned { "取消釘選" } else { "釘選" }).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.pin_observation(id, !pinned, cx)
+                            }),
                         ),
-                )
-            });
+                    )
+                    .child(link_button(key("edit"), "修正").on_click(cx.listener(
+                        move |this, _, window, cx| this.edit_observation(id, window, cx),
+                    )))
+                    .child(
+                        link_button(key("delete"), "刪除")
+                            .text_color(theme::danger())
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.delete_observation(id, cx)),
+                            ),
+                    )
+                });
 
+        // 右欄很窄：日期、優先度與操作一行，內容在下面佔滿寬度。
         div()
             .flex()
-            .items_start()
-            .gap(px(12.))
-            .px(px(16.))
+            .flex_col()
+            .gap(px(4.))
+            .px(px(14.))
             .py(px(10.))
             .when(divider, |d| d.border_t_1().border_color(theme::border()))
             .when(pinned, |d| d.bg(theme::accent_soft()))
             .child(
                 div()
-                    .flex_none()
-                    .w(px(84.))
-                    .pt(px(2.))
-                    .text_size(px(12.))
-                    .text_color(theme::text_muted())
-                    .child(o.date.clone()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(44.))
                     .flex()
                     .items_center()
-                    .gap(px(4.))
-                    .pt(px(2.))
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.))
+                            .text_color(theme::text_muted())
+                            .child(o.date.clone()),
+                    )
                     .child(priority_tag(o.priority))
                     .when(pinned, |d| {
                         d.child(icon(IconName::Pin, 13., theme::accent()))
-                    }),
+                    })
+                    .child(actions),
             )
             .child(content)
-            .child(actions)
     }
 }

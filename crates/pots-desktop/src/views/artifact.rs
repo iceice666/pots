@@ -62,7 +62,7 @@ fn notice(fg: Hsla, bg: Hsla) -> Div {
 }
 
 impl PotsApp {
-    /// 頻道的「Artifacts」分頁：這個 project 的所有 artifact。
+    /// 右欄「Artifacts」：這個 project 的所有 artifact，點了右欄換成編輯器。
     pub fn render_artifact_list(&self, p: &ProjectView, cx: &mut Context<Self>) -> AnyElement {
         if p.artifacts.is_empty() {
             return empty_state(
@@ -80,7 +80,7 @@ impl PotsApp {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(24.))
+            .px(px(16.))
             .py(px(16.))
             .flex()
             .flex_col()
