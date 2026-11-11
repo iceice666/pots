@@ -80,6 +80,8 @@ LLM 層要用 rig 這類 agent 框架，還是自己寫？rig-core 0.46 重寫�
 
 手機客戶端與推播。候選是 gpui-mobile 共用 GPUI 介面、輕量 Web 核准頁（PWA 加 Web Push），或原生 Android。→ 決定：原生 Android（Kotlin 加 Jetpack Compose，[`android/`](../android/)），推播用 UnifiedPush，以 ntfy 當 distributor，伺服器端用 VAPID 與 RFC 8291 加密送出，不依賴 FCM；iOS 不在 v1 範圍。見[手機推播](approvals-and-notifications.md#手機推播)。
 
+對話 agent 開 Goal 時要不要先讓你看過？原本 `create_goal` 寫完 Brief 就交給 Planner，你看到時它已經在拆任務，改 Brief 只能 steer（中斷那一輪、已花的 token 收不回）。→ 決定：不另外先寫 Spec 再開 Goal，而是 Goal 多一個草稿狀態：對話 agent 開的 Goal（含 `/goal`）先是草稿，你在卡片或面板看 Brief、直接改或在對話裡討論，按「開始」才交給 Planner；對話 agent 沒有開始的工具。`quick_fix`、listener 與總管開的 Goal 不經草稿，因為自動化不能等人；對話 agent 被自己的排程叫醒時開的 Goal 仍是草稿。開始只是狀態轉換，不走核准。見[工作分級](agent-collaboration.md#工作分級小修改怎麼分配)。
+
 工作資料夾與監看來源怎麼分？原本「監看的 repo」同時被當成 worker 的工作位置，但它的語意其實是外部事件來源，可以有多個，也可以沒有。→ 決定：每個 project 最多一個 `WorkDir`，和自動化分頁的監看 repo 分開。本機資料夾由平台維護鏡像，worker 在任務分支改平台副本；核准後才以 `git fetch` 加 `merge --ff-only` 套用，不讓 worker 直接改你的資料夾，也不自動解衝突。GitHub 專案維持 PR、CI 與 merge。既有 project 沒有 `WorkDir` 時不派工，要求使用者先設定。見[Onboarding 與工作資料夾](onboarding.md)。
 
 仍待確認：

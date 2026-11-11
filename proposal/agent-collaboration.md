@@ -104,7 +104,7 @@ worker 讀自己的 worktree；其他 profile 讀的是每個 repo 預設分支�
 | --- | --- | --- | --- |
 | 回答 | 「這個函式在哪裡用到？」「CI 為什麼掛？」 | 對話 agent 用唯讀工具自己查，或開 explorer subagent | 只在對話中 |
 | 快速修改 | 改錯字、調設定、單一檔案的小 bug | `quick_fix` 直接派一個 worker，不經 Planner、不寫 Brief | 一個 Quick Goal 加一個任務 |
-| 功能 | 新功能、跨模組重構 | `create_goal` ，Planner 拆任務交給 team | 完整 Goal、 Brief、Ledger |
+| 功能 | 新功能、跨模組重構 | `create_goal` 先開草稿，你看過 Brief 按「開始」後 Planner 拆任務交給 team | 完整 Goal、 Brief、Ledger |
 
 1. `quick_fix` 只帶一段描述與目標 repo。平台建立 kind 為 Quick 的 Goal 與單一任務，對話裡出現一張精簡卡片。
 
@@ -115,6 +115,8 @@ worker 讀自己的 worktree；其他 profile 讀的是每個 repo 預設分支�
 4. 同一個 repo 同時有多個快速修改時各自開 PR，不合併，方便逐一核准與回退。
 
 5. 在輸入框用 `/fix` 或 `/goal` 開頭，可以直接指定快速修改或開 Goal，覆蓋對話 agent 的判斷。
+
+6. 對話 agent 用 `create_goal` 開的 Goal 先是草稿（`GoalState::Draft`，協定 v17）：Brief 已經寫好，但不排 Planner。你在 Goal 卡片或 Goal 面板看 Brief，可以直接在編輯器改（不會 steer），也可以在對話裡和 agent 再討論，它用 `steer_goal` 帶 `edits` 改草稿的 Brief（只給 `reason` 會被拒絕）。按「開始」（`StartGoal`）才改成進行中、以 `Started` 觸發 Planner，拿到的是當下的 Brief；「捨棄」（`DiscardGoal`）等於取消。對話 agent 不能替你開始。`/goal` 也走草稿，因為 Brief 還是 agent 寫的；`quick_fix`、listener 與總管開的 Goal 直接開始。草稿和進行中的 Goal 一起算進每個 project 的上限，也出現在對話 agent 每輪指示的「草稿 Goal」。以 `tests/tasks.rs` 的 `draft_goals_wait_for_start` 與截圖流程的 `15a-live-goal-draft` 驗證；Android 還沒做。
 
 ### 主 agent、subagent 與 team
 

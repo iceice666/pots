@@ -11,7 +11,7 @@
 | 種類 | 誰建立 | 用途 |
 | --- | --- | --- |
 | Spec | 對話 agent | 討論功能時的產出：需求、決定、未決問題 |
-| Brief | 對話 agent（`create_goal` 時） | Goal 交接給 Planner 的內容；取代 `goals` 表上的 brief 欄位 |
+| Brief | 對話 agent（`create_goal` 時） | Goal 交接給 Planner 的內容；取代 `goals` 表上的 brief 欄位。Goal 是草稿時你和 agent 先改好，按「開始」才交給 Planner |
 | Ledger | Planner | 任務帳本：拆了哪些子任務、各自結果、待辦 checklist |
 | Report | Worker 或 Planner | 調查結果、多個方案的比較與建議 |
 | Project Notes | 你（agent 只能提案） | 跨 Goal 的專案知識，放進所有 profile 的 preamble |
@@ -54,7 +54,7 @@ pub fn write(a: &Artifact, base_rev: u32, edits: Vec<Edit>) -> WriteResult {
 - 你的編輯先是桌面版的草稿，按「儲存」才帶著開始編輯時的版本送出（`SaveArtifact`）。期間 agent 改過時以 `##` 區段做三方合併：你改的區段套到目前版本上，同一段兩邊改得不一樣時拒絕，草稿留在客戶端。內容有變的區段記進 `human_edits`（「你在 HH:MM 改過」）。
 - 寫入都是單一 transaction，沒有「寫到一半」的狀態，所以 `agent_writing` 目前一律是空的；區段鎖定留給之後串流寫入時用。
 - 版本紀錄是 `ArtifactHistory`（只回給問的連線，每一版附和前一版的 unified diff）；`RestoreArtifact` 新增一個內容等於舊版的版本。
-- 你儲存或還原進行中 Goal 的 Brief 時，Planner 被 steer（正在跑的那輪中斷、重新排一個）。Project Notes 的提案流程還沒做。
+- 你儲存或還原進行中 Goal 的 Brief 時，Planner 被 steer（正在跑的那輪中斷、重新排一個）；草稿 Goal 的 Brief 只存檔，不叫醒任何人（見[工作分級](agent-collaboration.md#工作分級小修改怎麼分配)）。Project Notes 的提案流程還沒做。
 
 ### 和對話、記憶的關係
 
