@@ -25,8 +25,12 @@ mod shots {
     };
     use markdown_editor::{EditorCommand, MarkKind};
     use pots_desktop::app::{AutomationSection, ChannelTab, GoalTab, Panel, PotsApp, SettingsTab};
+    use pots_desktop::members::MemberTarget;
     use pots_desktop::mock;
-    use pots_desktop::model::{ArtifactKind, ExecKind, InboxAction, TaskId, WorkerBackendKind};
+    use pots_desktop::model::{
+        ArtifactKind, ClientCommand, ExecKind, InboxAction, ModelRole, ProviderId, TaskId,
+        ThinkingLevel, WorkerBackendKind,
+    };
 
     struct Shooter {
         cx: HeadlessAppContext,
@@ -693,6 +697,44 @@ mod shots {
         });
         s.shot("02-task-thread");
 
+        // 成員列表：和 Goal 面板、任務 thread 共用右欄。點 Planner 或 worker 換成那個內容。
+        s.update(|app, _, cx| {
+            app.toggle_members(cx);
+            assert_eq!(app.panel, Some(Panel::Members));
+        });
+        s.shot("02a-members");
+        s.update(|app, _, cx| {
+            let goal = app.current_project().unwrap().goals[0].id;
+            app.open_member(MemberTarget::Goal(goal), cx);
+            assert_eq!(app.panel, Some(Panel::Goal(goal, GoalTab::Tasks)));
+            let task = app.current_project().unwrap().goals[0].tasks[0].id;
+            app.toggle_members(cx);
+            app.open_member(MemberTarget::Task(task), cx);
+            assert_eq!(app.panel, Some(Panel::Task(task)));
+            app.toggle_members(cx);
+            app.toggle_members(cx);
+            assert_eq!(app.panel, None, "再按一次關掉");
+            app.toggle_members(cx);
+        });
+        // 筆電的 dotfiles：agent 等你核准、worker 等待中，快速修改沒有 Planner。
+        // 成員列表開著換 project 時留著。
+        s.update(|app, window, cx| {
+            let laptop = app.store.instances[0].id;
+            let dotfiles = app.store.instances[0].projects[0].id;
+            app.open_project(laptop, dotfiles, window, cx);
+            assert_eq!(app.panel, Some(Panel::Members));
+        });
+        s.shot("02b-members-dotfiles");
+        s.update(|app, window, cx| {
+            let home = app.store.instances[1].id;
+            let auth = app.store.instances[1].projects[0].id;
+            app.open_member(MemberTarget::Roles, cx);
+            assert_eq!(app.settings, Some(SettingsTab::Roles));
+            app.close_settings(cx);
+            app.open_panel(None, cx);
+            app.open_project(home, auth, window, cx);
+        });
+
         s.update(|app, _, cx| app.open_inbox(None, cx));
         s.shot("03-inbox-global");
 
@@ -842,6 +884,44 @@ mod shots {
             app.edit_memory_model(window, cx);
         });
         s.shot("10d-settings-memory");
+
+        // 「角色」：Planner 用 Anthropic、思考高；Explorer 用便宜的模型、不思考。
+        s.update(|app, _, cx| app.open_settings(SettingsTab::Roles, cx));
+        s.shot("10g-settings-roles");
+        s.update(|app, window, cx| {
+            app.edit_role_model(ModelRole::Explorer, window, cx);
+            app.set_role_thinking(ThinkingLevel::Low, cx);
+            // 表單在 Explorer 卡片裡展開，捲到下面才看得到 thinking 與儲存。
+            app.settings_scroll.scroll_to_bottom();
+        });
+        s.shot("10h-settings-role-edit");
+        s.update(|app, window, cx| {
+            let editor = app.role_model_editor.as_ref().expect("表單開著");
+            assert_eq!(editor.provider, Some(ProviderId::from_u64(2)));
+            assert_eq!(editor.model.read(cx).value(), "claude-haiku-4-5");
+            assert_eq!(editor.thinking, ThinkingLevel::Low);
+            // 換回「跟使用中的 provider 相同」時模型欄清空。
+            app.pick_role_provider(None, window, cx);
+            assert_eq!(
+                app.role_model_editor
+                    .as_ref()
+                    .unwrap()
+                    .model
+                    .read(cx)
+                    .value(),
+                ""
+            );
+            app.save_role_model(cx);
+            assert!(
+                app.store
+                    .outbox
+                    .iter()
+                    .all(|(_, c)| !matches!(c, ClientCommand::SetRoleModel { .. })),
+                "假資料模式不送出"
+            );
+            assert!(!app.role_model_editor.as_ref().unwrap().saving);
+            app.cancel_role_model_edit(cx);
+        });
 
         // 「Worker」：家用伺服器是內建 worker；改成 Claude Code、本機執行時出現登入指令與警告。
         s.update(|app, _, cx| app.open_settings(SettingsTab::Worker, cx));

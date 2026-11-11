@@ -62,6 +62,8 @@ pub enum Screen {
 pub enum SettingsTab {
     /// 模型 provider：ChatGPT 方案與 API provider。
     Providers,
+    /// 各角色（對話 agent、總管、Planner、worker、subagent）用的模型與 thinking。
+    Roles,
     /// Observational Memory：整理記憶用的模型。
     Memory,
     /// GitHub 連線：token、API base URL、webhook secret。
@@ -77,8 +79,9 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Providers,
+        Self::Roles,
         Self::Memory,
         Self::Github,
         Self::Worker,
@@ -90,6 +93,7 @@ impl SettingsTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Providers => "模型 Provider",
+            Self::Roles => "角色",
             Self::Memory => "記憶",
             Self::Github => "GitHub",
             Self::Worker => "Worker",
@@ -262,6 +266,24 @@ pub struct MemoryModelEditor {
     pub error: Option<String>,
 }
 
+/// 設定視窗「角色」類別正在改的一個角色。仿照 [`MemoryModelEditor`]，多了模型清單與 thinking。
+pub struct RoleModelEditor {
+    pub role: ModelRole,
+    /// `None`：跟使用中的 provider 相同。
+    pub provider: Option<ProviderId>,
+    /// 留空用該 provider 設定的模型。
+    pub model: Entity<InputState>,
+    /// 選了 provider 後列出的模型（內建目錄直接有，其他向服務問），用下拉選單挑。
+    pub model_picker: Entity<SelectState<SearchableVec<ModelChoice>>>,
+    pub models: ProviderTest,
+    pub thinking: ThinkingLevel,
+    /// 已送出 `SetRoleModel`、等服務回 `Providers`。
+    pub saving: bool,
+    pub error: Option<String>,
+    /// 模型欄與下拉選單互相對齊。
+    pub(crate) _subscriptions: Vec<Subscription>,
+}
+
 /// 「記憶」分頁正在修正的觀察。
 pub struct ObservationEditor {
     pub project: ProjectId,
@@ -411,6 +433,8 @@ pub enum Panel {
     NewListener,
     /// 新增或修改外部來源的表單（[`PotsApp::source_editor`]）。
     NewSource,
+    /// 目前 project 的成員列表（頻道標題列的「成員」按鈕切換）。
+    Members,
 }
 
 /// 右欄正在編輯的 artifact：每個 `##` 區段一個編輯器。
@@ -519,6 +543,7 @@ pub struct PotsApp {
     pub settings: Option<SettingsTab>,
     pub provider_editor: Option<ProviderEditor>,
     pub memory_model_editor: Option<MemoryModelEditor>,
+    pub role_model_editor: Option<RoleModelEditor>,
     pub observation_editor: Option<ObservationEditor>,
     pub github_editor: Option<GithubEditor>,
     pub worker_editor: Option<WorkerEditor>,
@@ -644,6 +669,7 @@ impl PotsApp {
             settings: None,
             provider_editor: None,
             memory_model_editor: None,
+            role_model_editor: None,
             observation_editor: None,
             github_editor: None,
             worker_editor: None,
@@ -758,6 +784,17 @@ impl PotsApp {
                     editor.saving = false;
                     editor.error = Some("連線中斷，請再儲存一次".into());
                 }
+                if state != ConnectionState::Connected
+                    && let Some(editor) = &mut self.role_model_editor
+                {
+                    if matches!(editor.models, ProviderTest::Running(_)) {
+                        editor.models = ProviderTest::Idle;
+                    }
+                    if editor.saving {
+                        editor.saving = false;
+                        editor.error = Some("連線中斷，請再儲存一次".into());
+                    }
+                }
                 if state != ConnectionState::Connected {
                     self.forms().on_disconnected();
                 }
@@ -816,21 +853,26 @@ impl PotsApp {
                     .route_error(t)
                 });
                 if let Some(toast) = toast {
-                    // 儲存 provider 或 artifact 被拒絕：原因顯示在表單或編輯器裡。
+                    // 儲存 provider、模型或 artifact 被拒絕：原因顯示在表單或編輯器裡。
                     match (
                         &mut self.provider_editor,
                         &mut self.memory_model_editor,
+                        &mut self.role_model_editor,
                         &mut self.artifact_editor,
                     ) {
-                        (Some(editor), _, _) if editor.saving => {
+                        (Some(editor), _, _, _) if editor.saving => {
                             editor.saving = false;
                             editor.error = Some(toast);
                         }
-                        (_, Some(editor), _) if editor.saving => {
+                        (_, Some(editor), _, _) if editor.saving => {
                             editor.saving = false;
                             editor.error = Some(toast);
                         }
-                        (_, _, Some(editor)) if editor.saving => {
+                        (_, _, Some(editor), _) if editor.saving => {
+                            editor.saving = false;
+                            editor.error = Some(toast);
+                        }
+                        (_, _, _, Some(editor)) if editor.saving => {
                             editor.saving = false;
                             editor.sent = None;
                             editor.error = Some(toast);
@@ -851,6 +893,21 @@ impl PotsApp {
                     && self.memory_model_editor.as_ref().is_some_and(|e| e.saving)
                 {
                     self.memory_model_editor = None;
+                }
+                if applied.providers_changed
+                    && let Some(editor) = &mut self.role_model_editor
+                {
+                    if editor.saving {
+                        self.role_model_editor = None;
+                    } else if editor.provider.is_some_and(|id| {
+                        self.store
+                            .instance(live.instance)
+                            .is_none_or(|i| i.providers.get(id).is_none())
+                    }) {
+                        // 選的 provider 被刪掉了：回到「跟使用中的 provider 相同」。
+                        editor.provider = None;
+                        editor.models = ProviderTest::Idle;
+                    }
                 }
                 // 修正到一半的觀察被整理掉了（例如反思成新的一代）：收起輸入框。
                 if let Some(project) = applied.memory_changed
@@ -875,28 +932,26 @@ impl PotsApp {
                         self.provider_editor = None;
                     }
                 }
-                if let Some((request, result)) = applied.provider_test
-                    && let Some(editor) = &mut self.provider_editor
-                    && editor.test == ProviderTest::Running(request)
-                {
-                    match result {
-                        Ok(models) => {
-                            let choices = models
-                                .iter()
-                                .map(|m| ModelChoice {
-                                    id: m.id.clone(),
-                                    name: m.display_name.clone(),
-                                })
-                                .collect::<Vec<_>>();
-                            let model = editor.model.read(cx).value().trim().to_string();
-                            let picker = editor.model_picker.clone();
-                            picker.update(cx, |select, cx| {
-                                select.set_items(SearchableVec::new(choices), window, cx);
-                                select.set_selected_value(&model, window, cx);
-                            });
-                            editor.test = ProviderTest::Ok(models);
+                if let Some((request, result)) = applied.provider_test {
+                    // 「測試連線」與角色表單的模型清單都用 `TestProvider`，依請求編號分。
+                    let target = match (&mut self.provider_editor, &mut self.role_model_editor) {
+                        (Some(e), _) if e.test == ProviderTest::Running(request) => {
+                            Some((&mut e.test, &e.model, &e.model_picker))
                         }
-                        Err(message) => editor.test = ProviderTest::Err(message),
+                        (_, Some(e)) if e.models == ProviderTest::Running(request) => {
+                            Some((&mut e.models, &e.model, &e.model_picker))
+                        }
+                        _ => None,
+                    };
+                    if let Some((state, input, picker)) = target {
+                        *state = match result {
+                            Ok(models) => {
+                                let model = input.read(cx).value().trim().to_string();
+                                fill_model_picker(picker, &models, &model, window, cx);
+                                ProviderTest::Ok(models)
+                            }
+                            Err(message) => ProviderTest::Err(message),
+                        };
                     }
                 }
                 // 建立／設定工作資料夾被拒絕：錯誤留在對話框裡（不要只彈一下就消失的 toast）。
@@ -1225,6 +1280,7 @@ impl PotsApp {
         self.settings = None;
         self.provider_editor = None;
         self.memory_model_editor = None;
+        self.role_model_editor = None;
         self.github_editor = None;
         self.worker_editor = None;
         self.notification_editor = None;
@@ -1669,6 +1725,7 @@ impl PotsApp {
         if id != self.instance {
             self.provider_editor = None;
             self.memory_model_editor = None;
+            self.role_model_editor = None;
             self.github_editor = None;
             self.worker_editor = None;
         }
@@ -1712,12 +1769,14 @@ impl PotsApp {
             .push((instance, ClientCommand::MarkRead { project }));
         self.channel_tab = ChannelTab::Chat;
         self.observation_editor = None;
-        // 有進行中的 Goal 時預設在右欄打開。
-        self.panel = self
-            .store
-            .project(instance, project)
-            .and_then(|p| p.goals.iter().find(|g| g.state.is_active()))
-            .map(|g| Panel::Goal(g.id, GoalTab::Tasks));
+        // 成員列表開著就留著（換成新 project 的成員）；否則有進行中的 Goal 時預設在右欄打開。
+        if self.panel != Some(Panel::Members) {
+            self.panel = self
+                .store
+                .project(instance, project)
+                .and_then(|p| p.goals.iter().find(|g| g.state.is_active()))
+                .map(|g| Panel::Goal(g.id, GoalTab::Tasks));
+        }
         if let Some(p) = self.store.project_mut(instance, project) {
             p.unread = 0;
         }
@@ -1763,6 +1822,17 @@ impl PotsApp {
             "artifact 面板要用 open_artifact 打開"
         );
         self.panel = panel;
+        cx.notify();
+    }
+
+    /// 頻道標題列的「成員」：右欄在成員列表與關閉之間切換。右欄一次只有一種內容，
+    /// 打開成員列表就換掉 Goal 面板（或任務 thread、artifact 編輯器，草稿留在編輯器裡）。
+    pub fn toggle_members(&mut self, cx: &mut Context<Self>) {
+        self.panel = if self.panel == Some(Panel::Members) {
+            None
+        } else {
+            Some(Panel::Members)
+        };
         cx.notify();
     }
 
@@ -2377,6 +2447,27 @@ impl PotsApp {
         self.worker_note.update(cx, |s, cx| s.clean(window, cx));
         cx.notify();
     }
+}
+
+/// 把列出的模型放進可以搜尋的下拉選單，選取對齊模型欄目前的值。
+pub(crate) fn fill_model_picker(
+    picker: &Entity<SelectState<SearchableVec<ModelChoice>>>,
+    models: &[ModelOption],
+    selected: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let choices = models
+        .iter()
+        .map(|m| ModelChoice {
+            id: m.id.clone(),
+            name: m.display_name.clone(),
+        })
+        .collect::<Vec<_>>();
+    picker.update(cx, |select, cx| {
+        select.set_items(SearchableVec::new(choices), window, cx);
+        select.set_selected_value(&selected.to_string(), window, cx);
+    });
 }
 
 /// 儲存期間鎖住編輯器，避免回覆到來時重建編輯器丟掉之後打的字。

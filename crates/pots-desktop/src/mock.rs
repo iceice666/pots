@@ -1258,15 +1258,39 @@ pub fn store() -> Store {
                 until_short: "週一".into(),
                 by: "由總管在 09:20 依你的要求暫停".into(),
             }),
-            providers: mock_providers(Some(ProviderView {
-                id: ProviderId::from_u64(2),
-                kind: ProviderKind::AnthropicCompatible,
-                name: "Anthropic".into(),
-                base_url: "https://api.anthropic.com".into(),
-                model: "claude-sonnet-4-5".into(),
-                key_hint: Some("…9f2c".into()),
-                headers: Vec::new(),
-            })),
+            // Planner 用 Anthropic 的大模型、思考高；Explorer 用便宜的模型、不思考；
+            // 對話 agent 跟使用中的 ChatGPT 相同，只把思考調成中。
+            providers: ProvidersView {
+                roles: vec![
+                    RoleModelView {
+                        role: ModelRole::Chat,
+                        provider: None,
+                        model: String::new(),
+                        thinking: ThinkingLevel::Medium,
+                    },
+                    RoleModelView {
+                        role: ModelRole::Planner,
+                        provider: Some(ProviderId::from_u64(2)),
+                        model: "claude-opus-4-1".into(),
+                        thinking: ThinkingLevel::High,
+                    },
+                    RoleModelView {
+                        role: ModelRole::Explorer,
+                        provider: Some(ProviderId::from_u64(2)),
+                        model: "claude-haiku-4-5".into(),
+                        thinking: ThinkingLevel::Off,
+                    },
+                ],
+                ..mock_providers(Some(ProviderView {
+                    id: ProviderId::from_u64(2),
+                    kind: ProviderKind::AnthropicCompatible,
+                    name: "Anthropic".into(),
+                    base_url: "https://api.anthropic.com".into(),
+                    model: "claude-sonnet-4-5".into(),
+                    key_hint: Some("…9f2c".into()),
+                    headers: Vec::new(),
+                }))
+            },
             model_auth: ModelAuthView::SignedIn {
                 account: Some("you@example.com".into()),
             },

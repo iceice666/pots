@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod connection;
+pub mod members;
 pub mod mock;
 pub mod model;
 pub mod notify;

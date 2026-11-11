@@ -46,6 +46,56 @@ pub fn tag(text: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> Div {
         .child(text.into())
 }
 
+/// 名稱旁的角色標籤（AGENT、PLANNER、WORKER）：線框、淡色字。對話與成員列表共用。
+pub fn role_chip(text: impl Into<SharedString>) -> Div {
+    div()
+        .flex_none()
+        .text_size(px(11.))
+        .line_height(px(16.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::text_muted())
+        .border_1()
+        .border_color(theme::border_strong())
+        .px(px(5.))
+        .rounded(px(4.))
+        .child(text.into())
+}
+
+/// 分段按鈕的外框；裡面放 [`segment`]。
+pub fn segment_group() -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme::border_strong())
+        .overflow_hidden()
+}
+
+/// 分段按鈕的一格；選取的是深底白字（和輸入框的「排隊／改方向」一樣）。
+pub fn segment(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .px(px(12.))
+        .py(px(5.))
+        .text_size(px(13.))
+        .cursor_pointer()
+        .when_else(
+            selected,
+            |d| d.bg(theme::text()).text_color(theme::white()),
+            |d| {
+                d.bg(theme::white())
+                    .text_color(theme::text())
+                    .hover(|s| s.bg(theme::subtle_bg()))
+            },
+        )
+        .child(label.into())
+}
+
 pub fn dot(color: Hsla, size: f32) -> Div {
     div().flex_none().size(px(size)).rounded_full().bg(color)
 }

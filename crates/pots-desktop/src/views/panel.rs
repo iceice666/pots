@@ -1,4 +1,5 @@
-//! 右欄狀態面板：Goal 任務樹與 Worker 任務 thread。
+//! 右欄狀態面板：Goal 任務樹與 Worker 任務 thread（成員列表在 `member_list.rs`）。右欄一次只顯示
+//! 一種內容，由 [`PotsApp::panel`] 決定。
 //!
 //! 任務列依狀態說明現在怎樣了（進行中是 worker 最後一句進度、需要你的原因、完成的結果、
 //! 失敗的錯誤），下面是執行者、分支與 PR（點了用系統瀏覽器開）。Team 分頁唯讀，新的在上面。
@@ -195,6 +196,10 @@ impl PotsApp {
             }
             Panel::NewListener => self.render_listener_form(cx),
             Panel::NewSource => self.render_source_form(cx),
+            Panel::Members => {
+                let p = self.current_project()?;
+                Some(self.render_members_panel(p, cx).into_any_element())
+            }
         }
     }
 

@@ -252,21 +252,7 @@ impl PotsApp {
                     .font_weight(FontWeight::BOLD)
                     .child(name),
             )
-            .when(is_project_agent, |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(11.))
-                        .line_height(px(16.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::text_muted())
-                        .border_1()
-                        .border_color(theme::border_strong())
-                        .px(px(5.))
-                        .rounded(px(4.))
-                        .child("AGENT"),
-                )
-            })
+            .when(is_project_agent, |d| d.child(role_chip("AGENT")))
             .child(muted(time).text_size(px(12.)).line_height(px(20.)))
             .when(msg.steer, |d| {
                 d.child(tag("改方向", theme::warn_text(), theme::warn_soft()))

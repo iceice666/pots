@@ -7,7 +7,7 @@
 //!
 //! 「記憶」類別：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。
 //!
-//! 「GitHub」在 `automation_forms.rs`，「Worker」在 `worker_settings.rs`，「通知」與「USER.md」在
+//! 「角色」在 `roles.rs`，「GitHub」在 `automation_forms.rs`，「Worker」在 `worker_settings.rs`，「通知」與「USER.md」在
 //! `preferences.rs`。
 
 use gpui_kit::assets::IconName;
@@ -127,6 +127,7 @@ impl PotsApp {
             let selected = t == tab;
             let glyph = match t {
                 SettingsTab::Providers => IconName::Sparkles,
+                SettingsTab::Roles => IconName::UserCog,
                 SettingsTab::Memory => IconName::Brain,
                 SettingsTab::Github => IconName::GitPullRequest,
                 SettingsTab::Worker => IconName::Bot,
@@ -169,6 +170,7 @@ impl PotsApp {
 
         let body = match tab {
             SettingsTab::Providers => self.render_providers_section(cx).into_any_element(),
+            SettingsTab::Roles => self.render_roles_section(cx).into_any_element(),
             SettingsTab::Memory => self.render_memory_section(cx).into_any_element(),
             SettingsTab::Github => self.render_github_section(cx).into_any_element(),
             SettingsTab::Worker => self.render_worker_section(cx).into_any_element(),

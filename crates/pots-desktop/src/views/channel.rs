@@ -10,7 +10,7 @@ use gpui_kit::{
 
 use super::stream::Density;
 use super::widgets::*;
-use crate::app::{ChannelTab, PotsApp};
+use crate::app::{ChannelTab, Panel, PotsApp};
 use crate::model::*;
 use crate::theme;
 
@@ -104,7 +104,8 @@ impl PotsApp {
                                 .child("停止")
                                 .on_click(cx.listener(|this, _, _, cx| this.stop_agent(cx))),
                         )
-                    }),
+                    })
+                    .child(self.members_button(cx)),
             )
             .child(
                 div()
@@ -203,6 +204,40 @@ impl PotsApp {
             .into_any_element()
     }
 
+    /// 標題列的「成員」切換按鈕：成員列表開著時是選取狀態。
+    fn members_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.panel == Some(Panel::Members);
+        div()
+            .id("toggle-members")
+            .flex_none()
+            .size(px(32.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when_else(
+                open,
+                |d| d.bg(theme::accent_soft()),
+                |d| d.hover(|s| s.bg(theme::track())),
+            )
+            .child(icon(
+                IconName::Users,
+                18.,
+                if open {
+                    theme::accent()
+                } else {
+                    theme::text_muted()
+                },
+            ))
+            .tip(if open {
+                "隱藏成員列表"
+            } else {
+                "顯示成員列表"
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_members(cx)))
+    }
+
     fn render_project_stream(&self, p: &ProjectView, cx: &mut Context<Self>) -> impl IntoElement {
         let items: Vec<AnyElement> = if p.items.is_empty() {
             vec![
@@ -244,27 +279,12 @@ impl PotsApp {
         let mode = self.send_mode;
         let segment =
             |id: &'static str, label: &'static str, value: SendMode, cx: &mut Context<Self>| {
-                let selected = mode == value;
-                div()
-                    .id(id)
-                    .px(px(12.))
-                    .py(px(5.))
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .when_else(
-                        selected,
-                        |d| d.bg(theme::text()).text_color(theme::white()),
-                        |d| {
-                            d.bg(theme::white())
-                                .text_color(theme::text())
-                                .hover(|s| s.bg(theme::subtle_bg()))
-                        },
-                    )
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                super::widgets::segment(id, label, mode == value).on_click(cx.listener(
+                    move |this, _, _, cx| {
                         this.send_mode = value;
                         cx.notify();
-                    }))
+                    },
+                ))
             };
         let hint = if p.agent_state.is_busy() {
             match mode {
@@ -298,13 +318,7 @@ impl PotsApp {
                     .px(px(10.))
                     .py(px(8.))
                     .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(theme::border_strong())
-                            .overflow_hidden()
+                        segment_group()
                             .child(segment("mode-queue", "排隊", SendMode::Queue, cx))
                             .child(segment("mode-steer", "改方向", SendMode::Steer, cx)),
                     )
