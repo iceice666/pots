@@ -80,7 +80,7 @@ Gate 實作 pots-llm 的 `Hook`（`before_turn`、`before_tool` 回 `ToolDecisio
 | explorer | 無狀態 | 無 | 不可 |
 | reviewer | 無狀態 | 無（只回傳審查意見） | 不可 |
 
-Profile 存成設定檔（`crates/pots-server/profiles/*.toml`，編進執行檔）：名稱、記憶模式、`max_turns`、唯讀基礎集之外的工具、`write_artifact` 可寫的種類與 role prompt。資料目錄的 `profiles/<name>.toml` 可以整份取代內建的；工具與種類依 agent 檢查（例如 chat 不能拿 `create_task`），不合法時服務不啟動。M2 的執行期只認得 chat 與 planner，新增一種 agent 仍要加它的觸發與 scope；之後的 profile 也照這個格式。
+Profile 存成設定檔（`crates/pots-server/profiles/*.toml`，編進執行檔）：名稱、記憶模式、`max_turns`、唯讀基礎集之外的工具、`write_artifact` 可寫的種類與 role prompt。模型不寫在 profile 裡：每個角色（chat、global、planner、worker、explorer、reviewer）用的 provider、模型與思考強度在設定視窗的「角色」類別調整，整個實例共用，沒設定時跟使用中的 provider 相同（見[模型 provider 設定](agent-runtime.md#模型-provider-設定)）。資料目錄的 `profiles/<name>.toml` 可以整份取代內建的；工具與種類依 agent 檢查（例如 chat 不能拿 `create_task`），不合法時服務不啟動。M2 的執行期只認得 chat 與 planner，新增一種 agent 仍要加它的觸發與 scope；之後的 profile 也照這個格式。
 
 ### 唯讀基礎工具
 

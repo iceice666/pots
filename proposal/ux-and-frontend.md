@@ -52,13 +52,14 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 | 區塊 | 桌面 | 手機 | 內容 |
 | --- | --- | --- | --- |
 | 狀態面板 | 右欄 | 對話頁的上拉抽屜 | Goal 面板（任務依狀態分組、Brief、Ledger、Team 分頁，留言給 Planner）；點任務進任務 thread（狀態、分支、PR 與 CI、進度、直接對 worker 說話） |
+| 成員 | 右欄，由頻道標題列的「成員」按鈕切換，和狀態面板二選一 | 尚未接上 | 像 Discord／Slack 的成員欄：你、對話 agent、每個進行中 Goal 的 Planner、手上有任務的 worker，分成「工作中」「等待中」「待命」。每一列顯示狀態或最後一句進度，以及它用的模型與思考強度。點 worker 進任務 thread、點 Planner 開 Goal 面板、點對話 agent 開設定的「角色」。完全由客戶端從 project、provider 與 worker 設定推導，沒有額外的協定 |
 | Inbox | 實例直列最上方（全域）；左欄裡的 Inbox 只看目前實例 | 底部分頁「Inbox」 | 所有已連線實例、所有 project 的待處理事項，依時間排序並標示所屬實例，可依實例與類型（核准、需要你處理、找你的訊息）篩選 |
 | 記憶 | project 頻道的「記憶」分頁 | 同左 | 觀察紀錄與「目前在做什麼」，可修正、釘選、刪除；整理失敗時顯示原因 |
 | Artifact | 列表是 project 頻道的「Artifacts」分頁；編輯器在右欄，取代狀態面板 | 全螢幕頁 | Markdown 編輯器，以 `##` 區段標示你改過的區段與 agent 正在寫入的區段；版本紀錄與 diff |
 | 總管 | 左欄入口的獨立畫面，和對話流一樣佔中欄，右欄是專案概況與記憶；任何畫面都可用快捷鍵切過去 | 底部分頁「總管」 | 同一個實例內跨 project 的永久對話，依目前選取的實例切換 |
 | 自動化 | 左欄「排程」「Listener」進入的實例層級畫面，佔中欄，可依專案篩選；project 頻道的「自動化」分頁只看這個 project。點一列在右欄看細節 | 同左 | 排程與 listener 列表、批次暫停狀態；可停用、刪除、看條件與觸發紀錄，待核准的 listener 可以直接核准 |
 | 電腦 | 左欄入口的實例層級畫面，佔中欄 | 同左 | 託管電腦的連線狀態、lease 持有者、即時縮圖、權限檢查；「接手」、「交還」與「停止」 |
-| 設定 | 左欄最下方的入口，打開蓋在主畫面上的設定視窗：左邊是類別（模型 Provider、記憶、關於），右邊是內容；點背景、右上角或按 Esc 關閉 | 「設定」分頁 | 屬於目前實例的設定。模型 provider：內建的 ChatGPT 方案（登入、登出、模型）與新增的 OpenAI／Anthropic 相容 API（base URL、API key、模型、測試連線），選一個「使用中」。記憶：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。還沒有使用中的 provider 時，Inbox 有一筆「設定模型 provider」指向這裡 |
+| 設定 | 左欄最下方的入口，打開蓋在主畫面上的設定視窗：左邊是類別（模型 Provider、角色、記憶、關於），右邊是內容；點背景、右上角或按 Esc 關閉 | 「設定」分頁 | 屬於目前實例的設定。模型 provider：內建的 ChatGPT 方案（登入、登出、模型）與新增的 OpenAI／Anthropic 相容 API（base URL、API key、模型、測試連線），選一個「使用中」。角色：對話 agent、總管、Planner、內建 worker、explorer 與 reviewer 各自的 provider、模型與思考強度（模型預設／關閉／低／中／高），預設跟使用中的 provider 相同。記憶：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。還沒有使用中的 provider 時，Inbox 有一筆「設定模型 provider」指向這裡 |
 
 ### 即時協定
 
@@ -110,6 +111,7 @@ pub enum ClientCommand {
     SetActiveProvider { id: ProviderId },
     TestProvider      { request: u64, draft: ProviderDraft }, // 列出模型驗證設定，不儲存
     SetMemoryModel    { provider: Option<ProviderId>, model: String }, // 整理記憶的模型；None 跟對話相同
+    SetRoleModel      { role: ModelRole, provider: Option<ProviderId>, model: String, thinking: ThinkingLevel }, // 角色的模型；None 跟使用中的相同
     PinObservation    { project: ProjectId, id: ObservationId, pinned: bool },
     EditObservation   { project: ProjectId, id: ObservationId, text: String }, // 舊內容保留作稽核
     DeleteObservation { project: ProjectId, id: ObservationId },
