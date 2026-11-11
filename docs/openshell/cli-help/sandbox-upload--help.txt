@@ -1,0 +1,64 @@
+Upload local files to a sandbox.
+
+Inside a Git work tree, `.gitignore` rules are applied by default. Outside a Git work tree, uploads proceed unfiltered with a warning. Filtering errors or empty selections stop the upload; use `--no-git-ignore` to intentionally upload everything.
+
+USAGE
+  openshell sandbox upload [OPTIONS] <NAME> <LOCAL_PATH> [DEST]
+
+FLAGS:
+      --no-git-ignore
+          Disable `.gitignore` filtering (uploads everything)
+
+  [DEST]
+          Destination path in the sandbox (defaults to its working directory).
+          
+          For an unfiltered single-file upload, an existing directory or a trailing slash places the file inside that directory. A missing nested path without a trailing slash renames the file.
+
+  <LOCAL_PATH>
+          Local path to upload
+
+  <NAME>
+          Sandbox name
+
+GATEWAY FLAGS:
+  -g, --gateway <GATEWAY>
+          Gateway name to operate on (resolved from stored metadata)
+          
+          [env: OPENSHELL_GATEWAY=]
+
+      --gateway-endpoint <GATEWAY_ENDPOINT>
+          Gateway endpoint URL (e.g. <https://gateway.example.com>). Connects directly without looking up gateway metadata
+          
+          [env: OPENSHELL_GATEWAY_ENDPOINT=]
+
+      --gateway-insecure
+          Skip TLS certificate verification for gateway connections
+          
+          [env: OPENSHELL_GATEWAY_INSECURE=]
+
+GLOBAL FLAGS:
+      --workspace <WORKSPACE>
+          Workspace scope for resource operations
+          
+          [env: OPENSHELL_WORKSPACE=]
+          [default: default]
+
+  -v, --verbose...
+          Increase verbosity (-v, -vv, -vvv)
+
+      --color <WHEN>
+          When to colorize output. `auto` colorizes only when stdout is a terminal
+
+          Possible values:
+          - auto:   Colorize a stream only when that stream is a terminal and no environment override applies
+          - always: Always colorize, even when output is redirected
+          - never:  Never colorize
+          
+          [env: OPENSHELL_COLOR=]
+          [default: auto]
+
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version

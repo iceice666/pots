@@ -1,0 +1,8 @@
+$ openshell doctor check
+(captured 2026-11-11T10:00:31Z in /tmp/oshell, binary=openshell-aarch64-unknown-linux-musl/openshell)
+Checking system prerequisites...
+
+  Docker ............. Error:   × failed to execute docker info
+  ╰─▶ No such file or directory (os error 2)
+
+[exit=1]

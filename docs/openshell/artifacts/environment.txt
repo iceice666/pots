@@ -1,0 +1,52 @@
+# OpenShell CLI evidence environment snapshot
+# captured: 2026-11-11T10:00:58Z
+
+## uname / os-release
+Linux d4a780200ebb 7.0.5-orbstack-00330-ge3df4e19b0a0-dirty #1 SMP PREEMPT Sun May 10 11:47:42 UTC 2026 aarch64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+NAME="Debian GNU/Linux"
+VERSION_ID="12"
+-rw-r--r-- 1 pots dialout 10556549 Nov 11 09:58 /tmp/oshell/openshell-x86_64-unknown-linux-musl.tar.gz
+
+## tool availability (from the same container that ran the CLI)
+$ which docker podman systemctl
+which_exit=1
+$ command -v docker
+not found: docker
+$ command -v podman
+not found: podman
+$ command -v openshell
+not found: openshell (ran from unpacked tarball path)
+
+## ELF e_machine + which downloaded binary executes
+== ELF headers (e_machine at offset 18, decimal) ==
+openshell:     62
+arm/openshell:    183
+== uname -m ==
+aarch64
+== run x86_64 tarball binary ==
+openshell 0.1.8
+x86_exit=0
+== run aarch64 tarball binary ==
+openshell 0.1.8
+arm_exit=0
+
+## release checksum verification
+$ sha256sum -c two.one
+openshell-x86_64-unknown-linux-musl.tar.gz: OK
+openshell-aarch64-unknown-linux-musl.tar.gz: OK
+exit=0
+
+$ sha256sum openshell-x86_64-unknown-linux-musl.tar.gz openshell-aarch64-unknown-linux-musl.tar.gz
+87f5c41d396dcd36b4c30a7b5e6f41643a656cb31a82b0edbb00319c9a719c2d  openshell-x86_64-unknown-linux-musl.tar.gz
+9a2e8f522ccfb3fbd1ed1985a51191a60e083f3404903a56bd4813710a2c7080  openshell-aarch64-unknown-linux-musl.tar.gz
+
+## x86_64 vs aarch64 raw `--help` / `--version` output comparison
+# method: x86_64 and aarch64 tarballs unpacked in /tmp/oshell, same 32 help/version invocations,
+# then byte-compared with cmp. RUN-*.txt files are excluded (only captured for aarch64, and they
+# embed a capture timestamp).
+$ for f in out/*.txt; do cmp -s "$f" "out-arm/$(basename $f)" && echo same || echo DIFF; done
+identical_help_files=32 differing=0
+
+# compared set = 32 files: version.txt, help.txt, 15 top-level <cmd>--help.txt, 15 sandbox-<cmd>--help.txt
+# not compared = RUN-*.txt (aarch64 only; embed a capture timestamp)

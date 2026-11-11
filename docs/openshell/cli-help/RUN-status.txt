@@ -1,0 +1,8 @@
+$ openshell status
+(captured 2026-11-11T10:00:31Z in /tmp/oshell, binary=openshell-aarch64-unknown-linux-musl/openshell)
+Gateway Status
+
+  Status: No gateway configured.
+
+Register a gateway with: openshell gateway add <endpoint>
+[exit=0]

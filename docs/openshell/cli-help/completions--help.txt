@@ -1,0 +1,97 @@
+Generate shell completions
+
+USAGE
+  openshell completions [OPTIONS] <SHELL>
+
+FLAGS:
+  <SHELL>
+          Shell to generate completions for
+          
+          [possible values: bash, fish, zsh, powershell]
+
+GATEWAY FLAGS:
+  -g, --gateway <GATEWAY>
+          Gateway name to operate on (resolved from stored metadata)
+          
+          [env: OPENSHELL_GATEWAY=]
+
+      --gateway-endpoint <GATEWAY_ENDPOINT>
+          Gateway endpoint URL (e.g. <https://gateway.example.com>). Connects directly without looking up gateway metadata
+          
+          [env: OPENSHELL_GATEWAY_ENDPOINT=]
+
+      --gateway-insecure
+          Skip TLS certificate verification for gateway connections
+          
+          [env: OPENSHELL_GATEWAY_INSECURE=]
+
+GLOBAL FLAGS:
+      --workspace <WORKSPACE>
+          Workspace scope for resource operations
+          
+          [env: OPENSHELL_WORKSPACE=]
+          [default: default]
+
+  -v, --verbose...
+          Increase verbosity (-v, -vv, -vvv)
+
+      --color <WHEN>
+          When to colorize output. `auto` colorizes only when stdout is a terminal
+
+          Possible values:
+          - auto:   Colorize a stream only when that stream is a terminal and no environment override applies
+          - always: Always colorize, even when output is redirected
+          - never:  Never colorize
+          
+          [env: OPENSHELL_COLOR=]
+          [default: auto]
+
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version
+
+
+Generate shell completion scripts for OpenShell CLI.
+
+Supported shells: bash, fish, zsh, powershell.
+
+The script is output on stdout, allowing you to redirect the output to the file of your choosing.
+
+The exact config file locations might vary based on your system. Make sure to restart your
+shell before testing whether completions are working.
+
+BASH
+
+First, ensure that you install `bash-completion` using your package manager.
+
+  mkdir -p ~/.local/share/bash-completion/completions
+  openshell completions bash > ~/.local/share/bash-completion/completions/openshell
+
+On macOS with Homebrew (install bash-completion first):
+
+  mkdir -p $(brew --prefix)/etc/bash_completion.d
+  openshell completions bash > $(brew --prefix)/etc/bash_completion.d/openshell.bash-completion
+
+FISH
+
+  mkdir -p ~/.config/fish/completions
+  openshell completions fish > ~/.config/fish/completions/openshell.fish
+
+ZSH
+
+  mkdir -p ~/.zfunc
+  openshell completions zsh > ~/.zfunc/_openshell
+
+Then add the following to your .zshrc before compinit:
+
+  fpath+=~/.zfunc
+
+POWERSHELL
+
+   openshell completions powershell >> $PROFILE
+
+If no profile exists yet, create one first:
+
+   New-Item -Path $PROFILE -Type File -Force

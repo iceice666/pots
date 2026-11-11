@@ -1,0 +1,84 @@
+Add an existing gateway.
+
+Registers a gateway endpoint so it appears in `openshell gateway select`.
+
+An `http://...` endpoint is treated as a direct plaintext gateway and skips both mTLS client certificate lookup and browser authentication.
+
+Without extra flags, an `https://...` endpoint is treated as an edge-authenticated (cloud) gateway and a browser is opened for authentication.
+
+Pass `--remote <ssh-dest>` to register a remote mTLS gateway. Pass `--local` to register a local mTLS gateway. In both cases, mTLS certificates must already exist in the gateway config directory.
+
+An `ssh://` endpoint (e.g., `ssh://user@host:8080`) is shorthand for `--remote user@host` with the endpoint derived from the URL.
+
+USAGE
+  openshell gateway add [OPTIONS] <ENDPOINT>
+
+FLAGS:
+      --name <NAME>
+          Gateway name (auto-derived from the endpoint hostname when omitted)
+
+      --remote <REMOTE>
+          Register a remote mTLS gateway accessible via SSH. With `http://...`, stores a remote plaintext registration instead
+
+      --local
+          Register a local mTLS gateway running in Docker on this machine. With `http://...`, stores a local plaintext registration instead
+
+      --oidc-issuer <OIDC_ISSUER>
+          Register as an OIDC-authenticated gateway using the given issuer URL. The server must be configured with `--oidc-issuer` matching this URL
+
+      --oidc-client-id <OIDC_CLIENT_ID>
+          OIDC client ID for the CLI login flow (defaults to "openshell-cli")
+          
+          [default: openshell-cli]
+
+      --oidc-audience <OIDC_AUDIENCE>
+          OIDC audience for the API resource server. When different from the client ID, the CLI requests this audience in the token exchange. Defaults to the client ID value
+
+      --oidc-scopes <OIDC_SCOPES>
+          Space-separated `OAuth2` scopes to request during OIDC login. When set, tokens will include these scopes for fine-grained access control
+
+  <ENDPOINT>
+          Gateway endpoint URL (for example `http://127.0.0.1:8080`, `https://10.0.0.5:8080`, or `ssh://user@host:8080`)
+
+GATEWAY FLAGS:
+  -g, --gateway <GATEWAY>
+          Gateway name to operate on (resolved from stored metadata)
+          
+          [env: OPENSHELL_GATEWAY=]
+
+      --gateway-endpoint <GATEWAY_ENDPOINT>
+          Gateway endpoint URL (e.g. <https://gateway.example.com>). Connects directly without looking up gateway metadata
+          
+          [env: OPENSHELL_GATEWAY_ENDPOINT=]
+
+      --gateway-insecure
+          Skip TLS certificate verification for gateway connections
+          
+          [env: OPENSHELL_GATEWAY_INSECURE=]
+
+GLOBAL FLAGS:
+      --workspace <WORKSPACE>
+          Workspace scope for resource operations
+          
+          [env: OPENSHELL_WORKSPACE=]
+          [default: default]
+
+  -v, --verbose...
+          Increase verbosity (-v, -vv, -vvv)
+
+      --color <WHEN>
+          When to colorize output. `auto` colorizes only when stdout is a terminal
+
+          Possible values:
+          - auto:   Colorize a stream only when that stream is a terminal and no environment override applies
+          - always: Always colorize, even when output is redirected
+          - never:  Never colorize
+          
+          [env: OPENSHELL_COLOR=]
+          [default: auto]
+
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version

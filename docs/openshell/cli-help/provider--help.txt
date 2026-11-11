@@ -1,0 +1,64 @@
+Manage provider configuration
+
+USAGE
+  openshell provider [OPTIONS] [COMMAND]
+
+COMMANDS
+  create         Create a provider config
+  refresh        Manage provider credential refresh
+  get            Fetch a provider by name
+  list           List providers
+  list-profiles  List available provider profiles (alias for `profile list --type provider`)
+  profile        Manage provider profiles (alias for `profile`)
+  update         Update an existing provider's credentials or config
+  delete         Delete providers by name
+
+FLAGS
+  -g, --gateway <GATEWAY>
+          Gateway name to operate on (resolved from stored metadata)
+          
+          [env: OPENSHELL_GATEWAY=]
+
+      --gateway-endpoint <GATEWAY_ENDPOINT>
+          Gateway endpoint URL (e.g. <https://gateway.example.com>). Connects directly without looking up gateway metadata
+          
+          [env: OPENSHELL_GATEWAY_ENDPOINT=]
+
+      --gateway-insecure
+          Skip TLS certificate verification for gateway connections
+          
+          [env: OPENSHELL_GATEWAY_INSECURE=]
+
+      --workspace <WORKSPACE>
+          Workspace scope for resource operations
+          
+          [env: OPENSHELL_WORKSPACE=]
+          [default: default]
+
+  -v, --verbose...
+          Increase verbosity (-v, -vv, -vvv)
+
+      --color <WHEN>
+          When to colorize output. `auto` colorizes only when stdout is a terminal
+
+          Possible values:
+          - auto:   Colorize a stream only when that stream is a terminal and no environment override applies
+          - always: Always colorize, even when output is redirected
+          - never:  Never colorize
+          
+          [env: OPENSHELL_COLOR=]
+          [default: auto]
+
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version
+
+
+EXAMPLES
+  $ openshell provider create --name openai --type openai --credential OPENAI_API_KEY
+  $ openshell provider create --name anthropic --type anthropic --from-existing
+  $ openshell provider list
+  $ openshell provider get openai
+  $ openshell provider delete openai

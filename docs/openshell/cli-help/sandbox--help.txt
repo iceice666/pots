@@ -1,0 +1,74 @@
+Manage sandboxes
+
+USAGE
+  openshell sandbox [OPTIONS] [COMMAND]
+
+COMMANDS
+  create      Create a sandbox
+  get         Fetch a sandbox by name
+  list        List sandboxes
+  delete      Delete a sandbox by name
+  stop        Stop a sandbox while preserving its workspace
+  start       Start a stopped sandbox
+  suspend     Suspend a ready sandbox and retain its memory state
+  resume      Resume a suspended sandbox from its retained memory state
+  exec        Execute a command in a running sandbox
+  connect     Connect to a sandbox
+  upload      Upload local files to a sandbox
+  download    Download files from a sandbox
+  ssh-config  Print an SSH config entry for a sandbox
+  provider    Manage providers attached to a sandbox
+  template    Manage reusable sandbox workload templates
+
+FLAGS
+  -g, --gateway <GATEWAY>
+          Gateway name to operate on (resolved from stored metadata)
+          
+          [env: OPENSHELL_GATEWAY=]
+
+      --gateway-endpoint <GATEWAY_ENDPOINT>
+          Gateway endpoint URL (e.g. <https://gateway.example.com>). Connects directly without looking up gateway metadata
+          
+          [env: OPENSHELL_GATEWAY_ENDPOINT=]
+
+      --gateway-insecure
+          Skip TLS certificate verification for gateway connections
+          
+          [env: OPENSHELL_GATEWAY_INSECURE=]
+
+      --workspace <WORKSPACE>
+          Workspace scope for resource operations
+          
+          [env: OPENSHELL_WORKSPACE=]
+          [default: default]
+
+  -v, --verbose...
+          Increase verbosity (-v, -vv, -vvv)
+
+      --color <WHEN>
+          When to colorize output. `auto` colorizes only when stdout is a terminal
+
+          Possible values:
+          - auto:   Colorize a stream only when that stream is a terminal and no environment override applies
+          - always: Always colorize, even when output is redirected
+          - never:  Never colorize
+          
+          [env: OPENSHELL_COLOR=]
+          [default: auto]
+
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version
+
+
+ALIAS
+  sb
+
+EXAMPLES
+  $ openshell sandbox create
+  $ openshell sandbox create --from registry.example.com/agents/python:latest
+  $ openshell sandbox connect my-sandbox
+  $ openshell sandbox list
+  $ openshell sandbox delete my-sandbox

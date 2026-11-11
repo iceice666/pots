@@ -1,0 +1,14 @@
+87f5c41d396dcd36b4c30a7b5e6f41643a656cb31a82b0edbb00319c9a719c2d  openshell-x86_64-unknown-linux-musl.tar.gz
+9a2e8f522ccfb3fbd1ed1985a51191a60e083f3404903a56bd4813710a2c7080  openshell-aarch64-unknown-linux-musl.tar.gz
+3c1f767d3afb55c308274da4a1b126542beecef5150b6c437727959b9bd01df8  openshell-aarch64-apple-darwin.tar.gz
+6e85ae05b7330520dbdc6589d30fc4825f76be7ff3ca7ed201243fe3eda37418  openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz
+9ac02b88741464d39b538d9b4d99ddb40fcc97004e46aa62f349f5bb150f1f04  openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz
+ee37c081bdbaa91e566153d3a38d377284f8f890c8e62bae918f74d00ddca781  openshell-driver-vm-aarch64-apple-darwin.tar.gz
+b3339527085d9b44afc0d5e4f835c2d34e44e33d0b67d6a4cac9d96f25a656b1  openshell_0.1.8-1_amd64.deb
+3d53db93dc2f130ae570a838c2dd48fda626bd1ab964ea1de895e13a21a667a9  openshell_0.1.8-1_arm64.deb
+9b723915290b5decf7e35dc3016b38e62def5a1766329ddf04275413782be6eb  openshell-0.1.8-1.fc44.aarch64.rpm
+88c212cb9d163f38be1c52a8e9755d17248072dc451427917a20327e4bde7a9a  openshell-0.1.8-1.fc44.x86_64.rpm
+7a3763edc2f06dc10132b1e743ec98c9509b22cbbd09ebbe22fffda9546ce65a  openshell-gateway-0.1.8-1.fc44.aarch64.rpm
+726c6811c164df716c2c1b006943284d5d5c667eec3063795cccdd76c1126912  openshell-gateway-0.1.8-1.fc44.x86_64.rpm
+1ecdf7b2bc0deb27467a8e8a67dd0aa3c106d0cd5980da82359ff8b2cb7f0149  openshell-prover-0.1.8-1.fc44.aarch64.rpm
+fd436d2927ceac8df1d9d9034608a5a12598e39e6acc4fae3603df5cad9be4b4  openshell-prover-0.1.8-1.fc44.x86_64.rpm

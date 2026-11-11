@@ -1,0 +1,7 @@
+$ openshell sandbox list
+(captured 2026-11-11T10:00:31Z in /tmp/oshell, binary=openshell-aarch64-unknown-linux-musl/openshell)
+Error:   × No active gateway.
+  │ Set one with: openshell gateway select <name>
+  │ Or register one with: openshell gateway add <endpoint>
+
+[exit=1]
