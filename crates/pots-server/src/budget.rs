@@ -31,6 +31,8 @@ const MIN_BUDGET_STEP_TOKENS: u64 = 100_000;
 /// trace 裡工具參數與結果最多留幾個字。
 const TRACE_ARGS_CHARS: usize = 1200;
 const TRACE_OUTPUT_CHARS: usize = 600;
+/// trace 裡模型在工具呼叫之間說的話最多留幾個字。
+const TRACE_TEXT_CHARS: usize = 2000;
 
 /// 一輪開始前停下來的原因。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,8 +239,9 @@ impl Budget {
         Ok(())
     }
 
-    /// 一輪模型呼叫結束：用量記進 `agent_runs`、Goal／任務與 trace。
-    pub async fn record_turn(&self, turn: usize, usage: Usage) {
+    /// 一輪模型呼叫結束：用量記進 `agent_runs`、Goal／任務與 trace。`narration` 是這一輪接著工具呼叫的
+    /// 文字，另外記成一筆 `text` trace，「為什麼」面板跟工具依序列出。
+    pub async fn record_turn(&self, turn: usize, usage: Usage, narration: Option<&str>) {
         let total = usage.input_tokens.saturating_add(usage.output_tokens);
         let now = self.clock.now();
         let mut tx = match self.store.begin().await {
@@ -282,6 +285,27 @@ impl Budget {
         .await
         {
             tracing::error!(error = %e, "無法記錄模型 trace");
+        }
+        if let Some(text) = narration {
+            let seq = self.traced.fetch_add(1, Ordering::SeqCst);
+            if let Err(e) = Store::append_trace(
+                &mut tx,
+                self.run,
+                "text",
+                &self.model,
+                &json!({
+                    "turn": turn,
+                    "text": redact_text(text, TRACE_TEXT_CHARS),
+                    "seq": seq,
+                }),
+                true,
+                0,
+                now,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "無法記錄模型的文字 trace");
+            }
         }
         if let Err(e) = tx.commit().await {
             tracing::error!(error = %e, "無法寫入模型用量");

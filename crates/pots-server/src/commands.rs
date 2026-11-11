@@ -714,6 +714,7 @@ async fn send_overseer(app: &App, id: ItemId, text: String) -> Result<(), String
             text: text.clone(),
             status: MsgStatus::Done,
             tools: None,
+            narration: Vec::new(),
             cards: Vec::new(),
             steer: false,
         }),
@@ -826,12 +827,19 @@ async fn why(app: &App, item: ItemId) -> Result<ServerEvent, String> {
             .trace(run)
             .await?
             .into_iter()
-            .map(|t| TraceStepView {
-                kind: t.kind,
-                name: t.name,
-                at: t.at,
-                ok: t.ok,
-                detail: t.detail.to_string(),
+            .map(|t| {
+                // 模型說的話直接給文字，其他給 JSON。
+                let detail = match t.detail.get("text").and_then(|v| v.as_str()) {
+                    Some(text) if t.kind == "text" => text.to_string(),
+                    _ => t.detail.to_string(),
+                };
+                TraceStepView {
+                    kind: t.kind,
+                    name: t.name,
+                    at: t.at,
+                    ok: t.ok,
+                    detail,
+                }
             })
             .collect();
         Ok(Some(ServerEvent::Why {
@@ -1087,6 +1095,7 @@ async fn send(
             text: text.clone(),
             status: MsgStatus::Done,
             tools: None,
+            narration: Vec::new(),
             cards: Vec::new(),
             steer,
         }),

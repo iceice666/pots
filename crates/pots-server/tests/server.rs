@@ -263,8 +263,10 @@ async fn tool_call_round_trip_and_multi_turn_history() {
     assert_eq!(updates.len(), 2, "ToolStarted 與 ToolFinished 各一次");
     assert_eq!(updates[0].details, ["get_status：執行中"]);
     assert_eq!(updates[1].details, ["get_status：完成"]);
+    // 「我查一下」接著工具呼叫，是旁白：結束後訊息只留最後的回答。
     let done = agent_msg(done_item(&evs));
-    assert_eq!(done.text, "我查一下\n\n有 2 則訊息");
+    assert_eq!(done.text, "有 2 則訊息");
+    assert!(done.narration.is_empty());
     assert_eq!(done.tools.as_ref().unwrap().text, "呼叫了 1 個工具");
 
     // 第二輪的輸入帶著工具結果。
@@ -315,6 +317,94 @@ async fn tool_call_round_trip_and_multi_turn_history() {
         Item::User {
             text: "再一次".into()
         }
+    );
+    srv.stop().await;
+}
+
+#[tokio::test]
+async fn narration_streams_then_moves_to_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = TestServer::start(
+        tmp.path(),
+        [
+            ScriptedTurn::new()
+                .text("我先查一下")
+                .delay(Duration::from_millis(300))
+                .tool_call("c1", "get_status", "{}"),
+            ScriptedTurn::new().text_deltas(["結", "果"]),
+            // 第二則：最後一輪沒有文字時，最後一段旁白當成回答。
+            ScriptedTurn::new()
+                .text("答案在這")
+                .tool_call("c2", "get_status", "{}"),
+            ScriptedTurn::new(),
+        ],
+    )
+    .await;
+    let mut a = srv.client().await;
+    a.snapshot().await;
+    let project = a.create_project("旁白").await;
+    a.say(project, "狀態如何？", SendMode::Queue).await;
+    a.until(|e| matches!(e, ServerEvent::Delta { .. })).await;
+
+    // 第一輪還在串流時重連：補送全文。之後內文搬進旁白、變短，第二輪的增量仍要送到。
+    let mut b = Client::connect(&srv, a.last_seq).await;
+    match b.next().await {
+        ServerEvent::StreamingText { text, .. } => assert_eq!(text, "我先查一下"),
+        other => panic!("預期 StreamingText，收到 {other:?}"),
+    }
+    let evs = b.until_idle(project).await;
+    let moved = evs
+        .iter()
+        .find_map(|e| match e {
+            ServerEvent::ItemUpdated { item, .. } => match &item.kind {
+                StreamItemKind::Agent(m) if !m.narration.is_empty() => Some(m.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("沒有帶旁白的 ItemUpdated");
+    assert_eq!(moved.narration, ["我先查一下"]);
+    assert_eq!(moved.text, "");
+    assert_eq!(moved.status, MsgStatus::Streaming);
+    let deltas: Vec<&str> = evs
+        .iter()
+        .filter_map(|e| match e {
+            ServerEvent::Delta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, ["結", "果"]);
+    let done = done_item(&evs);
+    assert_eq!(agent_msg(done).text, "結果");
+    assert!(agent_msg(done).narration.is_empty());
+
+    // 旁白在「為什麼」面板的 trace 裡，排在模型輪之後、工具之前。
+    b.send(&ClientCommand::Why { item: done.id }).await;
+    let why = b
+        .until(|e| matches!(e, ServerEvent::Why { why: Some(_) }))
+        .await
+        .into_iter()
+        .find_map(|e| match e {
+            ServerEvent::Why { why: Some(why) } => Some(why),
+            _ => None,
+        })
+        .unwrap();
+    let kinds: Vec<&str> = why.steps.iter().map(|s| s.kind.as_str()).collect();
+    assert_eq!(kinds, ["model", "text", "tool", "model"]);
+    assert_eq!(why.steps[1].detail, "我先查一下");
+
+    // 最後一輪沒有文字：訊息不會是空的。
+    b.say(project, "再一次", SendMode::Queue).await;
+    let evs = b.until_idle(project).await;
+    assert_eq!(agent_msg(done_item(&evs)).text, "答案在這");
+
+    // 使用者看得到輸出的對話 agent 會被要求先說要做什麼。
+    let req = &srv.provider.requests()[0];
+    assert!(
+        req.instructions
+            .as_deref()
+            .unwrap()
+            .contains("呼叫工具前，先用一句話告訴使用者")
     );
     srv.stop().await;
 }

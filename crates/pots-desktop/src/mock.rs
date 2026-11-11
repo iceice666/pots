@@ -121,6 +121,7 @@ fn human(text: &str) -> StreamItemKind {
         text: text.into(),
         status: MsgStatus::Done,
         tools: None,
+        narration: Vec::new(),
         cards: vec![],
         steer: false,
     })
@@ -135,6 +136,7 @@ fn agent(label: &str, role: AgentRole, text: &str) -> Msg {
         text: text.into(),
         status: MsgStatus::Done,
         tools: None,
+        narration: Vec::new(),
         cards: vec![],
         steer: false,
     }

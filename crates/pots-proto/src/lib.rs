@@ -415,7 +415,12 @@ pub struct ToolSummary {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Msg {
     pub author: Author,
+    /// 訊息內文。agent 訊息串流中是這一輪的文字，結束後是最後的回答。
     pub text: String,
+    /// agent 在工具呼叫之間說的話（「我先查一下……」），只在串流中帶，讓人知道它在做什麼。
+    /// 結束後清空，改在「為什麼這樣回答」面板的 `text` 步驟裡看。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub narration: Vec<String>,
     pub status: MsgStatus,
     pub tools: Option<ToolSummary>,
     /// 訊息下方的內嵌卡片（例如 agent 回覆附帶的 Goal 或核准卡）。
@@ -1620,12 +1625,12 @@ impl Default for OverseerView {
 /// 「為什麼」面板的一步（一次模型呼叫或一次工具呼叫）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceStepView {
-    /// `model` 或 `tool`。
+    /// `model`、`text`（模型在工具呼叫之間說的話）或 `tool`。
     pub kind: String,
     pub name: String,
     pub at: Timestamp,
     pub ok: bool,
-    /// 遮蔽、截短後的參數與結果。
+    /// 遮蔽、截短後的參數與結果；`text` 是那段話本身。
     pub detail: String,
 }
 

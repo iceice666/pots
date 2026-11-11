@@ -56,9 +56,9 @@ pub trait Hook: Send + Sync {
 
     async fn after_tool(&self, _call: &ToolCall, _output: &str) {}
 
-    /// 一輪模型呼叫完成後、處理工具之前呼叫；`usage` 是這一輪的用量。
+    /// 一輪模型呼叫完成後、處理工具之前呼叫；`usage` 是這一輪的用量，`items` 是這一輪的輸出項目。
     /// 預算與 trace 在這裡同步記帳，下一輪的 [`Hook::before_turn`] 才看得到。
-    async fn after_turn(&self, _turn: usize, _usage: Usage) {}
+    async fn after_turn(&self, _turn: usize, _usage: Usage, _items: &[Item]) {}
 }
 
 /// 不做任何限制的 hook。
@@ -177,7 +177,7 @@ pub async fn run(
             .instrument(turn_span)
             .await?;
         state.usage += usage;
-        config.hook.after_turn(turn, usage).await;
+        config.hook.after_turn(turn, usage, &items).await;
         let calls: Vec<ToolCall> = items
             .iter()
             .filter_map(|item| match item {

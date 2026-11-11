@@ -119,7 +119,7 @@ impl RunState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TraceRow {
     pub seq: i64,
-    /// `model` 或 `tool`。
+    /// `model`、`text`（模型在工具呼叫之間說的話）或 `tool`。
     pub kind: String,
     pub name: String,
     pub detail: serde_json::Value,

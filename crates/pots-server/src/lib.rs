@@ -584,6 +584,7 @@ mod tests {
             text: text.into(),
             status,
             tools: None,
+            narration: Vec::new(),
             cards: Vec::new(),
             steer: false,
         }

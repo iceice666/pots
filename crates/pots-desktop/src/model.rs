@@ -304,6 +304,7 @@ impl Store {
                     MsgStatus::Done
                 },
                 tools: None,
+                narration: Vec::new(),
                 cards: vec![],
                 steer: mode == SendMode::Steer,
             }),
@@ -418,6 +419,7 @@ impl Store {
                     text: text.clone(),
                     status: MsgStatus::Queued,
                     tools: None,
+                    narration: Vec::new(),
                     cards: vec![],
                     steer: false,
                 }),
@@ -439,6 +441,7 @@ impl Store {
                     text,
                     status: MsgStatus::Done,
                     tools: None,
+                    narration: Vec::new(),
                     cards: vec![],
                     steer: false,
                 }),

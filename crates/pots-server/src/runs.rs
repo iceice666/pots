@@ -13,6 +13,9 @@
 //!
 //! 被取消的 run：訊息標成 Done，保留已產生的文字並加註「（已停止）」等說明；
 //! `agent_runs.state = cancelled`。模型錯誤：訊息標成 Failed，加上白話的錯誤說明。
+//!
+//! 模型在工具呼叫之間說的話（「我先查一下……」）是旁白：串流中放在 [`Msg::narration`] 讓人知道
+//! 它在做什麼，結束後訊息只留最後的回答，旁白在「為什麼」面板的 trace 裡。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -43,6 +46,13 @@ use crate::tools::{self, Scope, ToolCtx};
 
 /// 對話 agent 的 instructions 裡列出幾張最近的里程碑卡片。
 const RECENT_MILESTONES: u32 = 5;
+
+/// 對話 agent 的輸出使用者看得到：請它呼叫工具前先說一句要做什麼（旁白，見模組說明）。
+/// 寫在程式裡而不是 profile，覆寫 profile 時也會有。
+const NARRATION_PROMPT: &str = "\n\n# 回覆的進行方式\n\n\
+呼叫工具前，先用一句話告訴使用者你要做什麼、為什麼（例如「我先查一下目前的 Goal 狀態。」）；\
+看到結果、改變做法時也一樣。這些話只在執行中顯示，完成後收進「為什麼這樣回答」，\
+所以最後不再呼叫工具時的回覆要完整，不要依賴前面說過的話，也不要重複過程。";
 
 #[derive(Clone, Debug)]
 pub struct Trigger {
@@ -341,8 +351,12 @@ struct Reply {
     cards: Vec<Card>,
     /// 工具寫進來、還沒搬到 `cards` 的卡片。
     pending_cards: Arc<Mutex<Vec<Card>>>,
-    /// 上一輪有文字輸出，下一段文字前要空一行。
+    /// 上一個輸出項目有文字，下一段文字前要空一行。
     needs_break: bool,
+    /// 已結束、接著工具呼叫的那幾輪說的話（旁白）。`text` 只留這一輪的文字。
+    narration: Vec<String>,
+    /// 這一輪有工具呼叫：輪末把 `text` 搬進 `narration`。
+    turn_calls: bool,
 }
 
 impl Reply {
@@ -353,6 +367,12 @@ impl Reply {
             kind: StreamItemKind::Agent(Msg {
                 author: self.author.clone(),
                 text: self.text.clone(),
+                // 旁白只在串流中顯示；結束後在「為什麼」面板的 trace 裡。
+                narration: if status == MsgStatus::Streaming {
+                    self.narration.clone()
+                } else {
+                    Vec::new()
+                },
                 status,
                 tools: self.tools.summary(),
                 cards: self.cards.clone(),
@@ -363,6 +383,28 @@ impl Reply {
 
     fn scope(&self) -> StreamScope {
         crate::store::stream_scope(self.project)
+    }
+
+    /// 一輪結束：這一輪接著工具呼叫的話搬進旁白。回傳是否有搬。
+    fn end_turn(&mut self) -> bool {
+        let calls = std::mem::take(&mut self.turn_calls);
+        if !calls || self.text.trim().is_empty() {
+            return false;
+        }
+        let text = std::mem::take(&mut self.text);
+        self.narration.push(text.trim().to_string());
+        self.needs_break = false;
+        true
+    }
+
+    /// run 結束、加註說明之前：最後一輪沒有文字（例如回答寫在結束 run 的工具呼叫旁、
+    /// 用完輪數、停止）時，把最後一段旁白當成回答，訊息才不會是空的。
+    fn settle(&mut self) {
+        if self.text.trim().is_empty()
+            && let Some(last) = self.narration.pop()
+        {
+            self.text = last;
+        }
     }
 
     fn append_note(&mut self, note: &str) {
@@ -408,6 +450,8 @@ async fn run_chat(
         cards: Vec::new(),
         pending_cards: Arc::new(Mutex::new(Vec::new())),
         needs_break: false,
+        narration: Vec::new(),
+        turn_calls: false,
     };
 
     // 開始：run 列、觸發訊息進歷史、空白的串流訊息、狀態「思考中」。
@@ -458,6 +502,7 @@ async fn run_chat(
         Err(e) => Err(RunError::Llm(e)),
     };
 
+    reply.settle();
     let (status, item_status, run_state, error) = match &result {
         Ok(outcome) => {
             if *outcome == RunOutcome::MaxTurns {
@@ -638,7 +683,7 @@ async fn drive_loop(
             .await
             .map_err(RunError::Server)?
     };
-    let mut instructions = format!("{head}{}", profile.role_prompt());
+    let mut instructions = format!("{head}{}{NARRATION_PROMPT}", profile.role_prompt());
     instructions.push_str(&format!("\n\n這個 project 叫「{}」。", project.name));
     if !project.instructions.trim().is_empty() {
         instructions.push_str("\n\n# Project 指示\n\n");
@@ -803,8 +848,10 @@ async fn on_event(
             inner.hub.delta(reply.id, &text);
         }
         AgentEvent::Item(item) => {
-            if matches!(item, Item::Assistant { .. }) {
-                reply.needs_break = true;
+            match item {
+                Item::Assistant { .. } => reply.needs_break = true,
+                Item::ToolCall(_) => reply.turn_calls = true,
+                _ => {}
             }
             let mut tx = inner.store.begin().await?;
             Store::append_om_raw(&mut tx, reply.project, Some(run_id), &item).await?;
@@ -822,6 +869,10 @@ async fn on_event(
             log_update(inner, reply).await?;
         }
         AgentEvent::TurnCompleted { turn, usage } => {
+            // 接著要跑工具：這一輪的話變成旁白，內文清空等下一輪。
+            if reply.end_turn() {
+                log_update(inner, reply).await?;
+            }
             tracing::debug!(
                 turn,
                 input = usage.input_tokens,

@@ -5,8 +5,9 @@
 //! 同一把鎖下讀，客戶端拿到的狀態與之後收到的事件不會重疊或漏掉。
 //!
 //! `Delta` 不寫日誌，但要和「重連時補送的串流全文」對齊：每個串流中的訊息在記憶體裡
-//! 留一份目前的全文，`Delta` 帶著套用後的長度廣播，連線端據此丟掉已經包含在
-//! `StreamingText` 裡的增量。
+//! 留一份目前的全文，`Delta` 帶著串流位置廣播，連線端據此丟掉已經包含在
+//! `StreamingText` 裡的增量。`ItemUpdated` 會整份換掉內文（例如一輪的話搬進旁白），
+//! 所以位置是送過的總長度，不是目前全文的長度。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -38,7 +39,7 @@ pub enum Envelope {
     },
     Delta {
         item: ItemId,
-        /// 套用這個增量後，全文的長度（bytes）。
+        /// 套用這個增量後的串流位置（送過的總 bytes，內文被換掉也不會變小）。
         end: usize,
         json: Arc<str>,
     },
@@ -70,6 +71,8 @@ impl HubState {
 struct Streaming {
     scope: StreamScope,
     text: String,
+    /// 串流位置：送過的增量總長度（bytes），只增不減。
+    sent: usize,
 }
 
 /// 連線開始時要送的內容。
@@ -148,6 +151,7 @@ impl Hub {
             return;
         };
         s.text.push_str(text);
+        s.sent += text.len();
         let ev = ServerEvent::Delta {
             scope: s.scope,
             item_id: item,
@@ -157,7 +161,7 @@ impl Hub {
         // 沒有任何連線時 send 會失敗，不要緊。
         let _ = self.tx.send(Envelope::Delta {
             item,
-            end: s.text.len(),
+            end: s.sent,
             json: json.into(),
         });
     }
@@ -195,7 +199,7 @@ impl Hub {
                 text: s.text.clone(),
             };
             frames.push(event_json(&ev)?);
-            stream_pos.insert(*item, s.text.len());
+            stream_pos.insert(*item, s.sent);
         }
         Ok((Initial { frames, stream_pos }, head))
     }
@@ -389,8 +393,18 @@ impl LogTxn<'_> {
                             Streaming {
                                 scope: *scope,
                                 text: msg.text.clone(),
+                                sent: msg.text.len(),
                             },
                         );
+                    }
+                }
+                // 串流中的訊息整份更新：客戶端會用它的內文取代，重連補送的全文也要跟著換；
+                // 位置不變，之後的增量照樣接在後面。
+                ServerEvent::ItemUpdated { item, .. } => {
+                    if let StreamItemKind::Agent(msg) = &item.kind
+                        && let Some(s) = streaming.get_mut(&item.id)
+                    {
+                        s.text.clone_from(&msg.text);
                     }
                 }
                 ServerEvent::ItemDone { item, .. } => {

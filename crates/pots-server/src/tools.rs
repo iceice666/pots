@@ -201,8 +201,15 @@ impl Hook for Gate {
         self.budget.check_turn().await.is_none()
     }
 
-    async fn after_turn(&self, turn: usize, usage: pots_llm::provider::Usage) {
-        self.budget.record_turn(turn, usage).await;
+    async fn after_turn(
+        &self,
+        turn: usize,
+        usage: pots_llm::provider::Usage,
+        items: &[pots_llm::provider::Item],
+    ) {
+        self.budget
+            .record_turn(turn, usage, narration(items).as_deref())
+            .await;
     }
 
     async fn after_tool(&self, call: &pots_llm::provider::ToolCall, output: &str) {
@@ -210,6 +217,23 @@ impl Hook for Gate {
         let ok = !output.starts_with("錯誤：");
         self.budget.record_tool(call, output, ok).await;
     }
+}
+
+/// 一輪裡接著工具呼叫的文字（「我先查一下……」）。沒有工具呼叫的那一輪是最後的回答，不算。
+pub(crate) fn narration(items: &[pots_llm::provider::Item]) -> Option<String> {
+    use pots_llm::provider::Item;
+    if !items.iter().any(|i| matches!(i, Item::ToolCall(_))) {
+        return None;
+    }
+    let text = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Assistant { text } if !text.trim().is_empty() => Some(text.trim()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then_some(text)
 }
 
 pub(crate) fn internal(e: Error) -> ToolError {
