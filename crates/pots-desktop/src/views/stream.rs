@@ -3,6 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::text::TextView;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -276,12 +277,18 @@ impl PotsApp {
             div()
                 .text_size(px(density.body()))
                 .line_height(relative(1.6))
-                // 串流中的訊息尾端接一個游標字元。
-                .child(if streaming {
-                    format!("{}▍", msg.text)
-                } else {
-                    msg.text.clone()
-                })
+                // 訊息內文是 Markdown；串流中的訊息尾端接一個游標字元。
+                .child(
+                    TextView::markdown(
+                        SharedString::from(format!("msg-body-{}", id.0)),
+                        if streaming {
+                            format!("{}▍", msg.text)
+                        } else {
+                            msg.text.clone()
+                        },
+                    )
+                    .selectable(true),
+                )
         });
 
         let row = div()
