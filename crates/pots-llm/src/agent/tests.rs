@@ -65,7 +65,7 @@ fn config(
         instructions: Some("你是測試".into()),
         tools,
         hook,
-        max_turns: 8,
+        max_turns: Some(8),
         session_id: None,
     }
 }
@@ -320,16 +320,30 @@ async fn max_turns_is_reported() {
         ScriptedTurn::new().tool_call("c2", "get_time", "{}"),
     ]);
     let mut cfg = config(provider.clone(), vec![get_time()], Arc::new(AllowAll));
-    cfg.max_turns = 2;
+    cfg.max_turns = Some(2);
     let (result, _) = run_collect(&cfg, vec![user("x")], CancellationToken::new()).await;
     let result = result.unwrap();
     assert_eq!(result.outcome, RunOutcome::MaxTurns);
     assert_eq!(result.new_items.len(), 4);
     assert_eq!(result.new_items[3], tool_out("c2", "12:00"));
 
-    cfg.max_turns = 0;
+    cfg.max_turns = Some(0);
     let (result, _) = run_collect(&cfg, vec![user("x")], CancellationToken::new()).await;
     assert_eq!(result.unwrap().outcome, RunOutcome::MaxTurns);
+}
+
+#[tokio::test]
+async fn no_max_turns_runs_until_done() {
+    let mut script: Vec<ScriptedTurn> = (0..20)
+        .map(|i| ScriptedTurn::new().tool_call(format!("c{i}"), "get_time", "{}"))
+        .collect();
+    script.push(ScriptedTurn::new().text("done"));
+    let provider = ScriptedProvider::new(script);
+    let mut cfg = config(provider.clone(), vec![get_time()], Arc::new(AllowAll));
+    cfg.max_turns = None;
+    let (result, _) = run_collect(&cfg, vec![user("x")], CancellationToken::new()).await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Done);
+    assert_eq!(provider.requests().len(), 21);
 }
 
 #[tokio::test]

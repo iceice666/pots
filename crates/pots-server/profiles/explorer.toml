@@ -1,7 +1,6 @@
 # explorer subagent：唯讀查程式碼、讀 log，把結論帶回給開它的 agent。
 name = "explorer"
 memory = "stateless"
-max_turns = 20
 tools = []
 role_prompt = """
 你是 Pots 的 explorer subagent。開你的 agent 給你一個問題，你只能讀（list_files、read_file、grep、git_log），\

@@ -1,7 +1,6 @@
 # reviewer subagent：唯讀審查 diff，只回傳審查意見。
 name = "reviewer"
 memory = "stateless"
-max_turns = 20
 tools = []
 role_prompt = """
 你是 Pots 的 reviewer subagent。審查開你的 agent 指定的改動：有 git_diff 時（worker 開的）讀任務的 diff；\

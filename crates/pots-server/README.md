@@ -58,7 +58,7 @@ cargo run -p pots-server -- [--data-dir <路徑>] [--port <port>]
 
 ### Agent profile
 
-對話 agent、Planner、worker 與 subagent 的 profile 是 [`profiles/chat.toml`](profiles/chat.toml)、[`profiles/planner.toml`](profiles/planner.toml)、[`profiles/worker.toml`](profiles/worker.toml)、[`profiles/explorer.toml`](profiles/explorer.toml) 與 [`profiles/reviewer.toml`](profiles/reviewer.toml)，編進執行檔。資料目錄的 `profiles/<name>.toml` 存在時整份取代內建的（可以改 role prompt、`max_turns`、拿掉工具）；工具與可寫的 artifact 種類依 agent 檢查，不合法時服務不啟動。沒列在 profile 裡的工具不會交給模型。
+對話 agent、Planner、worker 與 subagent 的 profile 是 [`profiles/chat.toml`](profiles/chat.toml)、[`profiles/planner.toml`](profiles/planner.toml)、[`profiles/worker.toml`](profiles/worker.toml)、[`profiles/explorer.toml`](profiles/explorer.toml) 與 [`profiles/reviewer.toml`](profiles/reviewer.toml)，編進執行檔。資料目錄的 `profiles/<name>.toml` 存在時整份取代內建的（可以改 role prompt、加上 `max_turns` 限制單次 run 的模型輪數、拿掉工具；內建的 profile 都不寫 `max_turns`，也就是不限制）；工具與可寫的 artifact 種類依 agent 檢查，不合法時服務不啟動。沒列在 profile 裡的工具不會交給模型。
 
 ## 核准與通知
 

@@ -131,7 +131,7 @@ async fn main() -> Result<(), BoxError> {
         ),
         tools: vec![Arc::new(GetTime)],
         hook: Arc::new(AllowAll),
-        max_turns: 4,
+        max_turns: Some(4),
         session_id: None,
     };
     let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();

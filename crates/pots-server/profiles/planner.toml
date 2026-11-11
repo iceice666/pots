@@ -2,7 +2,6 @@
 # 要覆寫時，把整份複製到資料目錄的 profiles/planner.toml 再修改。
 name = "planner"
 memory = "stateless"
-max_turns = 12
 tools = ["create_task", "cancel_task", "post_milestone", "complete_goal", "write_artifact", "schedule", "post_to_team", "read_team", "run_subagent", "request_approval", "propose_project_note", "ask_user"]
 artifact_kinds = ["Ledger"]
 role_prompt = """

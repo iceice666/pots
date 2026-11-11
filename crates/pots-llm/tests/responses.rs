@@ -187,7 +187,7 @@ async fn namespaced_tool_roundtrip_through_agent_loop() {
         instructions: Some("你是 Pots".into()),
         tools: vec![tool.clone()],
         hook: Arc::new(AllowAll),
-        max_turns: 4,
+        max_turns: Some(4),
         session_id: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

@@ -3,7 +3,6 @@
 name = "global"
 # om：總管有自己的全域對話記憶（存在內部的 overseer project 底下）。
 memory = "om"
-max_turns = 8
 # 唯讀基礎集一律都有；總管唯讀工具看得到所有 project。
 tools = ["create_goal", "cancel_goal", "archive_goal", "schedule", "pause_automations", "resume_automations", "run_subagent"]
 role_prompt = """

@@ -144,7 +144,9 @@ pub enum MemoryMode {
 pub struct AgentProfile {
     pub name: String,
     pub memory: MemoryMode,
-    pub max_turns: usize,
+    /// 單次 run 最多幾輪模型；不寫就不限制。
+    #[serde(default)]
+    pub max_turns: Option<usize>,
     pub tools: Vec<ToolName>,
     #[serde(default)]
     pub artifact_kinds: Vec<ArtifactKind>,
@@ -345,8 +347,8 @@ fn parse(text: &str, rules: &Rules, source: &str) -> Result<AgentProfile, Error>
     if p.memory != rules.memory {
         return Err(bad(format!("{} 的 memory 不能改", rules.name)));
     }
-    if p.max_turns == 0 || p.max_turns > 100 {
-        return Err(bad("max_turns 要在 1 到 100 之間".into()));
+    if p.max_turns == Some(0) {
+        return Err(bad("max_turns 至少要是 1；不想限制就拿掉這個欄位".into()));
     }
     if let Some(t) = p.tools.iter().find(|t| !rules.tools.contains(t)) {
         return Err(bad(format!("{} 不能用 {}", rules.name, t.as_str())));
@@ -375,6 +377,8 @@ mod tests {
     fn builtin_profiles_parse() {
         let p = Profiles::builtin();
         assert_eq!(p.chat.memory, MemoryMode::Om);
+        assert_eq!(p.chat.max_turns, None);
+        assert_eq!(p.worker.max_turns, None);
         assert!(p.chat.has(ToolName::CreateGoal));
         assert_eq!(
             p.chat.artifact_kinds,
@@ -415,7 +419,7 @@ mod tests {
         )
         .unwrap();
         let p = Profiles::load(tmp.path()).unwrap();
-        assert_eq!(p.chat.max_turns, 3);
+        assert_eq!(p.chat.max_turns, Some(3));
         assert_eq!(p.chat.tools, [ToolName::CreateGoal]);
         assert_eq!(p.planner, Profiles::builtin().planner);
 
@@ -426,6 +430,14 @@ mod tests {
         .unwrap();
         let err = Profiles::load(tmp.path()).unwrap_err().to_string();
         assert!(err.contains("chat 不能用 create_task"), "{err}");
+
+        std::fs::write(
+            &path,
+            "name = \"chat\"\nmemory = \"om\"\nmax_turns = 0\ntools = []\nrole_prompt = \"x\"\n",
+        )
+        .unwrap();
+        let err = Profiles::load(tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("max_turns 至少要是 1"), "{err}");
 
         std::fs::write(&path, "name = \"chat\"\ntools = [\"fly\"]\n").unwrap();
         assert!(Profiles::load(tmp.path()).is_err());

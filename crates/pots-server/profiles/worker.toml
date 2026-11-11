@@ -3,7 +3,6 @@
 # 要覆寫時，把整份複製到資料目錄的 profiles/worker.toml 再修改。
 name = "worker"
 memory = "stateless"
-max_turns = 60
 # 程式碼的唯讀工具（list_files、read_file、grep、git_log、git_diff）一律都有。
 tools = ["edit_file", "run", "open_pr", "wait_for", "post_to_team", "read_team", "report_progress", "complete_task", "fail_task", "escalate", "write_artifact", "run_subagent", "request_approval", "ask_user"]
 artifact_kinds = ["Report"]

@@ -91,7 +91,8 @@ pub struct RunConfig {
     pub instructions: Option<String>,
     pub tools: Vec<Arc<dyn Tool>>,
     pub hook: Arc<dyn Hook>,
-    pub max_turns: usize,
+    /// 最多跑幾輪模型；`None` 不限制，只靠模型停止呼叫工具、hook 或取消結束。
+    pub max_turns: Option<usize>,
     /// 這次對話的穩定 ID；provider 需要 session affinity 時會變成 header。
     pub session_id: Option<String>,
     /// 推理強度；`None` 不送，用模型預設值。整個 run 不變（Anthropic 要求同一個工具迴圈
@@ -107,7 +108,7 @@ pub enum RunOutcome {
     Stopped,
     /// 工具的 [`ToolDecision::AllowThenStop`] 或 [`ToolDecision::Stop`]。
     Suspended,
-    /// 用完 `max_turns`。
+    /// 用完 `max_turns`（只有設了上限才會發生）。
     MaxTurns,
 }
 
@@ -140,7 +141,8 @@ pub const CANCELLED_OUTPUT: &str = "未完成：執行已取消";
 ///    不執行，各自得到 [`SKIPPED_AFTER_STOP`] 結果（Responses 要求每個呼叫都有結果），
 ///    然後以 [`RunOutcome::Suspended`] 結束。
 ///
-/// 跑完 `max_turns` 輪仍在呼叫工具就回 [`RunOutcome::MaxTurns`]。
+/// `max_turns` 是 `Some(n)` 時，跑完 n 輪仍在呼叫工具就回 [`RunOutcome::MaxTurns`]；
+/// `None` 不限制輪數。
 ///
 /// 取消在每個 await 點都會生效，回 [`LlmError::Cancelled`]；已經透過 [`AgentEvent::Item`]
 /// 送出的項目仍然有效。工具階段被取消時，還沒有結果的工具呼叫會先補上
@@ -164,7 +166,8 @@ pub async fn run(
         events,
     };
 
-    for turn in 0..config.max_turns {
+    let mut turn = 0;
+    while config.max_turns.is_none_or(|max| turn < max) {
         if !cancellable(&cancel, config.hook.before_turn(turn)).await? {
             return Ok(state.finish(RunOutcome::Stopped));
         }
@@ -200,6 +203,7 @@ pub async fn run(
         if run_tools(config, &tools, &calls, &mut state, &cancel).await? {
             return Ok(state.finish(RunOutcome::Suspended));
         }
+        turn += 1;
     }
     Ok(state.finish(RunOutcome::MaxTurns))
 }

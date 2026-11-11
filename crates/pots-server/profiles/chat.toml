@@ -3,7 +3,6 @@
 name = "chat"
 # om：歷史由 Observational Memory 組成；stateless：每次 run 從狀態重建。
 memory = "om"
-max_turns = 8
 # 唯讀基礎集（get_status、list_goals、read_artifact）一律都有，這裡只列額外授權的工具。
 tools = ["create_goal", "steer_goal", "cancel_goal", "archive_goal", "quick_fix", "write_artifact", "artifact_history", "restore_artifact", "archive_artifact", "schedule", "create_listener", "list_automations", "update_schedule", "delete_schedule", "update_listener", "delete_listener", "run_subagent", "set_workdir", "propose_user_md_edit", "propose_project_note", "ask_user"]
 # write_artifact、restore_artifact、archive_artifact 可以動的種類。
