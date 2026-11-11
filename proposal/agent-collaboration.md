@@ -72,9 +72,9 @@ Gate 實作 pots-llm 的 `Hook`（`before_turn`、`before_tool` 回 `ToolDecisio
 
 | Profile | 記憶 | 唯讀基礎集之外的工具 | 可開 |
 | --- | --- | --- | --- |
-| chat | OM（project 對話） | `create_goal` 、`steer_goal` 、 `cancel_goal` 、 `archive_goal` 、`quick_fix` 、 `write_artifact` （Spec、Report）、 `artifact_history` 、 `restore_artifact` 、 `archive_artifact` （要核准）、 `propose_user_md_edit` 、 `propose_project_note` 、 `schedule` 、`create_listener` 、 `list_automations` 、 `update_schedule` 、 `update_listener` 、 `delete_schedule` 、 `delete_listener` （刪除要核准） | subagent |
-| planner | 無狀態（讀 Brief、 Ledger、任務樹） | `create_task` 、`cancel_task` 、 `post_to_team` 、 `request_approval` 、 `post_milestone` 、`escalate` 、 `complete_goal` 、`write_artifact` （Ledger）、 `propose_project_note` 、`schedule` | subagent、 team 任務 |
-| worker | 無狀態（讀任務 thread） | `edit_file` 、`run` 、`open_pr` 、 `wait_for` 、`post_to_team` 、 `report_progress` 、 `complete_task` 、`fail_task` 、 `escalate` 、`write_artifact` （Report） | 唯讀 subagent |
+| chat | OM（project 對話） | `create_goal` 、`steer_goal` 、 `cancel_goal` 、 `archive_goal` 、`quick_fix` 、 `write_artifact` （Spec、Report）、 `artifact_history` 、 `restore_artifact` 、 `archive_artifact` （要核准）、 `propose_user_md_edit` 、 `propose_project_note` 、 `ask_user` 、 `schedule` 、`create_listener` 、 `list_automations` 、 `update_schedule` 、 `update_listener` 、 `delete_schedule` 、 `delete_listener` （刪除要核准） | subagent |
+| planner | 無狀態（讀 Brief、 Ledger、任務樹） | `create_task` 、`cancel_task` 、 `post_to_team` 、 `request_approval` 、 `post_milestone` 、`escalate` 、 `complete_goal` 、`write_artifact` （Ledger）、 `propose_project_note` 、 `ask_user` 、`schedule` | subagent、 team 任務 |
+| worker | 無狀態（讀任務 thread） | `edit_file` 、`run` 、`open_pr` 、 `wait_for` 、`post_to_team` 、 `report_progress` 、 `complete_task` 、`fail_task` 、 `escalate` 、`write_artifact` （Report）、 `ask_user` | 唯讀 subagent |
 | operator | 無狀態（讀任務 thread） | worker 的工具，加上 `screen_observe` 、`ui_act` 、 `wait_ui` 、`app_open` 、`app_quit` 、 `node_run` 、`node_file_get` 、`node_file_put` 、 `gui_checkpoint` ；見[託管電腦](computer-nodes.md#能力與工具) | 不可 |
 | global | OM（全域對話） | `create_goal` （任一 project）、 `cancel_goal` （任一 project）、 `archive_goal` 、 `pause_automations` 、 `resume_automations` 、 `schedule` （全域） | subagent |
 | explorer | 無狀態 | 無 | 不可 |
