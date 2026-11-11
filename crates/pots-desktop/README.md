@@ -20,11 +20,12 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 - 資料目錄預設是系統的應用程式資料目錄下的 `pots`（macOS：`~/Library/Application Support/pots`），可用 `POTS_DATA_DIR` 或 `--data-dir` 覆寫。
 - app 讀資料目錄的 `server.json` 找服務；連不上就用 `--serve` 啟動自己當子行程（獨立的 process group），日誌寫到資料目錄的 `server.log`。關掉視窗後服務繼續跑，用 `kill` 或 ctrl-c 結束；目前還沒有系統匣或選單列。
 - 常駐的服務是舊版（協定版本不同，或執行檔在服務啟動後被重新編譯、更新過）時，app 會讓它正常結束再啟動新的，所以重新編譯後直接開 app 就好。
-- 第一次使用：Inbox 會出現「設定模型 provider」，按「開啟設定」（或左下角「設定」）打開設定視窗，在「模型 Provider」選一個：
+- 第一次使用：Inbox 會出現「設定模型 provider」，按「開啟設定」（或左下角「設定」）打開設定視窗，在「模型 Provider」登入 ChatGPT，或在清單下面的「新增 provider」選一種（每一格說明適合接哪些服務），那一區會換成表單：
   - **ChatGPT 方案**：按「登入」開瀏覽器授權，再「設為使用中」。模型留空就用帳號清單的第一個。
-  - **OpenAI 相容 API**：base URL 到 `/v1` 為止（OpenAI、OpenRouter、Ollama 的 `http://localhost:11434/v1` 等），本機服務可以不填 key。
+  - **OpenAI 相容 API**：base URL 到 `/v1` 為止；「快速填入」可以直接帶入 OpenAI、OpenRouter、Ollama（`http://localhost:11434/v1`）的 base URL 與名稱，本機服務可以不填 key。
   - **Anthropic 相容 API**：base URL 例如 `https://api.anthropic.com`，需要 key。
-  「測試連線」會列出可用的模型，用下拉選單搜尋後選一個填入模型欄。API key 只送給本機服務、存在資料目錄，畫面只顯示末四碼。
+  - **OpenCode Zen／Go**：內建模型目錄，填 API key 後直接從清單挑模型；base URL 與預設 header 收在「進階設定」。
+  名稱與 base URL 已經預填，游標在 API key。模型欄旁邊的「測試連線」會列出可用的模型，用下面的下拉選單搜尋後選一個；改了 base URL 或 key，舊的結果會收掉。還沒有使用中的 provider 時按鈕是「儲存並設為使用中」，這時沒選模型不能儲存。API key 只送給本機服務、存在資料目錄，畫面只顯示末四碼（輸入時可以按眼睛圖示檢查）。
 - 左欄「新增專案」建立 project，之後就能在頻道對話。M9 的 onboarding 精靈會一併指定工作資料夾：GitHub repo、本機 git repo 的絕對路徑，或「稍後再設定」；沒設定時頻道會提示，自動化分頁也能改。斷線時自動重連，重連後補上錯過的事件。
 
 ### Live 模式目前有的
@@ -38,7 +39,7 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | 記憶 | 頻道的「記憶」分頁：Observer 整理出的觀察與「目前在做什麼」，可以釘選、修正（Enter 儲存）、刪除；整理失敗時顯示原因 |
 | Goal 與任務 | agent 開 Goal 時回覆下面附 Goal 卡片（狀態、任務數、Planner 的最後一句話；快速修改的 Goal 標「快速修改」），Planner 的里程碑是對話裡的卡片。右欄 Goal 面板：任務依狀態分組，每列是現在怎樣了（進行中是 worker 最後一句進度、需要你的原因、完成的結果、失敗的次數與錯誤）與執行者、分支、PR（點了用系統瀏覽器開）；Brief 全文、Ledger；Team 分頁是 Planner 與 worker 的發現、問題、決定、阻礙與交接（新的在上面，唯讀）。任務 thread 的「取消任務」會送到服務；「留言給 Planner」與直接對 worker 說話還沒接上 |
 | Artifacts | 頻道「Artifacts」分頁與右欄編輯器：修改先是草稿（「未儲存」），按「儲存」帶著編輯開始時的版本送出；期間 agent 改過時服務以 `##` 區段合併，同一段兩邊都改過會拒絕並保留草稿。沒有草稿時，agent 的修改直接顯示。「版本紀錄」列出每一版的作者、時間與 diff，可以還原。改 Goal 的 Brief 會叫醒 Planner |
-| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；API provider 可以編輯每次請求的額外 header，OpenCode Zen／Go 有內建模型目錄與預設 header；「角色」：對話 agent、總管、Planner、內建 worker、Explorer 與 Reviewer subagent 各自的 provider、模型與 thinking（模型預設／關閉／低／中／高），沒設定的跟使用中的 provider 相同；「編輯」在卡片裡展開表單，選了特定 provider 才能填模型（內建目錄直接列出，其他 provider 用已存的設定向服務列出，可以搜尋），儲存送 `SetRoleModel`。thinking 依 provider 轉成 OpenAI 的 reasoning effort 或 Anthropic 的 thinking，模型不支援時改回「模型預設」；Claude Code worker 用「Worker」設定的模型，不看這裡；「記憶」：整理記憶用的 provider 與模型（預設跟對話相同）；「GitHub」：fine-grained token（只顯示末四碼）、API base URL（改了要重新輸入 token）、webhook secret、測試連線、來源狀態；「通知」：桌面通知與靜音時段；「USER.md」：跨 project 的使用者偏好（直接編輯，agent 只能提案）；「Worker」：後端（內建 worker／Claude Code）、執行環境（容器／本機，本機沒有沙箱）、容器執行檔與 image（`docker build -t pots-worker:latest docker/worker`）、Claude Code 模型、同時執行的 worker 數，以及登入 Claude Code 的指令（可複製；你在終端機自己執行 `/login`，Pots 不碰憑證）；「關於」：版本與實例資訊 |
+| 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；API provider 可以在「進階設定」編輯每次請求的額外 header，OpenCode Zen／Go 有內建模型目錄與預設 header；「角色」：對話 agent、總管、Planner、內建 worker、Explorer 與 Reviewer subagent 各自的 provider、模型與 thinking（模型預設／關閉／低／中／高），沒設定的跟使用中的 provider 相同；「編輯」在卡片裡展開表單，選了特定 provider 才能填模型（內建目錄直接列出，其他 provider 用已存的設定向服務列出，可以搜尋），儲存送 `SetRoleModel`。thinking 依 provider 轉成 OpenAI 的 reasoning effort 或 Anthropic 的 thinking，模型不支援時改回「模型預設」；Claude Code worker 用「Worker」設定的模型，不看這裡；「記憶」：整理記憶用的 provider 與模型（預設跟對話相同）；「GitHub」：fine-grained token（只顯示末四碼）、API base URL（改了要重新輸入 token）、webhook secret、測試連線、來源狀態；「通知」：桌面通知與靜音時段；「USER.md」：跨 project 的使用者偏好（直接編輯，agent 只能提案）；「Worker」：後端（內建 worker／Claude Code）、執行環境（容器／本機，本機沒有沙箱）、容器執行檔與 image（`docker build -t pots-worker:latest docker/worker`）、Claude Code 模型、同時執行的 worker 數，以及登入 Claude Code 的指令（可複製；你在終端機自己執行 `/login`，Pots 不碰憑證）；「關於」：版本與實例資訊 |
 | 自動化 | 頻道「自動化」分頁：監看的 repo（編輯後 Enter 儲存；只影響外部事件，工作資料夾在同一頁上方或 onboarding 設定）、核准後 merge 的方式（squash／merge commit／rebase）、暫停／恢復這個 project 的自動化、這個 project 的排程與 listener。左欄「排程」「Listener」進實例的自動化頁：「全部暫停」與暫停橫幅的「立即恢復」、排程的啟用開關與刪除、listener 的啟用／停用／刪除、agent 提案的 listener 要在核准卡片或 Inbox 核准才生效、「新增 listener」表單（事件種類、label／author／branch／conclusion 條件、開 Goal／快速修正／通知對話、每小時上限）、外部來源的健康狀態。listener 開的 Goal 在對話裡是 Goal 卡片；排程與 listener 送給對話 agent 的通知是對話裡的一則事件。等待中的任務在 Goal 面板顯示在等什麼與逾時時間 |
 | 用量 | 左欄「用量」：目前實例所有 project 的 `CostReport`（24 小時／7 天／30 天）。總 token、run 數、估計金額（單價估計與 CLI 回報分開）、平均每天；訂閱／API／CLI 與主要工作／記憶整理的比例；依 project、Goal、模型、agent 分組。「更新單價」從 models.dev 重抓單價後重新要報表。沒連上服務時用假資料 |
 | 其他 | 總管在 live 模式是空的（M6）；「改時間」「編輯條件」還沒接上 |

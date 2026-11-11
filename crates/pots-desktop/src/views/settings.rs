@@ -5,6 +5,10 @@
 //! Anthropic 相容的 API。對話 agent 用「使用中」的那一個。API key 只送給服務、存在
 //! 實例的資料目錄，畫面上只看得到末四碼。
 //!
+//! 新增分兩步：先在清單下面的「新增 provider」選種類（每一格說明適合接哪些服務），
+//! 那一區再換成表單。表單依填寫的順序排，「測試連線」與它列出的模型跟模型欄放在一起；
+//! 內建目錄的 provider 直接從清單挑模型；額外 headers 收在「進階設定」。
+//!
 //! 「記憶」類別：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。
 //!
 //! 「角色」在 `roles.rs`，「GitHub」在 `automation_forms.rs`，「Worker」在 `worker_settings.rs`，「通知」與「USER.md」在
@@ -15,12 +19,15 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::select::Select;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 
 use super::widgets::{icon, link_button, primary_button, secondary_button, tag};
-use crate::app::{MemoryModelEditor, PotsApp, ProviderEditor, ProviderTest, SettingsTab};
+use crate::app::{
+    MemoryModelEditor, PROVIDER_SHORTCUTS, PotsApp, ProviderEditor, ProviderTest, SettingsTab,
+    saves_as_active,
+};
 use crate::model::*;
 use crate::theme;
 
@@ -71,7 +78,45 @@ pub(super) fn card() -> Div {
         .bg(theme::white())
 }
 
-fn auth_status(auth: &ModelAuthView) -> (String, gpui_kit::Hsla) {
+/// 表單裡的一行結果（測試成功、錯誤）：圖示加文字，長訊息會換行。
+fn status_line(glyph: IconName, color: Hsla, text: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(6.))
+        .text_size(px(13.))
+        .text_color(color)
+        .child(div().pt(px(3.)).child(icon(glyph, 14., color)))
+        .child(div().flex_1().min_w_0().child(text.into()))
+}
+
+/// 可以新增的種類與各自的元素 ID，最通用的排前面。
+const ADDABLE_KINDS: [(ProviderKind, &str); 5] = [
+    (ProviderKind::OpenAiCompatible, "add-openai"),
+    (ProviderKind::OpenAiResponses, "add-openai-responses"),
+    (ProviderKind::AnthropicCompatible, "add-anthropic"),
+    (ProviderKind::OpenCodeZen, "add-opencode-zen"),
+    (ProviderKind::OpenCodeGo, "add-opencode-go"),
+];
+
+/// 「新增 provider」裡每一種的一行說明：適合接哪些服務。
+fn kind_blurb(kind: ProviderKind) -> String {
+    if let Some(preset) = kind.preset() {
+        return format!(
+            "內建 {} 個模型的目錄，填 API key 就能挑模型",
+            preset.models.len()
+        );
+    }
+    match kind {
+        ProviderKind::OpenAiCompatible => "OpenAI、OpenRouter、Ollama 等多數服務",
+        ProviderKind::OpenAiResponses => "OpenAI 平台的 Responses API，工具與推理可以並用",
+        ProviderKind::AnthropicCompatible => "Claude 的 Messages API，或相容的服務",
+        _ => "",
+    }
+    .to_string()
+}
+
+fn auth_status(auth: &ModelAuthView) -> (String, Hsla) {
     match auth {
         ModelAuthView::SignedOut => ("尚未登入".into(), theme::text_muted()),
         ModelAuthView::Pending { .. } => ("等你在瀏覽器完成登入".into(), theme::warn_text()),
@@ -299,64 +344,7 @@ impl PotsApp {
             Some(editor) if editor.id.is_none() => {
                 list = list.child(self.render_provider_editor(editor, cx));
             }
-            _ => {
-                list = list.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(8.))
-                        .pt(px(4.))
-                        .child(
-                            secondary_button("add-openai", "新增 OpenAI 相容 API").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.edit_provider(
-                                        None,
-                                        ProviderKind::OpenAiCompatible,
-                                        window,
-                                        cx,
-                                    )
-                                }),
-                            ),
-                        )
-                        .child(
-                            secondary_button("add-openai-responses", "新增 OpenAI Responses API")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.edit_provider(
-                                        None,
-                                        ProviderKind::OpenAiResponses,
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            secondary_button("add-anthropic", "新增 Anthropic 相容 API").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.edit_provider(
-                                        None,
-                                        ProviderKind::AnthropicCompatible,
-                                        window,
-                                        cx,
-                                    )
-                                }),
-                            ),
-                        )
-                        .child(
-                            secondary_button("add-opencode-zen", "新增 OpenCode Zen").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.edit_provider(None, ProviderKind::OpenCodeZen, window, cx)
-                                }),
-                            ),
-                        )
-                        .child(
-                            secondary_button("add-opencode-go", "新增 OpenCode Go").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.edit_provider(None, ProviderKind::OpenCodeGo, window, cx)
-                                }),
-                            ),
-                        ),
-                );
-            }
+            _ => list = list.child(self.render_provider_kind_picker(cx)),
         }
 
         list
@@ -759,18 +747,79 @@ impl PotsApp {
             .child(actions)
     }
 
+    /// 新增 provider 的第一步：選種類。每一格說明它適合接哪些服務。
+    fn render_provider_kind_picker(&self, cx: &mut Context<Self>) -> Div {
+        let mut grid = div().grid().grid_cols(2).gap(px(8.));
+        for (kind, id) in ADDABLE_KINDS {
+            grid = grid.child(
+                div()
+                    .id(id)
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(14.))
+                    .py(px(12.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::white())
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(theme::accent()).bg(theme::accent_soft()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(kind.label()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme::text_muted())
+                                    .child(kind_blurb(kind)),
+                            ),
+                    )
+                    .child(icon(IconName::Plus, 16., theme::text_muted()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.edit_provider(None, kind, window, cx)
+                    })),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .pt(px(8.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("新增 provider"),
+            )
+            .child(grid)
+    }
+
+    /// 表單依填寫的順序排：名稱 → 連到哪裡（Base URL、API key）→ 模型（旁邊就是「測試連線」
+    /// 與它列出的清單）→ 很少用到的進階設定。
     fn render_provider_editor(
         &self,
         editor: &ProviderEditor,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let kind = editor.kind;
+        let api = kind != ProviderKind::ChatGpt;
         let title = match (editor.id, kind) {
             (_, ProviderKind::ChatGpt) => "ChatGPT 方案的模型".to_string(),
             (None, _) => format!("新增 {}", kind.label()),
             (Some(_), _) => format!("編輯 {}", kind.label()),
         };
-        let input = |state| Input::new(state).into_any_element();
 
         let mut form = card().bg(theme::subtle_bg()).child(
             div()
@@ -778,46 +827,281 @@ impl PotsApp {
                 .font_weight(FontWeight::BOLD)
                 .child(title),
         );
-        if kind != ProviderKind::ChatGpt {
-            let base_hint = match kind {
-                ProviderKind::OpenAiCompatible => {
-                    "到 /v1 為止，例如 https://api.openai.com/v1、https://openrouter.ai/api/v1、http://localhost:11434/v1"
-                }
-                ProviderKind::OpenAiResponses => {
-                    "到 /v1 為止，例如 https://api.openai.com/v1；Pots 會呼叫 /responses，工具與推理可以並用"
-                }
-                ProviderKind::OpenCodeZen | ProviderKind::OpenCodeGo => {
-                    "OpenCode 的 API 根目錄；Pots 會依模型自動選 Anthropic／OpenAI 路徑"
-                }
-                _ => "例如 https://api.anthropic.com；Pots 會呼叫 /v1/messages",
-            };
-            form = form
-                .child(field("名稱", None, input(&editor.name)))
-                .child(field("Base URL", Some(base_hint), input(&editor.base_url)))
-                .child(field("API key", None, input(&editor.api_key)));
+        if api {
+            form = form.child(field(
+                "名稱",
+                None,
+                Input::new(&editor.name).into_any_element(),
+            ));
+            // 內建目錄的 base URL 很少要改，收在進階設定。
+            if kind.preset().is_none() {
+                form = form.child(self.render_base_url_field(editor, cx));
+            }
+            form = form.child(field(
+                "API key",
+                None,
+                Input::new(&editor.api_key).mask_toggle().into_any_element(),
+            ));
         }
-        form = form.child(field("模型", None, input(&editor.model)));
+        form = form.child(self.render_model_field(editor, cx));
+        if api {
+            form = form.child(self.render_provider_advanced(editor, cx));
+        }
+        if let Some(error) = &editor.error {
+            form = form.child(status_line(
+                IconName::CircleAlert,
+                theme::danger(),
+                error.clone(),
+            ));
+        }
 
-        if kind != ProviderKind::ChatGpt {
-            let mut headers = div()
+        // 還沒有使用中的 provider 時，服務會把新增的這個設為使用中。
+        let activates =
+            api && editor.id.is_none() && saves_as_active(None, &self.current_instance().providers);
+        let save = if editor.saving {
+            "儲存中…"
+        } else if activates {
+            "儲存並設為使用中"
+        } else {
+            "儲存"
+        };
+        form.child(
+            div()
                 .flex()
-                .flex_col()
-                .gap(px(6.))
+                .items_center()
+                .gap(px(8.))
                 .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("額外 headers"),
+                    primary_button("provider-save", save)
+                        .on_click(cx.listener(|this, _, _, cx| this.save_provider(cx))),
                 )
                 .child(
+                    link_button("provider-cancel", "取消")
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_provider_edit(cx))),
+                ),
+        )
+    }
+
+    /// Base URL；新增 OpenAI 相容 API 時附上常見服務的快速填入。
+    fn render_base_url_field(&self, editor: &ProviderEditor, cx: &mut Context<Self>) -> Div {
+        let kind = editor.kind;
+        let shortcuts = editor.id.is_none() && kind == ProviderKind::OpenAiCompatible;
+        let hint = match kind {
+            ProviderKind::OpenAiCompatible if shortcuts => {
+                "到 /v1 為止；其他相容的服務直接貼上它的 base URL"
+            }
+            ProviderKind::OpenAiCompatible => {
+                "到 /v1 為止，例如 https://api.openai.com/v1、https://openrouter.ai/api/v1、http://localhost:11434/v1"
+            }
+            ProviderKind::OpenAiResponses => {
+                "到 /v1 為止，例如 https://api.openai.com/v1；Pots 會呼叫 /responses，工具與推理可以並用"
+            }
+            ProviderKind::OpenCodeZen | ProviderKind::OpenCodeGo => {
+                "OpenCode 的 API 根目錄；Pots 會依模型自動選 Anthropic／OpenAI 路徑"
+            }
+            _ => "例如 https://api.anthropic.com；Pots 會呼叫 /v1/messages",
+        };
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(Input::new(&editor.base_url));
+        if shortcuts {
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme::text_muted())
+                            .child("快速填入"),
+                    )
+                    .children(PROVIDER_SHORTCUTS.iter().enumerate().map(|(i, shortcut)| {
+                        div()
+                            .id(SharedString::from(format!("provider-shortcut-{i}")))
+                            .px(px(10.))
+                            .py(px(2.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme::border_strong())
+                            .bg(theme::white())
+                            .text_size(px(12.))
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(theme::accent()).bg(theme::accent_soft()))
+                            .child(if shortcut.local {
+                                format!("{}（本機）", shortcut.name)
+                            } else {
+                                shortcut.name.to_string()
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.apply_provider_shortcut(i, window, cx)
+                            }))
+                    })),
+            );
+        }
+        field("Base URL", Some(hint), body.into_any_element())
+    }
+
+    /// 模型：內建目錄的直接從清單挑；其他的填模型 ID，或「測試連線」後從服務回報的清單挑。
+    /// 測試的按鈕、結果與清單都跟模型欄放在一起。
+    fn render_model_field(&self, editor: &ProviderEditor, cx: &mut Context<Self>) -> Div {
+        let kind = editor.kind;
+        let picker = |no_match: &'static str| {
+            Select::new(&editor.model_picker)
+                .id("provider-model-picker")
+                .placeholder("從清單選一個模型")
+                .accessibility_label("模型")
+                .search_placeholder("搜尋模型 ID 或名稱")
+                .menu_max_h(px(280.))
+                .empty(move |_, _| {
                     div()
-                        .text_size(px(12.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .text_size(px(13.))
                         .text_color(theme::text_muted())
-                        .child("每次請求都會送；值不是秘密，API key 請填在上面。"),
-                );
-            for (i, row) in editor.headers.iter().enumerate() {
-                let index = i;
-                headers = headers.child(
+                        .child(no_match)
+                })
+        };
+        if let Some(preset) = kind.preset() {
+            let hint = format!(
+                "{} 的內建清單，{} 個模型，可以搜尋",
+                preset.label,
+                preset.models.len()
+            );
+            return field(
+                "模型",
+                Some(&hint),
+                picker("沒有符合的模型").into_any_element(),
+            );
+        }
+        if kind == ProviderKind::ChatGpt {
+            return field("模型", None, Input::new(&editor.model).into_any_element());
+        }
+
+        let running = matches!(editor.test, ProviderTest::Running(_));
+        let body = div().flex().flex_col().gap(px(8.)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().flex_1().min_w_0().child(Input::new(&editor.model)))
+                .child(
+                    secondary_button(
+                        "provider-test",
+                        if running {
+                            "測試中…"
+                        } else {
+                            "測試連線"
+                        },
+                    )
+                    // 和旁邊的輸入框一樣高。
+                    .py(px(4.))
+                    .on_click(cx.listener(|this, _, _, cx| this.test_provider(cx))),
+                ),
+        );
+        let body = match &editor.test {
+            ProviderTest::Idle => body.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::text_muted())
+                    .child("不知道模型 ID？按「測試連線」，從服務回報的清單挑。"),
+            ),
+            ProviderTest::Running(_) => body.child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(theme::text_muted())
+                    .child("正在向服務要模型清單…"),
+            ),
+            ProviderTest::Err(message) => body.child(status_line(
+                IconName::CircleAlert,
+                theme::danger(),
+                message.clone(),
+            )),
+            ProviderTest::Ok(models) if models.is_empty() => body.child(status_line(
+                IconName::CircleCheck,
+                theme::ok(),
+                "連線成功，但服務沒有回報模型清單，直接填模型 ID。",
+            )),
+            ProviderTest::Ok(models) => body
+                .child(status_line(
+                    IconName::CircleCheck,
+                    theme::ok(),
+                    format!(
+                        "連線成功，{} 個模型：從清單挑（可以搜尋），或直接填模型 ID",
+                        models.len()
+                    ),
+                ))
+                .child(picker("沒有符合的模型，可以直接在上面填 ID")),
+        };
+        field("模型", None, body.into_any_element())
+    }
+
+    /// 很少用到的設定預設收著：額外 headers；內建目錄的 provider 還有 Base URL。
+    fn render_provider_advanced(&self, editor: &ProviderEditor, cx: &mut Context<Self>) -> Div {
+        let preset = editor.kind.preset().is_some();
+        let mut summary = if preset {
+            "Base URL、額外 headers".to_string()
+        } else {
+            "額外 headers".to_string()
+        };
+        if !editor.headers.is_empty() {
+            summary.push_str(&format!("（{}）", editor.headers.len()));
+        }
+        let toggle = div()
+            .id("provider-advanced")
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .text_size(px(13.))
+            .text_color(theme::text_muted())
+            .hover(|s| s.text_color(theme::text()))
+            .child(icon(
+                if editor.advanced_open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                },
+                14.,
+                theme::text_muted(),
+            ))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("進階設定"))
+            .child(summary)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_provider_advanced(cx)));
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().flex().child(toggle));
+        if !editor.advanced_open {
+            return section;
+        }
+        if preset {
+            section = section.child(self.render_base_url_field(editor, cx));
+        }
+
+        let mut headers = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("額外 headers"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::text_muted())
+                    .child("每次請求都會送；值不是秘密，API key 請填在上面。"),
+            );
+        for (i, row) in editor.headers.iter().enumerate() {
+            let index = i;
+            headers =
+                headers.child(
                     div()
                         .flex()
                         .items_center()
@@ -835,131 +1119,13 @@ impl PotsApp {
                             )),
                         ),
                 );
-            }
-            headers = headers.child(
+        }
+        headers =
+            headers.child(div().flex().child(
                 secondary_button("provider-header-add", "新增 header").on_click(
                     cx.listener(|this, _, window, cx| this.add_provider_header(window, cx)),
                 ),
-            );
-            form = form.child(headers);
-        }
-
-        match &editor.test {
-            ProviderTest::Idle => {}
-            ProviderTest::Running(_) => {
-                form = form.child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme::text_muted())
-                        .child("測試中…"),
-                );
-            }
-            ProviderTest::Err(message) => {
-                form = form.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(13.))
-                        .text_color(theme::danger())
-                        .child(icon(IconName::CircleAlert, 14., theme::danger()))
-                        .child(message.clone()),
-                );
-            }
-            ProviderTest::Ok(models) if models.is_empty() => {
-                form = form.child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme::text_muted())
-                        .child("沒有回報任何模型，直接在上面填模型 ID。"),
-                );
-            }
-            ProviderTest::Ok(models) => {
-                form = form.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .text_size(px(13.))
-                                .text_color(theme::ok())
-                                .child(icon(IconName::CircleCheck, 14., theme::ok()))
-                                .child(if kind.preset().is_some() {
-                                    format!("內建清單，{} 個模型，可以搜尋", models.len())
-                                } else {
-                                    format!("連線成功，{} 個模型，可以搜尋", models.len())
-                                }),
-                        )
-                        .child(
-                            Select::new(&editor.model_picker)
-                                .id("provider-model-picker")
-                                .placeholder("從清單選一個模型")
-                                .accessibility_label("模型")
-                                .search_placeholder("搜尋模型 ID 或名稱")
-                                .menu_max_h(px(280.))
-                                .empty(|_, _| {
-                                    div()
-                                        .px(px(10.))
-                                        .py(px(6.))
-                                        .text_size(px(13.))
-                                        .text_color(theme::text_muted())
-                                        .child("沒有符合的模型，可以直接在上面填 ID")
-                                }),
-                        ),
-                );
-            }
-        }
-
-        if let Some(error) = &editor.error {
-            form = form.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(13.))
-                    .text_color(theme::danger())
-                    .child(icon(IconName::CircleAlert, 14., theme::danger()))
-                    .child(error.clone()),
-            );
-        }
-
-        form.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    primary_button(
-                        "provider-save",
-                        if editor.saving {
-                            "儲存中…"
-                        } else {
-                            "儲存"
-                        },
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.save_provider(cx))),
-                )
-                .when(kind != ProviderKind::ChatGpt, |d| {
-                    d.child(
-                        secondary_button(
-                            "provider-test",
-                            if kind.preset().is_some() {
-                                "列出模型"
-                            } else {
-                                "測試連線"
-                            },
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.test_provider(cx))),
-                    )
-                })
-                .child(
-                    link_button("provider-cancel", "取消")
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_provider_edit(cx))),
-                ),
-        )
+            ));
+        section.child(headers)
     }
 }

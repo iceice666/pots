@@ -364,6 +364,8 @@ pub struct ProviderEditor {
     pub model_picker: Entity<SelectState<SearchableVec<ModelChoice>>>,
     /// 每次請求額外送出的 header；空白列在送出時略過。
     pub headers: Vec<ProviderHeaderRow>,
+    /// 「進階設定」（額外 headers；內建目錄的 provider 還有 Base URL）是否展開。
+    pub advanced_open: bool,
     pub test: ProviderTest,
     /// 已送出 `SaveProvider`、等服務回覆；成功（收到 `Providers`）就收起表單。
     pub saving: bool,
@@ -373,6 +375,98 @@ pub struct ProviderEditor {
     _model_picker_sync: Subscription,
     /// 下拉選單選了模型，填回模型欄。
     _model_input_sync: Subscription,
+    /// Base URL 或 API key 改了，之前的測試結果就不算數。
+    _endpoint_sync: [Subscription; 2],
+}
+
+/// 「OpenAI 相容 API」表單的快速填入：常見服務的名稱與 base URL。
+pub struct ProviderShortcut {
+    pub name: &'static str,
+    pub base_url: &'static str,
+    /// 本機服務，不需要 API key。
+    pub local: bool,
+}
+
+pub const PROVIDER_SHORTCUTS: &[ProviderShortcut] = &[
+    ProviderShortcut {
+        name: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        local: false,
+    },
+    ProviderShortcut {
+        name: "OpenRouter",
+        base_url: "https://openrouter.ai/api/v1",
+        local: false,
+    },
+    ProviderShortcut {
+        name: "Ollama",
+        base_url: "http://localhost:11434/v1",
+        local: true,
+    },
+];
+
+/// 新增時預填的名稱：對應預填 base URL 的那個服務，卡片上才不會和種類標籤重複。
+fn default_provider_name(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::OpenAiCompatible | ProviderKind::OpenAiResponses => "OpenAI",
+        ProviderKind::AnthropicCompatible => "Anthropic",
+        _ => kind.label(),
+    }
+}
+
+/// `name` 是表單自己帶的（預填或快速填入），不是你打的；換服務時可以跟著換。
+fn is_auto_provider_name(kind: ProviderKind, name: &str) -> bool {
+    name.is_empty()
+        || name == default_provider_name(kind)
+        || PROVIDER_SHORTCUTS.iter().any(|s| s.name == name)
+}
+
+/// 儲存後這個 provider 會是使用中的那個：新增時還沒有使用中的（服務會自動設定），
+/// 或正在修改使用中的。
+pub(crate) fn saves_as_active(id: Option<ProviderId>, providers: &ProvidersView) -> bool {
+    match id {
+        None => providers.active.is_none(),
+        Some(id) => providers.active == Some(id),
+    }
+}
+
+/// 送出前就看得出來的問題：直接顯示在表單裡，不用等服務拒絕，也不會存出一個不能用的設定。
+fn draft_problem(draft: &ProviderDraft, providers: &ProvidersView) -> Option<String> {
+    if draft.name.is_empty() {
+        return Some("請填名稱".into());
+    }
+    // ChatGPT 方案的模型留空是「自動」。
+    if draft.kind == ProviderKind::ChatGpt {
+        return None;
+    }
+    // OpenAI 相容的本機服務（例如 Ollama）不需要 key。
+    if draft.id.is_none() && draft.kind.key_required() && draft.api_key.is_none() {
+        return Some(format!("新增 {} 需要 API key", draft.kind.label()));
+    }
+    if draft.model.is_empty() {
+        if draft.kind.preset().is_some() {
+            return Some("請從清單選一個模型".into());
+        }
+        // 沒有模型的 provider 只能給另外指定模型的角色用；對話 agent 用它一定失敗。
+        if saves_as_active(draft.id, providers) {
+            return Some(
+                "這會是使用中的 provider，請先填模型：按「測試連線」可以從清單挑一個".into(),
+            );
+        }
+    }
+    None
+}
+
+/// 內建目錄的模型，轉成下拉選單用的清單。
+pub(crate) fn preset_models(preset: &ProviderPreset) -> Vec<ModelOption> {
+    preset
+        .models
+        .iter()
+        .map(|m| ModelOption {
+            id: m.id.clone(),
+            display_name: m.name.clone(),
+        })
+        .collect()
 }
 
 /// provider 表單裡的一列 header。
@@ -1020,6 +1114,11 @@ impl PotsApp {
                     }
                 }
                 if let Some((request, result)) = applied.provider_test {
+                    // 新增表單在清單最下面：結果與模型清單出現後，連同「儲存」一起留在畫面裡。
+                    let adding = matches!(
+                        &self.provider_editor,
+                        Some(e) if e.id.is_none() && e.test == ProviderTest::Running(request)
+                    );
                     // 「測試連線」與角色表單的模型清單都用 `TestProvider`，依請求編號分。
                     let target = match (&mut self.provider_editor, &mut self.role_model_editor) {
                         (Some(e), _) if e.test == ProviderTest::Running(request) => {
@@ -1039,6 +1138,9 @@ impl PotsApp {
                             }
                             Err(message) => ProviderTest::Err(message),
                         };
+                    }
+                    if adding {
+                        self.settings_scroll.scroll_to_bottom();
                     }
                 }
                 // 建立／設定工作資料夾被拒絕：錯誤留在對話框裡（不要只彈一下就消失的 toast）。
@@ -1547,7 +1649,7 @@ impl PotsApp {
         let (name, base_url, model) = match &existing {
             Some(p) => (p.name.clone(), p.base_url.clone(), p.model.clone()),
             None => (
-                kind.label().to_string(),
+                default_provider_name(kind).to_string(),
                 kind.default_base_url().to_string(),
                 String::new(),
             ),
@@ -1573,11 +1675,17 @@ impl PotsApp {
         } else {
             "貼上 API key"
         };
+        // 內建目錄的 provider 只用下拉選單挑，不顯示模型欄。
         let model_placeholder = match kind {
             ProviderKind::ChatGpt => "留空自動選帳號清單的第一個",
-            _ if kind.preset().is_some() => "按「列出模型」從內建清單挑一個",
-            _ => "例如 gpt-4.1、claude-sonnet-4-5；可先「測試連線」再從清單挑",
+            ProviderKind::AnthropicCompatible => "模型 ID，例如 claude-sonnet-4-5",
+            _ => "模型 ID，例如 gpt-4.1",
         };
+        // 修改時，改過 header 或 base URL 的才直接展開進階設定。
+        let advanced_open = existing.as_ref().is_some_and(|p| match kind.preset() {
+            Some(preset) => p.headers != preset.headers || p.base_url != preset.base_url,
+            None => !p.headers.is_empty(),
+        });
         let headers = match &existing {
             Some(p) => p
                 .headers
@@ -1602,11 +1710,20 @@ impl PotsApp {
                 })
                 .unwrap_or_default(),
         };
-        let model_input = input(model, model_placeholder, false, window, cx);
+        let model_input = input(model.clone(), model_placeholder, false, window, cx);
         // 清單等「測試連線」回來才有；選單裡有搜尋列，按一下才展開。
         let model_picker = cx.new(|cx| {
             SelectState::new(SearchableVec::new(Vec::new()), None, window, cx).searchable(true)
         });
+        // 內建目錄不用問服務，表單一打開就能挑。
+        let test = match kind.preset() {
+            Some(preset) => {
+                let models = preset_models(preset);
+                fill_model_picker(&model_picker, &models, &model, window, cx);
+                ProviderTest::Ok(models)
+            }
+            None => ProviderTest::Idle,
+        };
         // 模型欄改了（例如貼上完整模型 ID），下拉選單的選取也跟著對齊。
         let model_picker_sync = cx.subscribe_in(
             &model_input,
@@ -1635,21 +1752,95 @@ impl PotsApp {
                 }
             },
         );
+        let base_url = input(base_url, kind.default_base_url(), false, window, cx);
+        let api_key = input(String::new(), key_placeholder, true, window, cx);
+        let endpoint_sync = [&base_url, &api_key].map(|input| {
+            cx.subscribe(input, |this, _, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.provider_endpoint_changed(cx);
+                }
+            })
+        });
+        if id.is_none() {
+            // 名稱與 base URL 都預填了，通常只差 API key：游標直接放在那裡，
+            // 並把清單最下面的表單捲進畫面。
+            api_key.update(cx, |s, cx| s.focus(window, cx));
+            self.settings_scroll.scroll_to_bottom();
+        }
         self.provider_editor = Some(ProviderEditor {
             id,
             kind,
             name: input(name, "名稱", false, window, cx),
-            base_url: input(base_url, kind.default_base_url(), false, window, cx),
-            api_key: input(String::new(), key_placeholder, true, window, cx),
+            base_url,
+            api_key,
             model: model_input,
             model_picker,
             headers,
-            test: ProviderTest::Idle,
+            advanced_open,
+            test,
             saving: false,
             error: None,
             _model_picker_sync: model_picker_sync,
             _model_input_sync: model_input_sync,
+            _endpoint_sync: endpoint_sync,
         });
+        cx.notify();
+    }
+
+    /// Base URL 或 API key 改了：之前「測試連線」的結果與模型清單是別的端點的，收掉。
+    /// 內建目錄的清單和端點無關，留著。
+    fn provider_endpoint_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = &mut self.provider_editor else {
+            return;
+        };
+        if editor.kind.preset().is_none() && editor.test != ProviderTest::Idle {
+            editor.test = ProviderTest::Idle;
+            cx.notify();
+        }
+    }
+
+    /// 快速填入第 `index` 個常見服務的 base URL；名稱還是表單自己帶的才跟著換。
+    pub fn apply_provider_shortcut(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(editor), Some(shortcut)) =
+            (&mut self.provider_editor, PROVIDER_SHORTCUTS.get(index))
+        else {
+            return;
+        };
+        editor
+            .base_url
+            .update(cx, |s, cx| s.set_value(shortcut.base_url, window, cx));
+        let name = editor.name.read(cx).value().trim().to_string();
+        if is_auto_provider_name(editor.kind, &name) {
+            editor
+                .name
+                .update(cx, |s, cx| s.set_value(shortcut.name, window, cx));
+        }
+        // `set_value` 不發 `InputEvent`：換了端點，舊的測試結果自己收掉。
+        editor.test = ProviderTest::Idle;
+        editor.error = None;
+        // 本機服務不用 key，下一步是選模型。
+        let next = if shortcut.local {
+            &editor.model
+        } else {
+            &editor.api_key
+        };
+        next.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    pub fn toggle_provider_advanced(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.provider_editor {
+            editor.advanced_open = !editor.advanced_open;
+            // 新增表單在清單最下面：展開的內容跟「儲存」一起留在畫面裡。
+            if editor.advanced_open && editor.id.is_none() {
+                self.settings_scroll.scroll_to_bottom();
+            }
+        }
         cx.notify();
     }
 
@@ -1688,7 +1879,12 @@ impl PotsApp {
         };
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("header 名稱"));
         let value = cx.new(|cx| InputState::new(window, cx).placeholder("header 值"));
+        name.update(cx, |s, cx| s.focus(window, cx));
         editor.headers.push(ProviderHeaderRow { name, value });
+        // 新增表單在清單最下面：多出來的一列把「儲存」推出畫面，跟著捲下去。
+        if editor.id.is_none() {
+            self.settings_scroll.scroll_to_bottom();
+        }
         cx.notify();
     }
 
@@ -1715,6 +1911,8 @@ impl PotsApp {
             cx,
         );
         if let Some(editor) = &mut self.provider_editor {
+            // 之前儲存被擋下的原因（例如沒選模型）通常正要靠這次測試解決，先收掉。
+            editor.error = None;
             editor.test = if sent {
                 ProviderTest::Running(request)
             } else {
@@ -1724,16 +1922,15 @@ impl PotsApp {
     }
 
     pub fn save_provider(&mut self, cx: &mut Context<Self>) {
+        // 等服務回覆的期間再按一次，會多新增一筆。
+        if self.provider_editor.as_ref().is_some_and(|e| e.saving) {
+            return;
+        }
         let Some(draft) = self.provider_draft(cx) else {
             return;
         };
-        if draft.name.is_empty() {
-            self.set_editor_error("請填名稱", cx);
-            return;
-        }
-        // OpenAI 相容的本機服務（例如 Ollama）不需要 key。
-        if draft.id.is_none() && draft.kind.key_required() && draft.api_key.is_none() {
-            self.set_editor_error(&format!("新增 {} 需要 API key", draft.kind.label()), cx);
+        if let Some(problem) = draft_problem(&draft, &self.current_instance().providers) {
+            self.set_editor_error(&problem, cx);
             return;
         }
         // 表單留著等服務回覆：收到 `Providers` 才收起來，被拒絕時把原因顯示在表單裡。
@@ -1755,7 +1952,8 @@ impl PotsApp {
 
     /// 從「測試連線」的模型清單挑一個填進表單。
     pub fn pick_model(&mut self, model: String, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = &self.provider_editor {
+        if let Some(editor) = &mut self.provider_editor {
+            editor.error = None;
             editor
                 .model
                 .update(cx, |s, cx| s.set_value(model.clone(), window, cx));
@@ -2720,7 +2918,106 @@ impl Render for PotsApp {
 
 #[cfg(test)]
 mod tests {
-    use super::save_applied;
+    use super::{
+        PROVIDER_SHORTCUTS, default_provider_name, draft_problem, is_auto_provider_name,
+        save_applied, saves_as_active,
+    };
+    use crate::model::{ProviderDraft, ProviderId, ProviderKind, ProviderView, ProvidersView};
+
+    const API: ProviderId = ProviderId::from_u64(7);
+
+    fn draft(kind: ProviderKind, id: Option<ProviderId>, key: bool, model: &str) -> ProviderDraft {
+        ProviderDraft {
+            id,
+            kind,
+            name: "我的 provider".into(),
+            base_url: kind.default_base_url().into(),
+            model: model.into(),
+            api_key: key.then(|| "sk-test".into()),
+            headers: Vec::new(),
+        }
+    }
+
+    /// 內建的 ChatGPT 加一個 API provider；`active` 是使用中的那個。
+    fn providers(active: Option<ProviderId>) -> ProvidersView {
+        let item = |id, kind: ProviderKind| ProviderView {
+            id,
+            kind,
+            name: kind.label().into(),
+            base_url: kind.default_base_url().into(),
+            model: String::new(),
+            key_hint: None,
+            headers: Vec::new(),
+        };
+        ProvidersView {
+            active,
+            items: vec![
+                item(ProviderId::CHATGPT, ProviderKind::ChatGpt),
+                item(API, ProviderKind::OpenAiCompatible),
+            ],
+            ..ProvidersView::default()
+        }
+    }
+
+    #[test]
+    fn new_provider_becomes_active_only_when_nothing_is() {
+        assert!(saves_as_active(None, &providers(None)));
+        assert!(!saves_as_active(None, &providers(Some(API))));
+        assert!(saves_as_active(Some(API), &providers(Some(API))));
+        assert!(!saves_as_active(
+            Some(API),
+            &providers(Some(ProviderId::CHATGPT))
+        ));
+    }
+
+    #[test]
+    fn draft_problems_are_caught_before_sending() {
+        let chatgpt = providers(Some(ProviderId::CHATGPT));
+        let ok = |d: &ProviderDraft, p: &ProvidersView| draft_problem(d, p).is_none();
+
+        let mut unnamed = draft(ProviderKind::OpenAiCompatible, None, true, "gpt-4.1");
+        unnamed.name.clear();
+        assert_eq!(draft_problem(&unnamed, &chatgpt).unwrap(), "請填名稱");
+
+        // 需要 key 的種類新增時要填；修改時留空是沿用，OpenAI 相容的本機服務不用。
+        let anthropic = ProviderKind::AnthropicCompatible;
+        assert!(!ok(&draft(anthropic, None, false, "claude"), &chatgpt));
+        assert!(ok(&draft(anthropic, Some(API), false, "claude"), &chatgpt));
+        let local = ProviderKind::OpenAiCompatible;
+        assert!(ok(&draft(local, None, false, "llama3"), &chatgpt));
+
+        // 沒有模型：只有會成為使用中的才擋（其他的可以給另外指定模型的角色用）。
+        assert!(ok(&draft(local, None, true, ""), &chatgpt));
+        assert!(!ok(&draft(local, None, true, ""), &providers(None)));
+        assert!(!ok(
+            &draft(local, Some(API), true, ""),
+            &providers(Some(API))
+        ));
+        assert!(ok(&draft(local, Some(API), true, ""), &chatgpt));
+
+        // 內建目錄的一定要選模型；ChatGPT 方案留空是「自動」。
+        let zen = ProviderKind::OpenCodeZen;
+        assert_eq!(
+            draft_problem(&draft(zen, None, true, ""), &chatgpt).unwrap(),
+            "請從清單選一個模型"
+        );
+        let auto = draft(ProviderKind::ChatGpt, Some(ProviderId::CHATGPT), false, "");
+        assert!(ok(&auto, &chatgpt));
+    }
+
+    #[test]
+    fn shortcut_only_replaces_names_the_form_filled_in() {
+        let kind = ProviderKind::OpenAiCompatible;
+        // 預填的名稱對應預填的 base URL，也就是第一個快速填入。
+        assert_eq!(default_provider_name(kind), PROVIDER_SHORTCUTS[0].name);
+        assert_eq!(kind.default_base_url(), PROVIDER_SHORTCUTS[0].base_url);
+        assert!(is_auto_provider_name(kind, ""));
+        assert!(is_auto_provider_name(kind, default_provider_name(kind)));
+        for shortcut in PROVIDER_SHORTCUTS {
+            assert!(is_auto_provider_name(kind, shortcut.name));
+        }
+        assert!(!is_auto_provider_name(kind, "公司的 proxy"));
+    }
 
     const BASE: &str = "# 標題\n\n## 目標\n\n舊\n\n## 範圍\n\n- 一\n";
 

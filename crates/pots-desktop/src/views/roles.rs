@@ -18,7 +18,9 @@ use gpui_kit::{
 
 use super::settings::{card, field};
 use super::widgets::*;
-use crate::app::{ModelChoice, PotsApp, ProviderTest, RoleModelEditor, fill_model_picker};
+use crate::app::{
+    ModelChoice, PotsApp, ProviderTest, RoleModelEditor, fill_model_picker, preset_models,
+};
 use crate::model::*;
 use crate::theme;
 
@@ -175,14 +177,7 @@ impl PotsApp {
             return;
         };
         if let Some(preset) = p.kind.preset() {
-            let models: Vec<ModelOption> = preset
-                .models
-                .iter()
-                .map(|m| ModelOption {
-                    id: m.id.clone(),
-                    display_name: m.name.clone(),
-                })
-                .collect();
+            let models = preset_models(preset);
             let current = editor.model.read(cx).value().trim().to_string();
             fill_model_picker(&editor.model_picker, &models, &current, window, cx);
             editor.models = ProviderTest::Ok(models);

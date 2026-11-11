@@ -28,8 +28,8 @@ mod shots {
     use pots_desktop::members::MemberTarget;
     use pots_desktop::mock;
     use pots_desktop::model::{
-        ArtifactKind, ClientCommand, ExecKind, InboxAction, ModelRole, ProviderId, TaskId,
-        ThinkingLevel, WorkerBackendKind,
+        ArtifactKind, ClientCommand, ExecKind, InboxAction, ModelRole, ProviderId, ProviderKind,
+        TaskId, ThinkingLevel, WorkerBackendKind,
     };
 
     struct Shooter {
@@ -307,7 +307,36 @@ mod shots {
             let id = pots_desktop::sync::model_login_item_id(app.instance);
             app.act(id, InboxAction::OpenSettings, window, cx);
             app.edit_provider(None, ProviderKind::OpenAiCompatible, window, cx);
+            // 快速填入：換 base URL，表單自己帶的名稱跟著換；你打的名稱不動。
+            let value = |app: &PotsApp, cx: &gpui_kit::App| {
+                let editor = app.provider_editor.as_ref().expect("表單已開啟");
+                (
+                    editor.name.read(cx).value().to_string(),
+                    editor.base_url.read(cx).value().to_string(),
+                )
+            };
+            assert_eq!(
+                value(app, cx),
+                ("OpenAI".into(), "https://api.openai.com/v1".into())
+            );
+            app.apply_provider_shortcut(1, window, cx);
+            assert_eq!(
+                value(app, cx),
+                ("OpenRouter".into(), "https://openrouter.ai/api/v1".into())
+            );
+            let name = app.provider_editor.as_ref().unwrap().name.clone();
+            name.update(cx, |state, cx| state.set_value("公司帳號", window, cx));
+            app.apply_provider_shortcut(0, window, cx);
+            assert_eq!(
+                value(app, cx),
+                ("公司帳號".into(), "https://api.openai.com/v1".into())
+            );
+            name.update(cx, |state, cx| state.set_value("OpenAI", window, cx));
+            // 還沒有使用中的 provider：沒選模型就儲存會被表單擋下，不會送出。
+            app.save_provider(cx);
             let editor = app.provider_editor.as_ref().expect("表單已開啟");
+            assert!(!editor.saving);
+            assert!(editor.error.as_ref().is_some_and(|e| e.contains("模型")));
             editor
                 .api_key
                 .update(cx, |state, cx| state.set_value("sk-test-1234", window, cx));
@@ -900,6 +929,21 @@ mod shots {
 
         s.update(|app, _, cx| app.open_settings(SettingsTab::Providers, cx));
         s.shot("10b-settings");
+
+        // 新增內建目錄的 provider：不用測試連線，表單一打開就能從清單挑模型。
+        s.update(|app, window, cx| {
+            app.edit_provider(None, ProviderKind::OpenCodeZen, window, cx);
+            let editor = app.provider_editor.as_ref().expect("表單已開啟");
+            assert!(matches!(
+                &editor.test,
+                pots_desktop::app::ProviderTest::Ok(models) if !models.is_empty()
+            ));
+            assert!(!editor.advanced_open);
+        });
+        s.shot("10b1-settings-add-preset");
+        s.update(|app, _, cx| app.toggle_provider_advanced(cx));
+        s.shot("10b2-settings-add-preset-advanced");
+        s.update(|app, _, cx| app.cancel_provider_edit(cx));
 
         s.update(|app, _, cx| app.open_settings(SettingsTab::About, cx));
         s.shot("10c-settings-about");
