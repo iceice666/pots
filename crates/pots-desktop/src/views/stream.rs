@@ -239,20 +239,25 @@ impl PotsApp {
             item.at.hh_mm()
         };
 
+        // GPUI 的 items_baseline 實際上是頂端對齊；名字、AGENT chip、時間字級不同，
+        // 改成垂直置中並固定行高，三者才會在同一條中線上。
         let header = div()
             .flex()
-            .items_baseline()
+            .items_center()
             .gap(px(8.))
             .child(
                 div()
                     .text_size(px(density.body()))
+                    .line_height(px(20.))
                     .font_weight(FontWeight::BOLD)
                     .child(name),
             )
             .when(is_project_agent, |d| {
                 d.child(
                     div()
+                        .flex_none()
                         .text_size(px(11.))
+                        .line_height(px(16.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::text_muted())
                         .border_1()
@@ -262,7 +267,7 @@ impl PotsApp {
                         .child("AGENT"),
                 )
             })
-            .child(muted(time).text_size(px(12.)))
+            .child(muted(time).text_size(px(12.)).line_height(px(20.)))
             .when(msg.steer, |d| {
                 d.child(tag("改方向", theme::warn_text(), theme::warn_soft()))
             })
