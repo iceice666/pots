@@ -40,6 +40,7 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | Artifacts | 頻道「Artifacts」分頁與右欄編輯器：修改先是草稿（「未儲存」），按「儲存」帶著編輯開始時的版本送出；期間 agent 改過時服務以 `##` 區段合併，同一段兩邊都改過會拒絕並保留草稿。沒有草稿時，agent 的修改直接顯示。「版本紀錄」列出每一版的作者、時間與 diff，可以還原。改 Goal 的 Brief 會叫醒 Planner |
 | 設定 | 左下角打開設定視窗，左邊是類別，Esc 或點背景關閉。「模型 Provider」：新增、編輯、測試連線、刪除、切換使用中，ChatGPT 登入與登出；API provider 可以編輯每次請求的額外 header，OpenCode Zen／Go 有內建模型目錄與預設 header；「角色」：對話 agent、總管、Planner、內建 worker、Explorer 與 Reviewer subagent 各自的 provider、模型與 thinking（模型預設／關閉／低／中／高），沒設定的跟使用中的 provider 相同；「編輯」在卡片裡展開表單，選了特定 provider 才能填模型（內建目錄直接列出，其他 provider 用已存的設定向服務列出，可以搜尋），儲存送 `SetRoleModel`。thinking 依 provider 轉成 OpenAI 的 reasoning effort 或 Anthropic 的 thinking，模型不支援時改回「模型預設」；Claude Code worker 用「Worker」設定的模型，不看這裡；「記憶」：整理記憶用的 provider 與模型（預設跟對話相同）；「GitHub」：fine-grained token（只顯示末四碼）、API base URL（改了要重新輸入 token）、webhook secret、測試連線、來源狀態；「通知」：桌面通知與靜音時段；「USER.md」：跨 project 的使用者偏好（直接編輯，agent 只能提案）；「Worker」：後端（內建 worker／Claude Code）、執行環境（容器／本機，本機沒有沙箱）、容器執行檔與 image（`docker build -t pots-worker:latest docker/worker`）、Claude Code 模型、同時執行的 worker 數，以及登入 Claude Code 的指令（可複製；你在終端機自己執行 `/login`，Pots 不碰憑證）；「關於」：版本與實例資訊 |
 | 自動化 | 頻道「自動化」分頁：監看的 repo（編輯後 Enter 儲存；只影響外部事件，工作資料夾在同一頁上方或 onboarding 設定）、核准後 merge 的方式（squash／merge commit／rebase）、暫停／恢復這個 project 的自動化、這個 project 的排程與 listener。左欄「排程」「Listener」進實例的自動化頁：「全部暫停」與暫停橫幅的「立即恢復」、排程的啟用開關與刪除、listener 的啟用／停用／刪除、agent 提案的 listener 要在核准卡片或 Inbox 核准才生效、「新增 listener」表單（事件種類、label／author／branch／conclusion 條件、開 Goal／快速修正／通知對話、每小時上限）、外部來源的健康狀態。listener 開的 Goal 在對話裡是 Goal 卡片；排程與 listener 送給對話 agent 的通知是對話裡的一則事件。等待中的任務在 Goal 面板顯示在等什麼與逾時時間 |
+| 用量 | 左欄「用量」：目前實例所有 project 的 `CostReport`（24 小時／7 天／30 天）。總 token、run 數、估計金額（單價估計與 CLI 回報分開）、平均每天；訂閱／API／CLI 與主要工作／記憶整理的比例；依 project、Goal、模型、agent 分組。「更新單價」從 models.dev 重抓單價後重新要報表。沒連上服務時用假資料 |
 | 其他 | 總管在 live 模式是空的（M6）；「改時間」「編輯條件」還沒接上 |
 
 ## 已有的畫面（`--mock` 假資料）
@@ -47,7 +48,7 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | 區塊 | 可以做的事 |
 | --- | --- |
 | 實例直列 | 切換「我的筆電」（桌面版）與「家用伺服器」（多設備版）、開全域 Inbox；徽章是待處理數。只連一個實例時不顯示 |
-| 左欄 | 目前實例的 project 列表（待核准數、「需要你」、未讀）、總管、Inbox、排程與 Listener（批次暫停時顯示「已暫停」） |
+| 左欄 | 目前實例的 project 列表（待核准數、「需要你」、未讀）、總管、Inbox、用量、排程與 Listener（批次暫停時顯示「已暫停」） |
 | 頻道 | agent 狀態、預算、停止、「成員」切換；對話流（訊息、工具摘要可展開、事件、Goal／核准／Artifact／「你不在期間」卡片）；輸入框（Enter 送出、Shift+Enter 換行，「排隊」或「改方向」） |
 | 成員列表 | 頻道標題列的人像按鈕（打開時是選取狀態）切換右欄的成員列表，像 Discord 的成員欄：依「工作中」「等待中」「待命」分組（「工作中 — 2」），成員是你、對話 agent、每個進行中 Goal 的 Planner（快速修改沒有）與進行中／等待中／需要你的任務的 worker（已規劃與結束的不列）。每列是頭像與狀態點、名稱與 AGENT／PLANNER／WORKER 標籤、狀態或進度（等待中是原因）、實際用的模型與 thinking（Claude Code worker 是「Claude Code · 模型」）。點 worker 開任務 thread、點 Planner 開那個 Goal 的面板（右欄換成那個內容）、點對話 agent 開設定的「角色」。成員列表開著時換 project 會留著 |
 | Goal 面板 | 任務依狀態分組（進度、需要你、失敗的原因、PR）、最新 Team 貼文、Brief、Team 分頁（含交接對象）；留言給 Planner；Brief 與 Ledger 分頁可以開啟對應的 artifact。dotfiles 的 Goal 是快速修改 |

@@ -15,5 +15,6 @@ mod preferences;
 mod roles;
 mod settings;
 mod stream;
+mod usage;
 mod widgets;
 mod worker_settings;

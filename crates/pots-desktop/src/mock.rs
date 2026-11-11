@@ -1442,6 +1442,140 @@ pub fn store() -> Store {
     }
 }
 
+/// 用量頁的假報表：每個 project 的對話、各 Goal 的 Planner 與 worker，加上記憶整理。
+/// 用量跟著時間範圍（`secs`）放大，切換範圍時看得出差別。
+pub fn cost_report(inst: &InstanceView, secs: i64) -> CostReport {
+    let days = (secs / 86_400).max(1) as u64;
+    // 一天之後的用量遞減，不是單純乘上天數。
+    let scale = |base: u64| base * (1 + (days - 1) * 3 / 5);
+    let mut rows = Vec::new();
+    let row = |project: &ProjectView,
+               goal: Option<&GoalView>,
+               agent: &str,
+               billing: Billing,
+               model: &str,
+               runs: u64,
+               input: u64,
+               output: u64| {
+        let (provider, runtime, category) = match (billing, agent) {
+            (_, "observer" | "reflector") => ("ChatGPT", "builtin", CostCategory::Om),
+            (Billing::Cli, _) => ("Claude Code", "claude_code", CostCategory::Work),
+            (Billing::Api, _) => ("OpenAI", "builtin", CostCategory::Work),
+            _ => ("ChatGPT", "builtin", CostCategory::Work),
+        };
+        let tokens = input + output;
+        // API 有單價；訂閱用量不算金額；CLI 用 Claude Code 回報的費用。
+        let estimated = (billing == Billing::Api)
+            .then_some((input as f64 * 1.25 + output as f64 * 10.0) / 1_000_000.0);
+        let reported = (billing == Billing::Cli)
+            .then_some((input as f64 * 3.0 + output as f64 * 15.0) / 1_000_000.0);
+        CostRow {
+            project: project.id,
+            project_name: project.name.clone(),
+            goal: goal.map(|g| g.id),
+            goal_title: goal.map(|g| g.title.clone()),
+            agent: agent.into(),
+            category,
+            provider: provider.into(),
+            billing,
+            runtime: runtime.into(),
+            model: model.into(),
+            runs,
+            input_tokens: input,
+            output_tokens: output,
+            duration_secs: runs * 95,
+            reported_cost_usd: reported,
+            estimated_cost_usd: estimated,
+            priced_tokens: if billing == Billing::Api { tokens } else { 0 },
+            unpriced_tokens: if billing == Billing::Subscription {
+                tokens
+            } else {
+                0
+            },
+        }
+    };
+    for (i, p) in inst.projects.iter().enumerate() {
+        let k = i as u64 + 1;
+        rows.push(row(
+            p,
+            None,
+            "chat",
+            Billing::Subscription,
+            "gpt-5.1",
+            scale(12 / k + 2),
+            scale(380_000 / k),
+            scale(42_000 / k),
+        ));
+        rows.push(row(
+            p,
+            None,
+            "observer",
+            Billing::Subscription,
+            "gpt-5.1-mini",
+            scale(4),
+            scale(96_000 / k),
+            scale(8_000 / k),
+        ));
+        for (j, g) in p.goals.iter().enumerate() {
+            let m = (j as u64 + 1) * k;
+            rows.push(row(
+                p,
+                Some(g),
+                "planner",
+                Billing::Api,
+                "gpt-5.1",
+                scale(3),
+                scale(260_000 / m),
+                scale(31_000 / m),
+            ));
+            rows.push(row(
+                p,
+                Some(g),
+                "worker",
+                Billing::Cli,
+                "claude-sonnet-4-5",
+                scale(2),
+                scale(1_450_000 / m),
+                scale(88_000 / m),
+            ));
+        }
+    }
+    let mut totals = CostTotals::default();
+    for r in &rows {
+        let tokens = r.input_tokens + r.output_tokens;
+        totals.runs += r.runs;
+        totals.input_tokens += r.input_tokens;
+        totals.output_tokens += r.output_tokens;
+        totals.duration_secs += r.duration_secs;
+        totals.reported_cost_usd += r.reported_cost_usd.unwrap_or(0.);
+        totals.estimated_cost_usd += r.estimated_cost_usd.unwrap_or(0.);
+        totals.priced_tokens += r.priced_tokens;
+        totals.unpriced_tokens += r.unpriced_tokens;
+        match r.billing {
+            Billing::Subscription | Billing::Unknown => totals.subscription_tokens += tokens,
+            Billing::Api => totals.api_tokens += tokens,
+            Billing::Cli => totals.cli_tokens += tokens,
+        }
+        match r.category {
+            CostCategory::Om => totals.om_tokens += tokens,
+            CostCategory::Work => totals.work_tokens += tokens,
+        }
+    }
+    let now = Timestamp::now();
+    CostReport {
+        since: Timestamp(now.0 - secs),
+        until: now,
+        generated_at: now,
+        rows,
+        totals,
+        pricing: PricingInfo {
+            source: "models.dev".into(),
+            models: 412,
+            updated_at: Some(Timestamp(now.0 - 3 * 86_400)),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -53,8 +53,38 @@ pub enum Screen {
     Project(ProjectId),
     /// 目前實例的總管對話。
     Overseer,
+    /// 目前實例的用量（成本報表）。
+    Usage,
     /// 目前實例的排程與 listener。
     Automations,
+}
+
+/// 用量頁看多久以來的用量（往回滾動）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsageRange {
+    Day,
+    Week,
+    Month,
+}
+
+impl UsageRange {
+    pub const ALL: [Self; 3] = [Self::Day, Self::Week, Self::Month];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Day => "24 小時",
+            Self::Week => "7 天",
+            Self::Month => "30 天",
+        }
+    }
+
+    pub fn secs(self) -> i64 {
+        match self {
+            Self::Day => 86_400,
+            Self::Week => 7 * 86_400,
+            Self::Month => 30 * 86_400,
+        }
+    }
 }
 
 /// 設定視窗左側的類別。
@@ -566,6 +596,11 @@ pub struct PotsApp {
     pub why: Option<WhyView>,
     /// 問「為什麼」的那則訊息附帶的工具摘要。
     pub why_tools: Option<ToolSummary>,
+    /// 用量頁的時間範圍與最近一份報表（`ClientCommand::CostReport` 的結果）。
+    pub usage_range: UsageRange,
+    pub usage: Option<CostReport>,
+    /// 已送出 `CostReport`／`RefreshPricing`、等服務回覆。
+    pub usage_loading: bool,
     /// 底部短暫顯示的提示，例如「看 diff 尚未實作」。
     pub toast: Option<String>,
 
@@ -694,6 +729,9 @@ impl PotsApp {
             expanded_tools: HashSet::new(),
             why: None,
             why_tools: None,
+            usage_range: UsageRange::Week,
+            usage: None,
+            usage_loading: false,
             toast: None,
             composer,
             goal_note,
@@ -857,6 +895,21 @@ impl PotsApp {
                 .applied(&applied);
                 if applied.why.is_some() {
                     self.why = applied.why;
+                }
+                if let Some(report) = applied.cost_report {
+                    self.usage = Some(report);
+                    self.usage_loading = false;
+                }
+                if applied.pricing.is_some() && self.screen == Screen::Usage {
+                    // 單價表換了，估計金額跟著變：重新要一份報表（`live` 還借著，不能呼叫
+                    // `request_usage`）。
+                    self.store
+                        .outbox
+                        .push((instance, Self::usage_command(self.usage_range)));
+                    self.usage_loading = true;
+                }
+                if applied.error.is_some() {
+                    self.usage_loading = false;
                 }
                 if let Some((old, new)) = applied.rekeyed {
                     live.instance = new;
@@ -1748,7 +1801,7 @@ impl PotsApp {
     pub fn current_project(&self) -> Option<&ProjectView> {
         match self.screen {
             Screen::Project(p) => self.store.project(self.instance, p),
-            Screen::Inbox(_) | Screen::Overseer | Screen::Automations => None,
+            Screen::Inbox(_) | Screen::Overseer | Screen::Usage | Screen::Automations => None,
         }
     }
 
@@ -1768,6 +1821,11 @@ impl PotsApp {
         match self.screen {
             Screen::Overseer => {
                 self.open_overseer(window, cx);
+                return;
+            }
+            Screen::Usage => {
+                self.usage = None;
+                self.open_usage(cx);
                 return;
             }
             Screen::Automations => {
@@ -2266,6 +2324,58 @@ impl PotsApp {
         self.open_overseer(window, cx);
     }
 
+    /// 切到目前實例的用量頁，順便要一份新的報表。
+    pub fn open_usage(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Usage;
+        self.panel = None;
+        self.request_usage(cx);
+    }
+
+    pub fn set_usage_range(&mut self, range: UsageRange, cx: &mut Context<Self>) {
+        if self.usage_range != range {
+            self.usage_range = range;
+            self.request_usage(cx);
+        }
+    }
+
+    /// 依目前的時間範圍要一份所有 project 的成本報表；沒連上服務時用假資料。
+    fn usage_command(range: UsageRange) -> ClientCommand {
+        ClientCommand::CostReport {
+            project: None,
+            since: Some(Timestamp(Timestamp::now().0 - range.secs())),
+            until: None,
+        }
+    }
+
+    pub fn request_usage(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_some() {
+            let cmd = Self::usage_command(self.usage_range);
+            self.store.outbox.push((self.instance, cmd));
+            self.usage_loading = true;
+        } else {
+            self.usage = Some(crate::mock::cost_report(
+                self.current_instance(),
+                self.usage_range.secs(),
+            ));
+            self.usage_loading = false;
+        }
+        cx.notify();
+    }
+
+    /// 從 models.dev 重新抓單價；回來的 `Pricing` 會觸發重新要報表。
+    pub fn refresh_pricing(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_some() {
+            self.store
+                .outbox
+                .push((self.instance, ClientCommand::RefreshPricing));
+            self.usage_loading = true;
+            self.toast = Some("正在從 models.dev 更新單價…".into());
+        } else {
+            self.notify_unimplemented("更新單價", cx);
+        }
+        cx.notify();
+    }
+
     /// 問一則 agent 訊息為什麼這樣回答；帶著那則訊息已呼叫的工具摘要。
     pub fn request_why(
         &mut self,
@@ -2572,6 +2682,7 @@ impl Render for PotsApp {
             Screen::Inbox(scope) => self.render_inbox(scope, cx).into_any_element(),
             Screen::Project(_) => self.render_channel(window, cx).into_any_element(),
             Screen::Overseer => self.render_overseer(cx).into_any_element(),
+            Screen::Usage => self.render_usage(cx).into_any_element(),
             Screen::Automations => self.render_automations_page(cx).into_any_element(),
         };
         // 總管畫面的右欄固定是專案概況與記憶；其他畫面是狀態面板。

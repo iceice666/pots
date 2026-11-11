@@ -7,7 +7,7 @@
 use crate::model::*;
 
 /// 套用一個事件後，app 需要做的事。
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Applied {
     /// 收到 `Snapshot` 時，本地暫用的實例 ID 換成伺服器的。
     pub rekeyed: Option<(InstanceId, InstanceId)>,
@@ -40,6 +40,10 @@ pub struct Applied {
     pub worker_changed: bool,
     /// `Why` 的結果（「為什麼」面板）。
     pub why: Option<WhyView>,
+    /// `CostReport` 的結果（用量頁）。報表的時間是伺服器的 UTC 秒，用量頁不顯示時刻。
+    pub cost_report: Option<CostReport>,
+    /// 單價表更新了（`Pricing`）；用量頁據此重新要一份報表。
+    pub pricing: Option<PricingInfo>,
     /// 這個 project 監看的 repo 換了（`ProjectRepos`）。
     pub repos_changed: Option<ProjectId>,
     /// 這個 project 的工作資料夾換了（`ProjectWorkdir`）。
@@ -772,8 +776,8 @@ impl Sync {
                 out.github_test = Some((request, result));
             }
             ServerEvent::Why { why } => out.why = why,
-            // 成本報表與單價表是設定視窗的面板，桌面版下一輪才顯示；先不影響連線狀態。
-            ServerEvent::CostReport { .. } | ServerEvent::Pricing { .. } => {}
+            ServerEvent::CostReport { report } => out.cost_report = Some(report),
+            ServerEvent::Pricing { info } => out.pricing = Some(info),
             ServerEvent::Error { message } => {
                 out.toast = Some(message.clone());
                 out.error = Some(message);

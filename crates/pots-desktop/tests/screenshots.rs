@@ -860,6 +860,11 @@ mod shots {
         });
         s.shot("09-automations");
 
+        s.update(|app, _, cx| app.open_usage(cx));
+        s.shot("09a-usage");
+        s.update(|app, _, cx| app.set_usage_range(pots_desktop::app::UsageRange::Month, cx));
+        s.shot("09b-usage-month");
+
         s.update(|app, window, cx| {
             let home = app.store.instances[1].id;
             let auth = app.store.instances[1].projects[0].id;

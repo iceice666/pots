@@ -282,6 +282,12 @@ impl PotsApp {
                         cx.listener(move |this, _, _, cx| this.open_inbox(Some(instance_id), cx)),
                     ),
             )
+            .child(
+                sidebar_row("nav-usage".into(), self.screen == Screen::Usage)
+                    .child(icon(IconName::ChartColumn, 16., theme::text_on_dark()))
+                    .child("用量")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_usage(cx))),
+            )
             .child(sidebar_heading("專案"));
 
         for p in &inst.projects {
