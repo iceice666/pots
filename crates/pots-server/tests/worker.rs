@@ -1140,7 +1140,7 @@ async fn chat_runs_explorer_subagent_on_mirror() {
 }
 
 /// 本機工作資料夾：worker 在平台鏡像的任務分支上改（不是你資料夾裡的即時檔案），open_pr 只記下
-/// 變更；核准後平台把分支 fast-forward 套用進你的資料夾，任務完成。
+/// 變更；核准後平台把分支的 commit 接到你的分支後面套用進你的資料夾，任務完成。
 #[tokio::test]
 async fn local_workdir_applies_the_branch_on_approval() {
     let env = env().await;
@@ -1275,6 +1275,14 @@ async fn local_workdir_applies_the_branch_on_approval() {
     assert!(approval.title.contains("套用變更到"), "{}", approval.title);
     assert!(approval.task.is_some());
 
+    // 核准前你的 main 又多了一個 commit（例如另一個平行任務先套用了）：不能快轉，
+    // 平台要把任務的 commit 接到後面。
+    git(&local, &["config", "user.name", "t"]);
+    git(&local, &["config", "user.email", "t@example.com"]);
+    std::fs::write(local.join("mine.txt"), "mine\n").unwrap();
+    git(&local, &["add", "."]);
+    git(&local, &["commit", "--quiet", "-m", "mine"]);
+
     c.send(&ClientCommand::Decide {
         approval: approval.id,
         approve: true,
@@ -1296,12 +1304,15 @@ async fn local_workdir_applies_the_branch_on_approval() {
     assert!(t.pr.as_deref().is_some_and(|p| p.starts_with("local:")));
     assert_eq!(t.pr_url, None);
 
-    // 你的資料夾收到 fast-forward 的 commit，工作區是乾淨的。
+    // 任務的 commit 接在你的 commit 後面（線性），工作區是乾淨的。
+    assert!(outcome.contains("接到你的 main 後面"), "{outcome}");
     assert_eq!(git(&local, &["show", "HEAD:hello.txt"]), "hi\n");
+    assert_eq!(git(&local, &["show", "HEAD:mine.txt"]), "mine\n");
     assert_eq!(
-        git(&local, &["log", "--format=%s", "-1"]).trim(),
-        "Add hello"
+        git(&local, &["log", "--format=%s", "-3"]).trim(),
+        "Add hello\nmine\nbase"
     );
+    assert_eq!(git(&local, &["rev-list", "--merges", "HEAD"]).trim(), "");
     assert_eq!(git(&local, &["status", "--porcelain"]).trim(), "");
     // 任務分支只在平台的鏡像裡，沒有推到你的 repo。
     assert!(

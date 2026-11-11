@@ -1173,16 +1173,19 @@ impl Exec {
         if let Err(e) = fetched {
             return Err(format!("無法讀取任務分支：{e}"));
         }
-        let merged = crate::workdir::git(dir, &["merge", "--ff-only", "--quiet", &temp]).await;
+        let applied = apply_fetched(dir, &temp).await;
         // 不論成敗都收掉暫時 ref。
         let _ = crate::workdir::git(dir, &["update-ref", "-d", &temp]).await;
-        merged.map_err(|e| {
-            format!(
-                "無法把 {branch} 套用到 {path}（你的 {} 上有任務分支沒有的 commit，或工作區衝突）：{e}",
-                status.branch
-            )
-        })?;
-        Ok(format!("把 {branch} 套用到 {path}（{}）", short(sha)))
+        match applied {
+            Ok(None) => Ok(format!("把 {branch} 套用到 {path}（{}）", short(sha))),
+            Ok(Some(tip)) => Ok(format!(
+                "把 {branch} 的 commit 接到你的 {} 後面，套用到 {path}（{}，原本是 {}）",
+                status.branch,
+                short(&tip),
+                short(sha)
+            )),
+            Err(e) => Err(format!("無法把 {branch} 套用到 {path}：{e}")),
+        }
     }
 
     async fn delete_branch(&self, repo: &str, branch: &str) -> Result<String, String> {
@@ -1202,6 +1205,27 @@ impl Exec {
             Err(e) => Err(format!("無法刪除分支 {branch}：{e}")),
         }
     }
+}
+
+/// 把抓進暫時 ref 的任務分支套用到你的資料夾目前的分支：能 fast-forward 就直接快轉（回傳 `None`）；
+/// 你的分支上有任務分支沒有的 commit 時，先把任務的 commit 接到你的分支後面（不動工作區），
+/// 再快轉過去，回傳新的頂端。
+async fn apply_fetched(dir: &std::path::Path, temp: &str) -> Result<Option<String>, String> {
+    let ff = crate::workdir::git(dir, &["merge-base", "--is-ancestor", "HEAD", temp])
+        .await
+        .is_ok();
+    let (target, rebased) = if ff {
+        (temp.to_string(), None)
+    } else {
+        let tip = crate::workdir::replay_onto_head(dir, temp).await?;
+        (tip.clone(), Some(tip))
+    };
+    crate::workdir::git(dir, &["merge", "--ff-only", "--quiet", &target])
+        .await
+        .map_err(|e| {
+            format!("fast-forward 失敗（工作區衝突，或你的分支剛剛又有新的 commit）：{e}")
+        })?;
+    Ok(rebased)
 }
 
 /// commit 的前 7 碼。
