@@ -515,7 +515,7 @@ pub fn store() -> Store {
     };
 
     let mut tool_reply = agent(
-        "auth-service agent",
+        "auth-service 負責人",
         AgentRole::Project,
         "了解。我先讀了現在的登入流程，整理成一份 spec，你看看有沒有漏掉的地方。",
     );
@@ -535,17 +535,17 @@ pub fn store() -> Store {
         note: "v3 · 你在 10:20 改過「Session 處理」".into(),
     });
     let mut goal_reply = agent(
-        "auth-service agent",
+        "auth-service 負責人",
         AgentRole::Project,
         "好，已經照你改過的 spec 開了 Goal，Planner 拆成 4 個任務。",
     );
     goal_reply
         .cards
         .push(Card::GoalCreated { goal: oauth_goal });
-    let mut approval_reply = agent("auth-service agent", AgentRole::Project, "");
+    let mut approval_reply = agent("auth-service 負責人", AgentRole::Project, "");
     approval_reply.cards.push(Card::Approval { id: pr42 });
     let mut streaming = agent(
-        "auth-service agent",
+        "auth-service 負責人",
         AgentRole::Project,
         "前端登入按鈕還在改，整合測試正在等 CI。結果出來我再告訴你",
     );
@@ -555,7 +555,7 @@ pub fn store() -> Store {
         memory: auth_memory(&mut ids),
         id: auth,
         name: "auth-service".into(),
-        agent_name: "auth-service agent".into(),
+        agent_name: "auth-service 負責人".into(),
         agent_state: AgentState::WaitingCi,
         budget: Budget {
             spent_cents: 420,
@@ -651,7 +651,7 @@ pub fn store() -> Store {
         memory: MemoryView::default(),
         id: web,
         name: "web-app".into(),
-        agent_name: "web-app agent".into(),
+        agent_name: "web-app 負責人".into(),
         agent_state: AgentState::Planning,
         budget: Budget {
             spent_cents: 1130,
@@ -763,7 +763,7 @@ pub fn store() -> Store {
         memory: MemoryView::default(),
         id: ProjectId::from_u64(ids.next()),
         name: "infra".into(),
-        agent_name: "infra agent".into(),
+        agent_name: "infra 負責人".into(),
         agent_state: AgentState::Idle,
         budget: Budget {
             spent_cents: 90,
@@ -775,7 +775,7 @@ pub fn store() -> Store {
             ids.item(
                 at(10, 7),
                 StreamItemKind::Agent(agent(
-                    "infra agent",
+                    "infra 負責人",
                     AgentRole::Project,
                     "我提了一個新的 listener：main 分支 CI 失敗時自動開 Goal 修復，等你在 Inbox 核准。",
                 )),
@@ -812,7 +812,7 @@ pub fn store() -> Store {
         memory: MemoryView::default(),
         id: ProjectId::from_u64(ids.next()),
         name: "docs-site".into(),
-        agent_name: "docs-site agent".into(),
+        agent_name: "docs-site 負責人".into(),
         agent_state: AgentState::Idle,
         budget: Budget {
             spent_cents: 0,
@@ -951,7 +951,7 @@ pub fn store() -> Store {
     let pr9 = ApprovalId::from_u64(ids.next());
     let shell_goal = GoalId::from_u64(ids.next());
     let mut dotfiles_reply = agent(
-        "dotfiles agent",
+        "dotfiles 負責人",
         AgentRole::Project,
         "alias 整理好了，重複的 12 個合併、過期的 PATH 設定移除。PR #9 的 CI 都過了。",
     );
@@ -960,7 +960,7 @@ pub fn store() -> Store {
         memory: MemoryView::default(),
         id: dotfiles_id,
         name: "dotfiles".into(),
-        agent_name: "dotfiles agent".into(),
+        agent_name: "dotfiles 負責人".into(),
         agent_state: AgentState::WaitingApproval,
         budget: Budget {
             spent_cents: 35,
@@ -1024,7 +1024,7 @@ pub fn store() -> Store {
         memory: MemoryView::default(),
         id: side_id,
         name: "side-project".into(),
-        agent_name: "side-project agent".into(),
+        agent_name: "side-project 負責人".into(),
         agent_state: AgentState::Idle,
         budget: Budget {
             spent_cents: 0,
@@ -1036,7 +1036,7 @@ pub fn store() -> Store {
             ids.item(
                 at(6, 7),
                 StreamItemKind::Agent(agent(
-                    "side-project agent",
+                    "side-project 負責人",
                     AgentRole::Project,
                     "匯出功能的 Goal 開好了，但這台電腦的 Claude Code 還沒登入，worker 沒辦法開工。",
                 )),

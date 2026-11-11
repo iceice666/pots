@@ -44,6 +44,8 @@ pub struct Applied {
     pub repos_changed: Option<ProjectId>,
     /// 這個 project 的工作資料夾換了（`ProjectWorkdir`）。
     pub workdir_changed: Option<ProjectId>,
+    /// 這個 project 的負責人改名了（`ProjectAgentName`）。
+    pub agent_name_changed: Option<ProjectId>,
     /// 要不要彈桌面通知的事（新的核准、需要你處理的任務、Goal 完成）。快照不產生通知。
     pub notices: Vec<Notice>,
     /// 通知設定有變（`Notifications` 事件或快照）。
@@ -755,6 +757,16 @@ impl Sync {
                     p.workdir = workdir;
                 }
                 out.workdir_changed = Some(project);
+            }
+            ServerEvent::ProjectAgentName {
+                project,
+                agent_name,
+                ..
+            } => {
+                if let Some(p) = store.project_mut(instance, project) {
+                    p.agent_name = agent_name;
+                }
+                out.agent_name_changed = Some(project);
             }
             ServerEvent::GithubTest { request, result } => {
                 out.github_test = Some((request, result));

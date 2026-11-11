@@ -362,7 +362,7 @@ mod tests {
         ProjectView {
             id: ProjectId::from_u64(1),
             name: "auth-service".into(),
-            agent_name: "auth-service agent".into(),
+            agent_name: "auth-service 負責人".into(),
             agent_state,
             budget: Budget {
                 spent_cents: 0,
@@ -461,7 +461,7 @@ mod tests {
             vec![
                 (
                     MemberGroup::Working,
-                    vec!["auth-service agent", "後端 OAuth callback"]
+                    vec!["auth-service 負責人", "後端 OAuth callback"]
                 ),
                 (MemberGroup::Waiting, vec!["整合測試", "前端登入按鈕"]),
                 (MemberGroup::Standby, vec!["Planner · OAuth 登入遷移", "你"]),
@@ -469,7 +469,7 @@ mod tests {
         );
         assert_eq!(sections[0].title(), "工作中 — 2");
 
-        let agent = find(&sections, "auth-service agent");
+        let agent = find(&sections, "auth-service 負責人");
         assert_eq!(agent.kind, MemberKind::Agent);
         assert_eq!(agent.status, "思考中");
         assert_eq!(agent.model.as_deref(), Some("ChatGPT · 自動"));
@@ -514,7 +514,7 @@ mod tests {
         let idle = members(&project(AgentState::Idle, Vec::new()), &providers(), &empty);
         assert_eq!(
             names(&idle),
-            vec![(MemberGroup::Standby, vec!["auth-service agent", "你"])]
+            vec![(MemberGroup::Standby, vec!["auth-service 負責人", "你"])]
         );
         assert_eq!(idle[0].members[0].status, "閒置");
     }
@@ -591,7 +591,7 @@ mod tests {
         );
         assert_eq!(
             names(&sections),
-            vec![(MemberGroup::Standby, vec!["auth-service agent", "你"])]
+            vec![(MemberGroup::Standby, vec!["auth-service 負責人", "你"])]
         );
         assert_eq!(
             sections[0].members[0].model.as_deref(),

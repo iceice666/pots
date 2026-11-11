@@ -230,7 +230,18 @@ impl PotsApp {
         let id = item.id;
         let (name, is_project_agent) = match &msg.author {
             Author::Human => ("你".to_string(), false),
-            Author::Agent { label, role } => (label.clone(), *role == AgentRole::Project),
+            // 對話 agent 是這個 project 的負責人：一律顯示它現在的名字，改名前的訊息（包括舊版的
+            // 「Pots」）也一樣。
+            Author::Agent {
+                role: AgentRole::Project,
+                label,
+            } => (
+                self.current_project()
+                    .map(|p| p.agent_name.clone())
+                    .unwrap_or_else(|| label.clone()),
+                true,
+            ),
+            Author::Agent { label, .. } => (label.clone(), false),
         };
         let streaming = msg.status == MsgStatus::Streaming;
         let time = if streaming {

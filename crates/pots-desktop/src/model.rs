@@ -242,6 +242,12 @@ impl Store {
             .push((instance, ClientCommand::SetProjectRepos { project, repos }));
     }
 
+    /// 幫 project 的負責人改名；服務接受後以 `ProjectAgentName` 回來。
+    pub fn rename_agent(&mut self, instance: InstanceId, project: ProjectId, name: String) {
+        self.outbox
+            .push((instance, ClientCommand::RenameAgent { project, name }));
+    }
+
     /// `None` 代表所有實例。
     pub fn pending(&self, instance: Option<InstanceId>) -> usize {
         self.inbox

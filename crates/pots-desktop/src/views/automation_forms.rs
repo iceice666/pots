@@ -3,7 +3,7 @@
 //! （畫面在 `worker_settings.rs`）。
 //!
 //! 送出的指令都經 `Store::outbox`；服務接受後以 `Github`、`Worker`、`Automation`、
-//! `ProjectRepos` 事件回來時收起表單，被拒絕時（`Error`）把原因留在表單裡。
+//! `ProjectRepos`、`ProjectAgentName` 事件回來時收起表單，被拒絕時（`Error`）把原因留在表單裡。
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,7 +19,7 @@ use super::settings::{card, detail_row, field};
 use super::widgets::*;
 use crate::app::{
     GithubEditor, GithubTest, ListenerActionKind, ListenerForm, NotificationEditor, Panel, PotsApp,
-    RepoEditor, SourceEditor, UserMdEditor, WorkerEditor,
+    ProjectField, RepoEditor, SourceEditor, UserMdEditor, WorkerEditor,
 };
 use crate::model::*;
 use crate::sync::{Applied, month_day_time};
@@ -263,7 +263,10 @@ impl Forms<'_> {
         }
         if let Some(r) = &self.repo
             && r.saving
-            && applied.repos_changed == Some(r.project)
+            && match r.field {
+                ProjectField::Repos => applied.repos_changed == Some(r.project),
+                ProjectField::AgentName => applied.agent_name_changed == Some(r.project),
+            }
         {
             *self.repo = None;
         }
@@ -1230,7 +1233,34 @@ impl PotsApp {
                 this.save_repos(cx);
             }
         });
-        self.repo_editor = Some(RepoEditor::new(project, state, sub));
+        self.repo_editor = Some(RepoEditor::new(project, ProjectField::Repos, state, sub));
+        cx.notify();
+    }
+
+    pub fn edit_agent_name(
+        &mut self,
+        project: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .store
+            .project(self.instance, project)
+            .map(|p| p.agent_name.clone())
+            .unwrap_or_default();
+        let state = input(current, "負責人的名字；Enter 儲存", false, window, cx);
+        state.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe(&state, |this, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.save_repos(cx);
+            }
+        });
+        self.repo_editor = Some(RepoEditor::new(
+            project,
+            ProjectField::AgentName,
+            state,
+            sub,
+        ));
         cx.notify();
     }
 
@@ -1244,13 +1274,23 @@ impl PotsApp {
             return;
         };
         let project = r.project;
-        let repos = list(&value(&r.input, cx));
+        let field = r.field;
+        let text = value(&r.input, cx);
         if self.live.is_none() {
-            self.notify_unimplemented("設定 repo", cx);
+            self.notify_unimplemented(
+                match field {
+                    ProjectField::Repos => "設定 repo",
+                    ProjectField::AgentName => "幫負責人改名",
+                },
+                cx,
+            );
             return;
         }
         let instance = self.instance;
-        self.store.set_project_repos(instance, project, repos);
+        match field {
+            ProjectField::Repos => self.store.set_project_repos(instance, project, list(&text)),
+            ProjectField::AgentName => self.store.rename_agent(instance, project, text),
+        }
         if let Some(r) = &mut self.repo_editor {
             r.saving = true;
             r.error = None;
@@ -1264,10 +1304,57 @@ impl PotsApp {
         let inst = self.current_instance();
         let paused = inst.project_paused(project).is_some();
         let all_paused = inst.pauses.iter().any(|p| p.project.is_none());
-        let editing = self.repo_editor.as_ref().filter(|r| r.project == project);
+        let editing = self
+            .repo_editor
+            .as_ref()
+            .filter(|r| r.project == project && r.field == ProjectField::Repos);
+        let renaming = self
+            .repo_editor
+            .as_ref()
+            .filter(|r| r.project == project && r.field == ProjectField::AgentName);
         let local = matches!(p.workdir, Some(WorkDir::Local { .. }));
         let mut b = white_box()
             .gap(px(8.))
+            // 這個 project 的負責人（對話 agent）。
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .flex_wrap()
+                    .child(section_label("負責人").flex_1())
+                    .when(renaming.is_none(), |d| {
+                        d.child(tag(p.agent_name.clone(), theme::text(), theme::subtle_bg()))
+                            .child(
+                                link_button("agent-rename", "改名")
+                                    .text_size(px(13.))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.edit_agent_name(project, window, cx)
+                                    })),
+                            )
+                    }),
+            )
+            .when_some(renaming, |b, r| {
+                b.child(Input::new(&r.input))
+                    .when_some(r.error.as_deref(), |d, m| d.child(error_note(m)))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                small_button(primary_button(
+                                    "agent-rename-save",
+                                    if r.saving { "儲存中…" } else { "儲存" },
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| this.save_repos(cx))),
+                            )
+                            .child(
+                                link_button("agent-rename-cancel", "取消")
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_repos(cx))),
+                            ),
+                    )
+            })
+            .child(div().h(px(1.)).bg(theme::border()))
             // 工作資料夾是「worker 在哪裡改」，和下面的「監看的 repo」（事件來源）分開。
             .child(
                 div()

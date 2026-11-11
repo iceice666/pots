@@ -246,9 +246,19 @@ pub struct SourceEditor {
     pub error: Option<String>,
 }
 
-/// 頻道「自動化」分頁正在改的監看 repo。
+/// 頻道「自動化」分頁內聯編輯的欄位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectField {
+    /// 監看的 repo（`SetProjectRepos`）。
+    Repos,
+    /// 負責人的名字（`RenameAgent`）。
+    AgentName,
+}
+
+/// 頻道「自動化」分頁正在改的監看 repo 或負責人名字（一次只編一個）。
 pub struct RepoEditor {
     pub project: ProjectId,
+    pub field: ProjectField,
     pub input: Entity<InputState>,
     pub saving: bool,
     pub error: Option<String>,
@@ -295,11 +305,13 @@ pub struct ObservationEditor {
 impl RepoEditor {
     pub(crate) fn new(
         project: ProjectId,
+        field: ProjectField,
         input: Entity<InputState>,
         subscription: Subscription,
     ) -> Self {
         Self {
             project,
+            field,
             input,
             saving: false,
             error: None,
