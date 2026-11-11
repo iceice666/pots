@@ -73,17 +73,18 @@ pub const SETTING_KEY: &str = "worker";
 /// Claude Code 的提醒：一輪結束卻沒有呼叫結束工具時送一次。
 const NUDGE: &str = "你還沒有用平台工具結束這一輪。請依情況呼叫 mcp__pots__complete_task、\
 mcp__pots__fail_task、mcp__pots__escalate、mcp__pots__wait_for（開了 PR 的話先等 CI）或 \
-mcp__pots__request_approval（CI 通過後申請 merge）。";
+mcp__pots__request_approval（CI 通過後申請 merge）或 mcp__pots__ask_user（需要使用者回答）。";
 /// Claude Code 一律禁止的原生工具：背景常駐、排程類（等待一律走平台的 wait_for）。名稱依 OpenClaw
 /// 的預設；背景執行的 Bash 由 [`claude_policy`] 擋（權限規則比對的是指令，不是 `run_in_background`）。
-const CLAUDE_DISALLOWED: &[&str] = &["ScheduleWakeup", "CronCreate", "Monitor"];
+/// `AskUserQuestion` 在平台上沒有人能回答：要問使用者用 `mcp__pots__ask_user`。
+const CLAUDE_DISALLOWED: &[&str] = &["ScheduleWakeup", "CronCreate", "Monitor", "AskUserQuestion"];
 /// Claude Code 的 worker 另外的說明：worker profile 的規則寫的是內建 worker 的工具名稱。
 const CLAUDE_NOTE: &str = "\n\n# 在 Claude Code 裡\n\n\
 上面的規則寫給所有 worker。你在 Claude Code 裡：讀檔、改檔、執行指令與開 subagent 用 Claude Code \
 自己的工具（Read、Edit、Write、Bash、Task），規則裡的 read_file、edit_file、run、run_subagent 都換成它們。\
 平台工具的名稱前面有 `mcp__pots__`，例如 mcp__pots__open_pr、mcp__pots__wait_for、mcp__pots__complete_task、\
 mcp__pots__fail_task、mcp__pots__escalate、mcp__pots__request_approval、mcp__pots__post_to_team、\
-mcp__pots__report_progress。\
+mcp__pots__report_progress、mcp__pots__ask_user（要問使用者時用它，不要用 AskUserQuestion）。\
 不要用背景執行（run_in_background），也不要自己排程或等待：要等 CI 或其他事件一律用 mcp__pots__wait_for。";
 /// worker 用 escalate 交回時任務原因的開頭（Planner 的決定只叫醒這種需要決定的任務）。
 pub const ESCALATED: &str = "worker 需要決定：";
@@ -1060,7 +1061,9 @@ impl Worker {
             let mut triggers = triggers;
             // 原本在等的東西被交接打斷了（訂閱會清掉）：告訴 worker。
             if let TaskState::Waiting { on, .. } = &task.state {
-                let again = if matches!(on, WaitCond::Approval { .. }) {
+                let again = if matches!(on, WaitCond::Approval { ask: true, .. }) {
+                    "那個問題已經撤回；還需要答案的話處理完再用 ask_user 問一次。"
+                } else if matches!(on, WaitCond::Approval { .. }) {
                     "那筆核准已經撤回；需要的話處理完再用 request_approval 申請一次。"
                 } else {
                     "需要的話處理完再用 wait_for 等一次。"

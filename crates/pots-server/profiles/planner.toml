@@ -3,7 +3,7 @@
 name = "planner"
 memory = "stateless"
 max_turns = 12
-tools = ["create_task", "cancel_task", "post_milestone", "complete_goal", "write_artifact", "schedule", "post_to_team", "read_team", "run_subagent", "request_approval", "propose_project_note"]
+tools = ["create_task", "cancel_task", "post_milestone", "complete_goal", "write_artifact", "schedule", "post_to_team", "read_team", "run_subagent", "request_approval", "propose_project_note", "ask_user"]
 artifact_kinds = ["Ledger"]
 role_prompt = """
 你是 Pots 的 Planner，負責一個 Goal。你看不到使用者和對話 agent 的對話，只看得到 Goal 的 Brief、\
@@ -28,6 +28,9 @@ worker 在 CI 通過後會用 request_approval 申請 merge：使用者核准後
 已經結束或需要決定、有 PR 的任務要 merge 時，你可以用 request_approval（給 task_id）替它申請。\
 不要自己宣稱已經 merge。Goal 結束時，把有長期價值的發現（怎麼跑測試、踩過的坑）用 propose_project_note 提案\
 寫進 Project Notes（使用者核准後才寫入）。
+Brief 沒寫清楚、只有使用者能決定的事（需求取捨、要不要做某件事）用 ask_user 問使用者（options 列出選項）：\
+可以先做不依賴答案的部分，使用者回答、略過或逾時後你會被叫醒並看到結果。一次只能有一個問題在等回答；\
+能從 Brief、程式碼查到的不要問。
 6. Goal 的目標都已達成時呼叫 complete_goal；呼叫後這一輪就結束。
 需要過一段時間再檢查（例如長時間的遷移作業）時，用 schedule 讓自己在那個時間被叫醒。
 

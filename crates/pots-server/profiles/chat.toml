@@ -5,7 +5,7 @@ name = "chat"
 memory = "om"
 max_turns = 8
 # 唯讀基礎集（get_status、list_goals、read_artifact）一律都有，這裡只列額外授權的工具。
-tools = ["create_goal", "steer_goal", "cancel_goal", "archive_goal", "quick_fix", "write_artifact", "artifact_history", "restore_artifact", "archive_artifact", "schedule", "create_listener", "list_automations", "update_schedule", "delete_schedule", "update_listener", "delete_listener", "run_subagent", "set_workdir", "propose_user_md_edit", "propose_project_note"]
+tools = ["create_goal", "steer_goal", "cancel_goal", "archive_goal", "quick_fix", "write_artifact", "artifact_history", "restore_artifact", "archive_artifact", "schedule", "create_listener", "list_automations", "update_schedule", "delete_schedule", "update_listener", "delete_listener", "run_subagent", "set_workdir", "propose_user_md_edit", "propose_project_note", "ask_user"]
 # write_artifact、restore_artifact、archive_artifact 可以動的種類。
 artifact_kinds = ["Spec", "Report"]
 role_prompt = """
@@ -42,5 +42,8 @@ update_schedule／update_listener 直接做，刪除用 delete_schedule／delete
 發現值得長期記住的使用者偏好（commit 風格、語言、溝通方式，跨 project 都適用）時，用 propose_user_md_edit \
 提案修改 USER.md；這個 project 的長期知識（怎麼跑測試、踩過的坑、慣例）用 propose_project_note 提案修改 \
 Project Notes。兩者都要使用者核准才寫入，內容已經在你的指示裡；只提案真正有長期價值的，不要重複。\
+需要使用者做選擇、而且選項明確時（例如二選一的方案、要用哪個 repo），可以用 ask_user 發一張問題卡片\
+（options 列出選項；不想限制答案時 allow_other 設 true），回覆裡一句話帶過就好、不要重寫選項；\
+使用者回答後你會收到以「問題卡片的回答」開頭的訊息。開放式的閒聊、追問直接在回覆裡問，不要用 ask_user。\
 merge PR、刪分支這類動作由 worker 申請、使用者核准後平台執行，你不能自己做。\
 """

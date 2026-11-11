@@ -293,10 +293,13 @@ pub enum WaitCond {
         at: Timestamp,
     },
     /// 等你核准（`request_approval`）。不是模型能用 `wait_for` 等的條件；決定、逾時都由
-    /// `crate::approvals` 處理。`what` 是顯示用的說明，例如「merge PR #42」。
+    /// `crate::approvals` 處理。`what` 是顯示用的說明，例如「merge PR #42」。`ask` 表示等的是你回答
+    /// worker 的問題（`ask_user`），`what` 是問題。
     Approval {
         id: pots_proto::ApprovalId,
         what: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ask: bool,
     },
 }
 
@@ -384,6 +387,9 @@ impl WaitCond {
             Self::Resource { key, kinds } => format!("等事件：{key}（{}）", kinds.join("、")),
             Self::Subtasks { tasks } => format!("等 {} 個子任務結束", tasks.len()),
             Self::At { at } => format!("等到 {}", crate::runs::format_utc(*at)),
+            Self::Approval {
+                what, ask: true, ..
+            } => format!("等你回答：{what}"),
             Self::Approval { what, .. } => format!("等你核准：{what}"),
         }
     }

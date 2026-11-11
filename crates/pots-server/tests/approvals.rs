@@ -1428,3 +1428,251 @@ async fn chat_agent_manages_automations_and_artifacts() {
     assert!(out[0].contains("沒有 artifact"), "{}", out[0]);
     srv.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// agent 問你問題（ask_user）
+
+/// 這個請求看得到的所有文字（instructions 與使用者訊息），用來找測試的記號。
+fn all_text(req: &ModelRequest) -> String {
+    let mut out = instructions(req).to_string();
+    for i in &req.input {
+        if let Item::User { text } = i {
+            out.push('\n');
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+fn is_question(a: &ApprovalView) -> bool {
+    matches!(a.action, ApprovalActionView::AskUser { .. })
+}
+
+/// worker、Planner 與對話 agent 都能用 ask_user 問你：問題是一筆核准（「核准」是回答、「拒絕」是略過）。
+/// worker 的任務轉成等回答、回答後被叫醒；Planner 一次只能問一個、回答或略過後由新的 run 收到；
+/// 對話 agent 的卡片附在回覆下面、回答以系統觸發送回對話；Goal 取消時 Planner 的問題撤回。
+#[tokio::test]
+async fn ask_user_wakes_whoever_asked() {
+    let env = env().await;
+    let model = FnProvider::new("m", |req| {
+        let instr = instructions(req);
+        let trigger = first_user(req);
+        let outputs = tool_outputs(req);
+        let text = all_text(req);
+        if instr.starts_with(PLANNER) {
+            if text.contains("PLANNER_ASK") && trigger.contains("剛建立這個 Goal") {
+                return match outputs.len() {
+                    0 => ScriptedTurn::new().tool_call(
+                        "pq0",
+                        "ask_user",
+                        json!({"question": "登入要支援哪些 provider？", "options": ["只要 Google", "Google 與 GitHub"]})
+                            .to_string(),
+                    ),
+                    // 已經有一個在等：第二個問題被擋。
+                    1 => ScriptedTurn::new().tool_call(
+                        "pq1",
+                        "ask_user",
+                        json!({"question": "還有別的嗎？"}).to_string(),
+                    ),
+                    _ => ScriptedTurn::reply("等使用者回答"),
+                };
+            }
+            if text.contains("PLANNER_ASK") {
+                return ScriptedTurn::reply("收到回答");
+            }
+            if trigger.contains("剛建立這個 Goal") && outputs.is_empty() {
+                return ScriptedTurn::new().tool_call(
+                    "p0",
+                    "create_task",
+                    json!({"title": "問一下環境", "summary": "WORKER_ASK：先問使用者要部署到哪裡"})
+                        .to_string(),
+                );
+            }
+            return ScriptedTurn::reply("好");
+        }
+        if instr.starts_with(WORKER) {
+            if trigger.contains("使用者回答了你的問題") {
+                return match outputs.len() {
+                    0 => ScriptedTurn::new().tool_call(
+                        "wd",
+                        "fail_task",
+                        json!({"error": "測試到這裡就好"}).to_string(),
+                    ),
+                    _ => ScriptedTurn::reply("結束"),
+                };
+            }
+            return match outputs.len() {
+                0 => ScriptedTurn::new().tool_call(
+                    "wq",
+                    "ask_user",
+                    json!({
+                        "question": "要部署到哪個環境？",
+                        "options": ["staging", "production"],
+                        "allow_other": false,
+                        "reason": "任務沒寫",
+                    })
+                    .to_string(),
+                ),
+                _ => ScriptedTurn::reply("等回答"),
+            };
+        }
+        chat_turn(req)
+    });
+    let srv = launch(config(&env), model.clone()).await;
+    let mut c = srv.client().await;
+    let project = setup(&mut c).await;
+
+    // worker：任務轉成等回答。
+    c.say(
+        project,
+        &call(
+            "create_goal",
+            json!({"title": "部署", "brief_md": "## 目標\n\n部署"}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    let (wq, _) = until_approval(&mut c, |a| is_question(a) && a.task.is_some()).await;
+    assert!(wq.is_pending());
+    assert_eq!(wq.requested_by, "worker");
+    let ApprovalActionView::AskUser {
+        question,
+        options,
+        allow_other,
+    } = &wq.action
+    else {
+        unreachable!()
+    };
+    assert_eq!(question, "要部署到哪個環境？");
+    assert_eq!(options, &["staging", "production"]);
+    assert!(!allow_other);
+    let g = until_goal(&mut c, |g| {
+        g.tasks.first().is_some_and(
+            |t| matches!(&t.state, TaskStateView::Waiting { on, .. } if on.contains("等你回答")),
+        )
+    })
+    .await;
+    let task = g.tasks[0].id;
+    // 回答要有內容；不能自由回答時要是其中一個選項。
+    c.send(&decide(wq.id, true, None)).await;
+    assert!(until_error(&mut c).await.contains("答案"));
+    c.send(&decide(wq.id, true, Some("dev"))).await;
+    assert!(until_error(&mut c).await.contains("選項"));
+    c.send(&decide(wq.id, true, Some("staging"))).await;
+    let (answered, _) = until_approval(&mut c, |a| a.id == wq.id && !a.is_pending()).await;
+    assert_eq!(answered.state, ApprovalState::Executed);
+    assert_eq!(answered.note.as_deref(), Some("staging"));
+    until_goal(&mut c, |g| {
+        g.tasks
+            .iter()
+            .any(|t| t.id == task && matches!(t.state, TaskStateView::Failed { .. }))
+    })
+    .await;
+    assert!(model.requests().iter().any(|r| {
+        instructions(r).starts_with(WORKER)
+            && first_user(r).contains("使用者回答了你的問題「要部署到哪個環境？」：staging")
+    }));
+
+    // Planner：一次只能問一個；略過時帶著理由叫醒它。
+    c.say(
+        project,
+        &call(
+            "create_goal",
+            json!({"title": "登入", "brief_md": "## 目標\n\nPLANNER_ASK"}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    let (pq, _) = until_approval(&mut c, |a| {
+        is_question(a) && a.task.is_none() && a.goal.is_some() && a.is_pending()
+    })
+    .await;
+    assert_eq!(pq.requested_by, "Planner");
+    let blocked = |req: &ModelRequest| {
+        instructions(req).starts_with(PLANNER)
+            && tool_outputs(req)
+                .iter()
+                .any(|o| o.contains("已經有一個問題在等使用者回答"))
+    };
+    for _ in 0..100 {
+        if model.requests().iter().any(blocked) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(model.requests().iter().any(blocked), "第二個問題被擋");
+    c.send(&decide(pq.id, false, Some("你決定就好"))).await;
+    let (skipped, _) = until_approval(&mut c, |a| a.id == pq.id && !a.is_pending()).await;
+    assert_eq!(skipped.state, ApprovalState::Rejected);
+    let woke = |req: &ModelRequest| {
+        instructions(req).starts_with(PLANNER)
+            && first_user(req).contains("沒有得到回答（使用者略過了，理由：你決定就好）")
+    };
+    for _ in 0..100 {
+        if model.requests().iter().any(woke) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(model.requests().iter().any(woke), "略過後叫醒 Planner");
+
+    // Planner 的問題在 Goal 取消時撤回。
+    c.say(
+        project,
+        &call(
+            "create_goal",
+            json!({"title": "登入 2", "brief_md": "## 目標\n\nPLANNER_ASK"}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    let (pq2, _) = until_approval(&mut c, |a| {
+        is_question(a) && a.is_pending() && a.id != pq.id
+    })
+    .await;
+    let goal = pq2.goal.expect("Planner 的問題有 Goal");
+    c.until_idle(project).await;
+    c.say(
+        project,
+        &call(
+            "cancel_goal",
+            json!({"goal_id": goal.to_string(), "reason": "不做了"}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    let (withdrawn, _) = until_approval(&mut c, |a| a.id == pq2.id && !a.is_pending()).await;
+    assert_eq!(withdrawn.state, ApprovalState::Cancelled);
+    c.until_idle(project).await;
+
+    // 對話 agent：卡片附在回覆下面；回答以系統觸發送回對話。
+    c.say(
+        project,
+        &call(
+            "ask_user",
+            json!({"question": "要叫你什麼？", "options": ["老闆", "你"]}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    let (cq, events) = until_approval(&mut c, |a| {
+        is_question(a) && a.goal.is_none() && a.is_pending()
+    })
+    .await;
+    let more = c.until_idle(project).await;
+    let events = [events, more].concat();
+    assert!(events.iter().any(|e| matches!(e,
+        ServerEvent::ItemDone { item, .. } if matches!(&item.kind,
+            StreamItemKind::Agent(m) if m.cards.iter().any(|c| matches!(c, Card::Approval { id } if *id == cq.id))))));
+    c.send(&decide(cq.id, true, Some("叫我阿冰"))).await;
+    until_approval(&mut c, |a| {
+        a.id == cq.id && a.state == ApprovalState::Executed
+    })
+    .await;
+    c.until_idle(project).await;
+    assert!(model.requests().iter().any(|r| {
+        r.input.iter().any(|i| matches!(i, Item::User { text }
+            if text.contains("問題卡片的回答") && text.contains("要叫你什麼？") && text.contains("叫我阿冰")))
+    }));
+    srv.stop().await;
+}

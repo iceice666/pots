@@ -112,6 +112,13 @@ pub enum Action {
         artifact_kind: ArtifactKind,
         title: String,
     },
+    /// agent 問你一個問題（`ask_user`）。「核准」是回答（答案存在 `note`），「拒絕」是略過；
+    /// 回答後叫醒問的 agent：worker 的任務、Planner，或對話 agent（`task`、`goal` 都沒有時）。
+    AskUser {
+        question: String,
+        options: Vec<String>,
+        allow_other: bool,
+    },
 }
 
 impl Action {
@@ -239,6 +246,23 @@ async fn pending_blocking(
     ))
     .bind(goal.map(|g| g.to_string()))
     .bind(task.map(|t| t.to_string()))
+    .fetch_all(conn)
+    .await?;
+    rows.iter().map(from_row).collect()
+}
+
+/// Planner 在這個 Goal 問了、還沒回答的問題。
+async fn pending_planner_questions(
+    conn: &mut SqliteConnection,
+    goal: GoalId,
+) -> Result<Vec<ApprovalRow>, Error> {
+    let rows = sqlx::query(concat!(
+        "SELECT ",
+        columns!(),
+        " FROM approvals WHERE state = 'pending' AND task_id IS NULL AND goal_id = ? \
+         AND action LIKE '{\"kind\":\"ask_user\"%' ORDER BY created_at, id"
+    ))
+    .bind(goal.to_string())
     .fetch_all(conn)
     .await?;
     rows.iter().map(from_row).collect()
@@ -473,6 +497,15 @@ pub async fn view(conn: &mut SqliteConnection, row: &ApprovalRow) -> Result<Appr
             kind: *artifact_kind,
             title: title.clone(),
         },
+        Action::AskUser {
+            question,
+            options,
+            allow_other,
+        } => ApprovalActionView::AskUser {
+            question: question.clone(),
+            options: options.clone(),
+            allow_other: *allow_other,
+        },
     };
     Ok(ApprovalView {
         id: row.id,
@@ -536,6 +569,16 @@ pub async fn recent_outcomes(
     let mut out = Vec::new();
     for r in &rows {
         let row = from_row(r)?;
+        if let (Action::AskUser { question, .. }, ApprovalState::Executed, Some(answer)) =
+            (&row.action, row.state, &row.note)
+        {
+            out.push(format!(
+                "- 問使用者「{}」，使用者回答：{}",
+                tasks::one_line(question, 150),
+                tasks::one_line(answer, 300)
+            ));
+            continue;
+        }
         let mut line = format!(
             "- {}：{}",
             tasks::one_line(&row.title, 150),
@@ -559,6 +602,24 @@ pub async fn recent_outcomes(
 
 /// 在等的任務已經不在等這筆核准（取消、被交接叫醒、Goal 結束）：撤回。`tasks::push_goal` 每次都呼叫。
 pub async fn sync_goal(txn: &mut LogTxn<'_>, goal: GoalId) -> Result<(), Error> {
+    // Planner 的問題（沒有任務）：Goal 結束就不再需要。
+    let active = tasks::goal(txn.conn(), goal)
+        .await?
+        .is_some_and(|g| g.state.is_active());
+    if !active {
+        for row in pending_planner_questions(txn.conn(), goal).await? {
+            transition(
+                txn,
+                &row,
+                ApprovalState::Cancelled,
+                &Principal::System,
+                None,
+                Some("Goal 已經結束"),
+                Timestamp::now(),
+            )
+            .await?;
+        }
+    }
     let pending = pending_blocking(txn.conn(), Some(goal), None).await?;
     for row in pending {
         let Some(task) = row.task else { continue };
@@ -700,9 +761,99 @@ async fn expire_one(
         Action::ResumeProject { project } => {
             crate::budget::cooldown_breaker(txn.conn(), *project, now).await?;
         }
+        Action::AskUser { question, .. } => {
+            let d = deliver(
+                txn,
+                row,
+                question,
+                Reply::NoAnswer(format!("{hours} 小時內沒有回答，已經逾時")),
+            )
+            .await?;
+            ends.planner = d.planner;
+        }
         _ => {}
     }
     Ok(ends)
+}
+
+/// 你對問題的回應。
+enum Reply {
+    Answer(String),
+    /// 沒有答案：略過、逾時；內容是給 agent 看的說明。
+    NoAnswer(String),
+}
+
+/// 回應送到之後 commit 時要叫醒的。
+#[derive(Default)]
+struct Delivered {
+    worker: bool,
+    planner: bool,
+    /// 對話 agent 的系統觸發：(project, 對話流裡的項目, 給 agent 的文字)。
+    chat: Option<(ProjectId, pots_proto::ItemId, String)>,
+}
+
+/// 把你對問題的回應交給問的 agent：worker 的任務被叫醒、Planner 排一個 run、對話 agent（只有回答時）
+/// 收到一則系統觸發。
+async fn deliver(
+    txn: &mut LogTxn<'_>,
+    row: &ApprovalRow,
+    question: &str,
+    reply: Reply,
+) -> Result<Delivered, Error> {
+    let mut out = Delivered::default();
+    let q = tasks::one_line(question, 300);
+    if row.task.is_some() {
+        if let Some(t) = waiting_task(txn.conn(), row).await?
+            && let Some(cond) = waiting_cond(&t)
+        {
+            // 你的答案是使用者說的話，照原文轉給 worker。
+            let text = match &reply {
+                Reply::Answer(a) => format!("使用者回答了你的問題「{q}」：{a}"),
+                Reply::NoAnswer(why) => format!(
+                    "你的問題「{q}」沒有得到回答：{why}。依現有資訊自己決定；真的做不下去就 escalate"
+                ),
+            };
+            watcher::wake_task(txn, &t, &cond, &text).await?;
+            out.worker = true;
+        }
+    } else if let Some(goal) = row.goal {
+        let active = tasks::goal(txn.conn(), goal)
+            .await?
+            .is_some_and(|g| g.state.is_active());
+        if active {
+            let (answer, outcome) = match reply {
+                Reply::Answer(a) => (Some(a), String::new()),
+                Reply::NoAnswer(why) => (None, why),
+            };
+            crate::planner::enqueue(
+                txn.conn(),
+                row.project,
+                goal,
+                &crate::planner::PlannerTrigger::Answered {
+                    question: question.to_string(),
+                    answer,
+                    outcome,
+                },
+            )
+            .await?;
+            out.planner = true;
+        }
+    } else if let Reply::Answer(a) = reply {
+        let text = format!("（問題卡片的回答）使用者回答了你之前問的「{q}」：\n\n{a}");
+        let item = crate::runs::post_system_trigger(
+            txn,
+            row.project,
+            &format!(
+                "你回答了「{}」：{}",
+                tasks::one_line(question, 100),
+                tasks::one_line(&a, 200)
+            ),
+            &text,
+        )
+        .await?;
+        out.chat = Some((row.project, item, text));
+    }
+    Ok(out)
 }
 
 /// 還在等這筆核准的任務。
@@ -1115,6 +1266,63 @@ pub async fn decide(
             txn.commit().await?;
             return Ok(Err("動作的內容和申請時不一致，沒有執行".into()));
         }
+        if let Action::AskUser {
+            question,
+            options,
+            allow_other,
+        } = &row.action
+        {
+            let reply = if approve {
+                let Some(answer) = note.clone() else {
+                    return Ok(Err("要寫下答案".into()));
+                };
+                if !allow_other && !options.contains(&answer) {
+                    return Ok(Err("要選其中一個選項".into()));
+                }
+                transition(
+                    &mut txn,
+                    &row,
+                    ApprovalState::Executed,
+                    &Principal::Human,
+                    Some(Some(&answer)),
+                    Some("已回答"),
+                    now,
+                )
+                .await?;
+                Reply::Answer(answer)
+            } else {
+                transition(
+                    &mut txn,
+                    &row,
+                    ApprovalState::Rejected,
+                    &Principal::Human,
+                    Some(note.as_deref()),
+                    None,
+                    now,
+                )
+                .await?;
+                Reply::NoAnswer(match &note {
+                    Some(n) => format!("使用者略過了，理由：{n}"),
+                    None => "使用者略過了（沒有附理由）".into(),
+                })
+            };
+            let d = deliver(&mut txn, &row, question, reply).await?;
+            let (worker, planner, runs) =
+                (app.worker.clone(), app.planner.clone(), app.runs.clone());
+            txn.commit_then(|| {
+                if d.worker {
+                    worker.kick();
+                }
+                if d.planner {
+                    planner.kick();
+                }
+                if let Some((project, item, text)) = d.chat {
+                    runs.enqueue(project, crate::runs::Trigger { item, text }, false);
+                }
+            })
+            .await?;
+            return Ok(Ok(false));
+        }
         if !approve {
             let row = transition(
                 &mut txn,
@@ -1405,6 +1613,7 @@ async fn execute_local(
         Action::MergePr { .. } | Action::DeleteBranch { .. } | Action::ApplyChanges { .. } => {
             Ok(Err("這個動作要另外執行".into()))
         }
+        Action::AskUser { .. } => Ok(Err("問題要用回答處理".into())),
     }
 }
 
@@ -1652,6 +1861,7 @@ async fn request_approval_card(
     what: String,
     verify: impl FnOnce(&TaskRow) -> Result<(), ToolError>,
 ) -> Result<(ApprovalId, bool), ToolError> {
+    let ask = matches!(action, Action::AskUser { .. });
     let id = task.id;
     let now = ctx.clock.now();
     let result: Result<Result<(ApprovalId, bool), ToolError>, Error> = async {
@@ -1681,7 +1891,11 @@ async fn request_approval_card(
             &mut txn,
             &task,
             ctx.project,
-            WaitCond::Approval { id: row.id, what },
+            WaitCond::Approval {
+                id: row.id,
+                what,
+                ask,
+            },
             row.expires_at,
             &ctx.actor,
             now,
@@ -1886,6 +2100,193 @@ pub async fn propose_listener(
     .await?;
     automation::set_listener_approval(txn.conn(), listener, Some(row.id)).await?;
     Ok(row.id)
+}
+
+/// 問題最多幾個字。
+pub const MAX_QUESTION_CHARS: usize = 1000;
+/// 最多幾個選項、每個選項最多幾個字。
+pub const MAX_OPTIONS: usize = 6;
+pub const MAX_OPTION_CHARS: usize = 100;
+/// 對話 agent 同時最多幾個還沒回答的問題。
+const MAX_CHAT_QUESTIONS: i64 = 3;
+
+/// `ask_user`：問使用者一個問題，使用者在卡片上回答或略過。worker 的任務轉成等回答（這一輪就結束），
+/// 回答後被叫醒；Planner 繼續做別的，回答後由新的 run 收到；對話 agent 的卡片附在這次回覆下面，
+/// 回答以系統觸發送回對話。
+pub async fn ask(
+    ctx: &ToolCtx,
+    question: &str,
+    options: &[String],
+    allow_other: bool,
+    reason: Option<&str>,
+) -> Result<String, ToolError> {
+    if ctx.scope == Scope::Global {
+        return Err(bad("總管不能用 ask_user：直接在對話裡問"));
+    }
+    if ctx.scope.task().is_some() && ctx.finished.load(Ordering::SeqCst) {
+        return Err(bad("這一輪已經結束，沒有執行"));
+    }
+    let question =
+        tasks::check_text("question ", question, MAX_QUESTION_CHARS, true).map_err(bad)?;
+    let reason = match reason {
+        Some(r) => tasks::check_text("reason ", r, MAX_NOTE_CHARS, false).map_err(bad)?,
+        None => String::new(),
+    };
+    let mut opts: Vec<String> = Vec::new();
+    for o in options {
+        let o = o.trim();
+        if o.is_empty() || opts.iter().any(|x| x == o) {
+            continue;
+        }
+        if o.contains('\n') || o.chars().count() > MAX_OPTION_CHARS {
+            return Err(bad(format!(
+                "每個選項最多 {MAX_OPTION_CHARS} 個字、只能有一行"
+            )));
+        }
+        opts.push(o.to_string());
+    }
+    if opts.len() > MAX_OPTIONS {
+        return Err(bad(format!("選項最多 {MAX_OPTIONS} 個")));
+    }
+    // 沒有選項時只能自由回答。
+    let allow_other = allow_other || opts.is_empty();
+    let action = Action::AskUser {
+        question: question.clone(),
+        options: opts.clone(),
+        allow_other,
+    };
+    let title = tasks::one_line(&question, 200);
+    let id = match ctx.scope {
+        Scope::Task { task, .. } => {
+            let row = {
+                let mut conn = ctx.store.acquire().await.map_err(internal)?;
+                let row = tasks::task(&mut conn, task)
+                    .await
+                    .map_err(internal)?
+                    .ok_or_else(|| bad(format!("沒有任務 {task}")))?;
+                let goal = tasks::goal(&mut conn, row.goal).await.map_err(internal)?;
+                if !goal.is_some_and(|g| g.state.is_active()) {
+                    return Err(bad("Goal 已經結束"));
+                }
+                row
+            };
+            let check = |t: &TaskRow| -> Result<(), ToolError> {
+                if t.state != TaskState::Running {
+                    return Err(bad(format!("任務現在是 {}，不能發問", t.state.name())));
+                }
+                Ok(())
+            };
+            check(&row)?;
+            let (id, _) = request_approval_card(
+                ctx,
+                &row,
+                action,
+                title,
+                &reason,
+                tasks::one_line(&question, 120),
+                check,
+            )
+            .await?;
+            ctx.finish();
+            id
+        }
+        Scope::Goal(goal) => {
+            let now = ctx.clock.now();
+            let result: Result<Result<ApprovalId, ToolError>, Error> = async {
+                let mut txn = ctx.hub.begin().await?;
+                let active = tasks::goal(txn.conn(), goal)
+                    .await?
+                    .is_some_and(|g| g.state.is_active());
+                if !active {
+                    return Ok(Err(bad("Goal 已經結束")));
+                }
+                if let Some(q) = pending_planner_questions(txn.conn(), goal).await?.first() {
+                    return Ok(Err(bad(format!(
+                        "已經有一個問題在等使用者回答：「{}」；等它回答後再問",
+                        q.title
+                    ))));
+                }
+                let row = insert(
+                    &mut txn,
+                    NewApproval {
+                        project: ctx.project,
+                        goal: Some(goal),
+                        task: None,
+                        action,
+                        title,
+                        reason,
+                        by: ctx.actor.clone(),
+                        notify: true,
+                    },
+                    now,
+                )
+                .await?;
+                place_card(&mut txn, ctx, row.id).await?;
+                txn.commit().await?;
+                Ok(Ok(row.id))
+            }
+            .await;
+            result.map_err(internal)??
+        }
+        Scope::Project => {
+            let now = ctx.clock.now();
+            let result: Result<Result<ApprovalId, ToolError>, Error> = async {
+                let mut txn = ctx.hub.begin().await?;
+                let pending: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM approvals WHERE state = 'pending' AND project_id = ? \
+                     AND goal_id IS NULL AND task_id IS NULL AND action LIKE '{\"kind\":\"ask_user\"%'",
+                )
+                .bind(ctx.project.to_string())
+                .fetch_one(txn.conn())
+                .await?;
+                if pending >= MAX_CHAT_QUESTIONS {
+                    return Ok(Err(bad(format!(
+                        "已經有 {pending} 個問題在等使用者回答；等使用者回答後再問，或直接在回覆裡問"
+                    ))));
+                }
+                let row = insert(
+                    &mut txn,
+                    NewApproval {
+                        project: ctx.project,
+                        goal: None,
+                        task: None,
+                        action,
+                        title,
+                        reason,
+                        by: ctx.actor.clone(),
+                        notify: true,
+                    },
+                    now,
+                )
+                .await?;
+                txn.commit().await?;
+                Ok(Ok(row.id))
+            }
+            .await;
+            let id = result.map_err(internal)??;
+            ctx.cards.lock().unwrap().push(Card::Approval { id });
+            id
+        }
+        Scope::Global => unreachable!(),
+    };
+    let note = match ctx.scope {
+        Scope::Task { .. } => {
+            "已經問了使用者；任務轉成等回答，這一輪到此結束。使用者回答（或略過、逾時）後你會被叫醒並看到答案。"
+        }
+        Scope::Goal(_) => {
+            "已經問了使用者；可以先做不依賴答案的事。使用者回答（或略過、逾時）後會用新的觸發叫醒你。"
+        }
+        _ => {
+            "問題卡片會附在這次回覆下面：回覆裡用一句話帶過就好，不要再把問題和選項重寫一遍，然後結束這一輪；使用者回答後你會收到答案。"
+        }
+    };
+    Ok(json!({
+        "question_id": id.to_string(),
+        "options": opts,
+        "allow_other": allow_other,
+        "note": note,
+    })
+    .to_string())
 }
 
 /// project 預設的 merge 方式。

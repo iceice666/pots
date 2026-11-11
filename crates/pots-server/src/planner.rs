@@ -95,6 +95,14 @@ pub enum PlannerTrigger {
     },
     /// 預算熔斷解除了（M6）。
     BreakerCleared,
+    /// 你回答（或略過）了 Planner 用 `ask_user` 問的問題；`answer` 是 `None` 時 `outcome` 說明原因
+    /// （略過、逾時、撤回）。
+    Answered {
+        question: String,
+        answer: Option<String>,
+        #[serde(default)]
+        outcome: String,
+    },
 }
 
 impl PlannerTrigger {
@@ -138,6 +146,22 @@ impl PlannerTrigger {
                 format!("使用者核准追加 {tokens} tokens 的預算，請繼續這個 Goal。")
             }
             Self::BreakerCleared => "使用者的預算熔斷已解除，請繼續這個 Goal。".to_string(),
+            Self::Answered {
+                question,
+                answer: Some(answer),
+                ..
+            } => format!(
+                "使用者回答了你的問題「{}」：{}",
+                tasks::one_line(question, 300),
+                tasks::one_line(answer, 1000)
+            ),
+            Self::Answered {
+                question, outcome, ..
+            } => format!(
+                "你的問題「{}」沒有得到回答（{}）。依現有資訊自己決定，或換個問法再問。",
+                tasks::one_line(question, 300),
+                tasks::one_line(outcome, 300)
+            ),
         }
     }
 }

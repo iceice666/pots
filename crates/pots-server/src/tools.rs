@@ -666,6 +666,38 @@ impl Tool for PlatformTool {
                     &["edits", "reason"],
                 ),
             ),
+            Kind::Granted(ToolName::AskUser) => (
+                "ask_user",
+                match self.ctx.scope {
+                    Scope::Task { .. } => {
+                        "問使用者一個只有他能回答的問題（例如要用哪個環境、偏好哪種做法），使用者會在 Inbox 與對話裡\
+                         看到一張問題卡片，選一個選項或自己寫答案，也可以略過。設計決定先問 Planner（post_to_team）。\
+                         呼叫後任務轉成等回答、這一輪就結束；回答、略過或逾時後你會被叫醒並看到結果。"
+                    }
+                    Scope::Goal(_) => {
+                        "問使用者一個 Brief 沒寫清楚、只有他能決定的問題，使用者會看到一張問題卡片，選一個選項或自己寫答案，\
+                         也可以略過。不會結束這一輪：可以先做不依賴答案的事；回答、略過或逾時後會用新的觸發叫醒你。\
+                         同一個 Goal 一次只能有一個問題在等回答。"
+                    }
+                    _ => {
+                        "發一張問題卡片給使用者，讓他從明確的選項裡選（也可以自己寫答案或略過）。卡片附在這次回覆下面，\
+                         回覆裡一句話帶過就好。使用者回答後你會收到一則「問題卡片的回答」。開放式的追問直接在回覆裡問。"
+                    }
+                },
+                object(
+                    json!({
+                        "question": {"type": "string", "description": "要問的問題，寫清楚背景，讓使用者不看其他東西也能回答"},
+                        "options": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "建議的答案（最多 6 個、各一行）；不給就只能自由回答",
+                        },
+                        "allow_other": {"type": "boolean", "description": "可以不選選項、自己寫答案（預設 true）"},
+                        "reason": {"type": "string", "description": "為什麼需要使用者回答（選填，顯示在卡片上）"},
+                    }),
+                    &["question"],
+                ),
+            ),
             Kind::Granted(ToolName::SetWorkdir) => (
                 "set_workdir",
                 "設定這個 project 的工作資料夾（程式碼在哪、worker 在哪裡改）。使用者說「我們用這個 repo」\
@@ -798,6 +830,17 @@ impl PlatformTool {
                 .await
             }
             Kind::Granted(ToolName::SetWorkdir) => self.set_workdir(parse(arguments)?).await,
+            Kind::Granted(ToolName::AskUser) => {
+                let args: AskUserArgs = parse(arguments)?;
+                crate::approvals::ask(
+                    &self.ctx,
+                    &args.question,
+                    &args.options,
+                    args.allow_other.unwrap_or(true),
+                    args.reason.as_deref(),
+                )
+                .await
+            }
             Kind::Granted(t @ (ToolName::ProposeUserMdEdit | ToolName::ProposeProjectNote)) => {
                 let args: ProposeArgs = parse(arguments)?;
                 crate::approvals::propose_edit(
@@ -846,6 +889,18 @@ struct RequestApprovalArgs {
     #[serde(default)]
     method: Option<String>,
     reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskUserArgs {
+    question: String,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    allow_other: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]

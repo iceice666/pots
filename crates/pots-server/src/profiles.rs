@@ -73,6 +73,8 @@ pub enum ToolName {
     ProposeUserMdEdit,
     /// 提案修改 Project Notes（對話 agent、Planner；你核准後寫入）。
     ProposeProjectNote,
+    /// 問你一個問題（可帶選項）；你回答後叫醒問的 agent（對話 agent、Planner、worker）。
+    AskUser,
     // worker 的工具
     EditFile,
     Run,
@@ -116,6 +118,7 @@ impl ToolName {
             Self::SetWorkdir => "set_workdir",
             Self::ProposeUserMdEdit => "propose_user_md_edit",
             Self::ProposeProjectNote => "propose_project_note",
+            Self::AskUser => "ask_user",
             Self::EditFile => "edit_file",
             Self::Run => "run",
             Self::OpenPr => "open_pr",
@@ -206,6 +209,7 @@ const CHAT_RULES: Rules = Rules {
         ToolName::ArtifactHistory,
         ToolName::RestoreArtifact,
         ToolName::ArchiveArtifact,
+        ToolName::AskUser,
     ],
     kinds: &[ArtifactKind::Spec, ArtifactKind::Report],
 };
@@ -227,6 +231,7 @@ const PLANNER_RULES: Rules = Rules {
         ToolName::RunSubagent,
         ToolName::RequestApproval,
         ToolName::ProposeProjectNote,
+        ToolName::AskUser,
     ],
     kinds: &[ArtifactKind::Ledger, ArtifactKind::Report],
 };
@@ -248,6 +253,7 @@ const WORKER_RULES: Rules = Rules {
         ToolName::WriteArtifact,
         ToolName::RunSubagent,
         ToolName::RequestApproval,
+        ToolName::AskUser,
     ],
     kinds: &[ArtifactKind::Report],
 };
@@ -390,6 +396,9 @@ mod tests {
         assert!(p.planner.has(ToolName::RequestApproval));
         assert!(p.worker.has(ToolName::RequestApproval));
         assert!(p.chat.has(ToolName::ProposeUserMdEdit));
+        assert!(p.chat.has(ToolName::AskUser));
+        assert!(p.planner.has(ToolName::AskUser));
+        assert!(p.worker.has(ToolName::AskUser));
         assert!(p.chat.has(ToolName::ProposeProjectNote));
         assert_eq!(p.planner.artifact_kinds, [ArtifactKind::Ledger]);
         assert!(!p.planner.role_prompt().ends_with('\n'));

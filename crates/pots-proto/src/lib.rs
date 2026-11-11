@@ -32,7 +32,8 @@ use uuid::Uuid;
 ///   `DeleteSchedule`／`DeleteListener`／`ArchiveArtifact`）。
 /// - 14：依角色設定模型與 thinking（`ProvidersView::roles`、`SetRoleModel`）。
 /// - 15：每個 project 有自己的負責人（`ProjectAgentName`、`RenameAgent`）。
-pub const PROTOCOL_VERSION: u32 = 15;
+/// - 16：agent 問你問題（`ApprovalActionView::AskUser`，用 `Decide` 回答）。
+pub const PROTOCOL_VERSION: u32 = 16;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -1253,6 +1254,8 @@ pub enum InboxKind {
     Approval,
     NeedsYou,
     Mention,
+    /// agent 問你的問題（`ask_user`）。
+    Question,
 }
 
 impl InboxKind {
@@ -1261,6 +1264,7 @@ impl InboxKind {
             Self::Approval => "核准",
             Self::NeedsYou => "需要你處理",
             Self::Mention => "找你",
+            Self::Question => "問你",
         }
     }
 }
@@ -1286,6 +1290,10 @@ pub enum InboxAction {
     OpenThread,
     OpenOverseer,
     OpenSettings,
+    /// 回答 agent 的問題（開回答框：選項與自由回答）。
+    Answer,
+    /// 不回答 agent 的問題（可附理由）。
+    Skip,
 }
 
 impl InboxAction {
@@ -1301,6 +1309,8 @@ impl InboxAction {
             Self::OpenThread => "在頻道中查看",
             Self::OpenOverseer => "開啟總管",
             Self::OpenSettings => "開啟設定",
+            Self::Answer => "回答",
+            Self::Skip => "略過",
         }
     }
 }
@@ -1470,6 +1480,21 @@ pub enum ApprovalActionView {
         kind: ArtifactKind,
         title: String,
     },
+    /// agent 問你一個問題（`ask_user`）。用 `Decide` 回答：答案放在 `note`；答案在
+    /// `ApprovalView::note`。
+    AskUser {
+        question: String,
+        /// 建議的選項；空的表示只能自由回答。
+        options: Vec<String>,
+        /// 可以不選選項、自己寫答案。
+        allow_other: bool,
+    },
+}
+
+impl ApprovalActionView {
+    pub fn is_question(&self) -> bool {
+        matches!(self, Self::AskUser { .. })
+    }
 }
 
 /// 一筆核准（`proposal/approvals-and-notifications.md`）。
@@ -2542,6 +2567,9 @@ pub enum ClientCommand {
     Pricing,
     /// 核准或拒絕（可以附一句理由，拒絕的理由會帶給 agent）。伺服器回 `ApprovalChanged`；
     /// 已經決定過、逾時時回 `Error`。
+    ///
+    /// agent 的問題（`ApprovalActionView::AskUser`）：`approve: true` 是回答，`note` 是答案
+    /// （必填；不允許自由回答時要是其中一個選項）；`approve: false` 是略過，`note` 是選填的理由。
     Decide {
         approval: ApprovalId,
         approve: bool,
