@@ -780,6 +780,8 @@ pub struct PotsApp {
     pub automation_section: AutomationSection,
     /// 自動化頁的專案篩選；`None` 是所有專案。
     pub automation_filter: Option<ProjectId>,
+    /// 排程表要不要藏起已結束（`ScheduleView.finished`）的排程；只存在記憶體，重開回到顯示。
+    pub hide_finished_schedules: bool,
     pub artifact_editor: Option<ArtifactEditor>,
     pub send_mode: SendMode,
     /// 已展開的「用了 N 個工具」摘要。
@@ -924,6 +926,7 @@ impl PotsApp {
             inbox_filter: InboxFilter::All,
             automation_section: AutomationSection::Schedules,
             automation_filter: None,
+            hide_finished_schedules: false,
             artifact_editor: None,
             send_mode: SendMode::Queue,
             expanded_tools: HashSet::new(),
