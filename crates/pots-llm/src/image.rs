@@ -17,6 +17,23 @@ pub type ImagePayloads = std::collections::BTreeMap<String, String>;
 /// 用的佔位符。
 pub const IMAGE_PLACEHOLDER: &str = "[圖片]";
 
+/// 人類訊息 + 附件 → 寫進歷史的項目：一則 [`Item::User`]（可能只有空白），後面接著每張圖的
+/// [`Item::Image`]。
+///
+/// 呼叫端（伺服器的訊息落地路徑）在存 `om_raw` 時用它：歷史只留附件參照，base64 之後才由
+/// [`ImageLoader`] 讀。`images` 的順序就是使用者附上的順序。
+pub fn user_items(text: &str, images: &[(String, String)]) -> Vec<Item> {
+    let mut items = Vec::with_capacity(images.len() + 1);
+    items.push(Item::User {
+        text: text.to_owned(),
+    });
+    items.extend(images.iter().map(|(attachment_id, mime)| Item::Image {
+        attachment_id: attachment_id.clone(),
+        mime: mime.clone(),
+    }));
+    items
+}
+
 /// 模型不支援圖片輸入時給使用者看的話。
 pub const UNSUPPORTED_MESSAGE: &str = "目前選用的模型不支援圖片輸入";
 
@@ -189,6 +206,39 @@ mod tests {
         assert_eq!(
             data_url("image/png", "AAA"),
             "data:image/png;base64,AAA".to_string()
+        );
+    }
+
+    #[test]
+    fn user_items_keep_the_attachment_order() {
+        let items = user_items(
+            "看這兩張",
+            &[
+                ("a".to_string(), "image/png".to_string()),
+                ("b".to_string(), "image/jpeg".to_string()),
+            ],
+        );
+        assert_eq!(
+            items,
+            vec![
+                Item::User {
+                    text: "看這兩張".into()
+                },
+                Item::Image {
+                    attachment_id: "a".into(),
+                    mime: "image/png".into()
+                },
+                Item::Image {
+                    attachment_id: "b".into(),
+                    mime: "image/jpeg".into()
+                },
+            ]
+        );
+        assert_eq!(
+            user_items("", &[]),
+            vec![Item::User {
+                text: String::new()
+            }]
         );
     }
 
