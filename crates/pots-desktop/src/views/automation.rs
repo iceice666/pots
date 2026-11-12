@@ -17,6 +17,7 @@ use gpui_kit::{
 
 use super::channel::empty_state;
 use super::panel::{panel_frame, white_box};
+use super::text::{agent_text, clamp_markdown};
 use super::widgets::*;
 use crate::app::{AutomationSection, Panel, PotsApp};
 use crate::model::*;
@@ -123,7 +124,7 @@ fn box_title(text: &'static str) -> Div {
         .child(text)
 }
 
-fn history(records: &[TriggerRecord], empty: &'static str) -> Div {
+fn history(scope: &'static str, records: &[TriggerRecord], empty: &'static str) -> Div {
     let col = div().flex().flex_col().gap(px(8.));
     if records.is_empty() {
         return col.child(
@@ -133,7 +134,7 @@ fn history(records: &[TriggerRecord], empty: &'static str) -> Div {
                 .child(empty),
         );
     }
-    col.children(records.iter().map(|r| {
+    col.children(records.iter().enumerate().map(|(i, r)| {
         white_box()
             .gap(px(4.))
             .child(
@@ -146,7 +147,12 @@ fn history(records: &[TriggerRecord], empty: &'static str) -> Div {
                             .flex_1()
                             .min_w_0()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(r.title.clone()),
+                            // 觸發紀錄的標題是事件摘要（「#118 → 支援 refresh token」），
+                            // 由平台從事件內容截出，可能含行內 Markdown。
+                            .child(agent_text(
+                                SharedString::from(format!("trigger-{scope}-title-{i}")),
+                                r.title.clone(),
+                            )),
                     )
                     .child(
                         div()
@@ -478,7 +484,16 @@ impl PotsApp {
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(s.prompt.clone()),
+                                // 排程的 prompt 是使用者或 agent 寫的 Markdown，醒來時
+                                // 原文交給 agent；表格只放得下一行，先截一段（render 後
+                                // 再用 max_lines 夾住高度）。
+                                .child(
+                                    agent_text(
+                                        SharedString::from(format!("schedule-prompt-{}", id.0)),
+                                        clamp_markdown(&s.prompt, 1),
+                                    )
+                                    .max_lines(1),
+                                ),
                         )
                         .child(
                             div()
@@ -815,7 +830,12 @@ impl PotsApp {
                         .bg(theme::subtle_bg())
                         .text_size(px(13.))
                         .line_height(relative(1.6))
-                        .child(t),
+                        // 模板會原文接上事件內容變成 Goal brief，本身就是 Markdown
+                        // （`{{…}}`、縮排、底線都是字面文字，Markdown 不會吃掉）。
+                        .child(agent_text(
+                            SharedString::from(format!("listener-template-{}", id.0)),
+                            t,
+                        )),
                 )
             })
             .child(kv(
@@ -939,6 +959,7 @@ impl PotsApp {
                     .child(action)
                     .child(section_label("觸發紀錄").pt(px(8.)).pb(px(0.)))
                     .child(history(
+                        "listener",
                         &l.history,
                         if pending.is_some() {
                             "還沒有觸發紀錄。核准後才會開始監看。"
@@ -1004,7 +1025,7 @@ impl PotsApp {
                     .child(settings)
                     .child(prompt)
                     .child(section_label("觸發紀錄").pt(px(8.)).pb(px(0.)))
-                    .child(history(&s.history, "還沒有觸發過。")),
+                    .child(history("schedule", &s.history, "還沒有觸發過。")),
             )
             .child(
                 Self::detail_footer()
