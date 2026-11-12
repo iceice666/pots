@@ -25,7 +25,7 @@ use crate::notify::{self, Notifier};
 use crate::sync::{self, Notice, Sync};
 use crate::theme;
 use crate::views::composer_attach::{
-    DroppedFile, PendingAttachments, PickOutcome, pick_outcome, read_dropped,
+    DroppedFile, PendingAttachments, prompt_failure, read_dropped,
 };
 use crate::views::images::{AttachmentImages, FetchEvent};
 
@@ -3303,33 +3303,33 @@ impl PotsApp {
             prompt: Some("選擇要送給模型的圖片".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let outcome = pick_outcome(rx.await);
-            this.update_in(cx, |app, window, cx| app.on_picked(outcome, window, cx))
-                .ok();
+            // 外面那層 `Result` 是「回覆管道還在不在」：視窗關了就被丟掉，當成取消。
+            // 裡面那層才是對話框的結果：`None` 取消、`Err` 開不起來。
+            let picked = match rx.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => Some(paths),
+                Ok(Ok(_)) | Err(_) => None,
+                Ok(Err(reason)) => {
+                    let message = prompt_failure(reason);
+                    this.update_in(cx, |app, _window, cx| app.note_pick_failure(message, cx))
+                        .ok();
+                    return;
+                }
+            };
+            if let Some(paths) = picked {
+                this.update_in(cx, |app, window, cx| app.accept_dropped(paths, window, cx))
+                    .ok();
+            }
         })
         .detach();
     }
 
-    /// 檔案對話框的結局。`pick_images` 的非同步部分把結果交給它；測試也直接餵它，
-    /// 因為 headless 平台只能模擬「選了」與「取消」，模擬不出「對話框開不起來」。
-    pub fn on_picked(
-        &mut self,
-        outcome: PickOutcome,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match outcome {
-            PickOutcome::Cancelled => {}
-            PickOutcome::Failed(reason) => {
-                self.pending.update(cx, |p, cx| {
-                    p.note_prompt_failure(reason);
-                    cx.notify();
-                });
-                cx.notify();
-            }
-            // 選到的路徑跟拖進來的一模一樣：同一條讀檔 + 驗證管線。
-            PickOutcome::Paths(paths) => self.accept_dropped(paths, window, cx),
-        }
+    /// 檔案對話框開不起來：中文說明放進輸入框的錯誤列，已經在裡面的圖片不動。
+    pub fn note_pick_failure(&mut self, message: String, cx: &mut Context<Self>) {
+        self.pending.update(cx, |p, cx| {
+            p.note_prompt_failure(message);
+            cx.notify();
+        });
+        cx.notify();
     }
 
     /// 拖放懸停：只有游標真的在這個元素上才亮，離開就收回。

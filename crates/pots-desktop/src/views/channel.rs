@@ -191,10 +191,12 @@ fn header_icon_button(
         .tip(tip)
 }
 
-/// 輸入框底列的「選擇檔案」按鈕：紙夾圖示，滑過顯示說明。
+/// 輸入框底列的「選擇檔案」按鈕：圖示 + tooltip。`debug_selector` 讓測試（與 debug
+/// 查詢）點得到它，比照拖放目標 `DROP_TARGET_ID`。
 fn icon_pick_button(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_string())
         .flex_none()
         .size(px(28.))
         .rounded(px(6.))
@@ -520,9 +522,9 @@ impl PotsApp {
                     .child(
                         icon_pick_button("composer-pick")
                             .tip("選擇圖片檔（也可以直接拖放或貼上）")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.pick_images(window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.pick_images(window, cx)),
+                            ),
                     )
                     .child(send_button("send", 36.).on_click(
                         cx.listener(|this, _, window, cx| this.send_composer(window, cx)),

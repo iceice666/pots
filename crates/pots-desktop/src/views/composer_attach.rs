@@ -11,7 +11,7 @@
 //! png/jpeg/webp/gif（`pots_proto::ATTACHMENT_MIMES`），所以轉檔在客戶端做。
 
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use gpui_kit::{ClipboardEntry, ClipboardItem, Image as GpuiImage, ImageFormat as GpuiImageFormat};
@@ -222,10 +222,12 @@ impl PendingAttachments {
         let mut took = false;
         let mut reasons: Vec<String> = Vec::new();
         for file in files {
+            let name = file.name;
             match file.bytes {
-                Ok(bytes) => match self.accept_bytes(bytes, Some(file.name)) {
+                Ok(bytes) => match self.accept_bytes(bytes, Some(name.clone())) {
                     Ok(_) => took = true,
-                    Err(reason) => reasons.push(reason),
+                    // 多選時「哪個檔案被拒」比「為什麼」更難猜，把檔名接在前面。
+                    Err(reason) => reasons.push(format!("{name}：{reason}")),
                 },
                 Err(reason) => reasons.push(reason),
             }
@@ -280,36 +282,6 @@ impl PendingAttachments {
     fn reject(&mut self, message: String) -> String {
         self.error = Some(message.clone());
         message
-    }
-}
-
-/// 「選擇檔案」對話框的回覆要怎麼處理：拖放與選檔共用同一條「讀檔 → 驗證」管線，
-/// 差別只在路徑從哪裡來。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PickOutcome {
-    /// 使用者選了這些路徑（空清單等於沒選，會歸到 [`Self::Cancelled`]）。
-    Paths(Vec<PathBuf>),
-    /// 使用者按取消，或對話框的回覆管道被丟掉：不動輸入框。
-    Cancelled,
-    /// 對話框開不起來（Linux 缺 `xdg-desktop-portal` 等）：給中文說明。
-    Failed(String),
-}
-
-/// 把 `prompt_for_paths` 那條 oneshot 的結果翻成要做的事。
-///
-/// 三種結局都要分清楚：`Ok(Some(paths))` 是真的選了、`Ok(None)` 是取消、
-/// `Err` 是系統根本開不起對話框（要提示使用者改走拖放／貼上）。
-pub fn pick_outcome<E, C>(result: Result<Result<Option<Vec<PathBuf>>, E>, C>) -> PickOutcome
-where
-    E: std::fmt::Display,
-    C: std::fmt::Display,
-{
-    match result {
-        Ok(Ok(Some(paths))) if !paths.is_empty() => PickOutcome::Paths(paths),
-        Ok(Ok(_)) => PickOutcome::Cancelled,
-        Ok(Err(reason)) => PickOutcome::Failed(prompt_failure(reason)),
-        // 回覆管道被丟掉（視窗關了、對話框沒了）：當成取消，不吵使用者。
-        Err(_) => PickOutcome::Cancelled,
     }
 }
 
@@ -602,6 +574,16 @@ mod tests {
         }]);
         assert!(took);
         assert!(pending.error.is_none());
+    }
+
+    #[test]
+    fn a_missing_dialog_only_sets_the_error() {
+        let mut pending = PendingAttachments::new();
+        pending.accept_bytes(tiny_png(), None).expect("先收一張");
+        pending.note_prompt_failure(prompt_failure("沒有 dbus"));
+        assert_eq!(pending.len(), 1, "對話框開不起來不該動到既有的圖片");
+        let error = pending.error.as_deref().unwrap_or_default();
+        assert!(error.contains("系統沒有檔案選擇對話框"), "{error}");
     }
 
     #[test]
