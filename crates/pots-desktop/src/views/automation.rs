@@ -830,12 +830,10 @@ impl PotsApp {
                         .bg(theme::subtle_bg())
                         .text_size(px(13.))
                         .line_height(relative(1.6))
-                        // 模板會原文接上事件內容變成 Goal brief，本身就是 Markdown
-                        // （`{{…}}`、縮排、底線都是字面文字，Markdown 不會吃掉）。
-                        .child(agent_text(
-                            SharedString::from(format!("listener-template-{}", id.0)),
-                            t,
-                        )),
+                        // 刻意維持純文字：這是使用者在表單裡填的模板原文（會原樣接上事件
+                        // 內容變成 Goal brief），可能含 `{{…}}`、縮排與其他非常規語法；
+                        // 顯示「你填的原樣」比渲染重要，依「寧可少改不可丟字」保守處理。
+                        .child(t),
                 )
             })
             .child(kv(
