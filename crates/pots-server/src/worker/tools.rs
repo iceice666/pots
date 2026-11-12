@@ -49,6 +49,8 @@ enum Kind {
     ReadTeam,
     QuickFix,
     RunSubagent,
+    TryEnv,
+    ApplyEnv,
 }
 
 struct WorkerTool {
@@ -88,6 +90,8 @@ pub fn granted(name: ToolName, ctx: Arc<ToolCtx>) -> Option<Arc<dyn Tool>> {
         ToolName::ReadTeam => Kind::ReadTeam,
         ToolName::QuickFix => Kind::QuickFix,
         ToolName::RunSubagent => Kind::RunSubagent,
+        ToolName::TryEnv => Kind::TryEnv,
+        ToolName::ApplyEnv => Kind::ApplyEnv,
         _ => return None,
     };
     Some(tool(kind, ctx))
@@ -367,6 +371,25 @@ impl Tool for WorkerTool {
                     &["profile", "tasks"],
                 ),
             ),
+            Kind::TryEnv => (
+                "try_env",
+                "實際建置並驗證一份環境規格：用 base_image 加 install 建 image（同樣的內容會沿用已建好的），\
+                 開一個新的容器（掛這個任務的工作目錄與快取、帶 env），依序跑 prepare 與 verify。\
+                 回傳每一步的結果與輸出的最後一段；全部成功才算通過。建置可能要很久。",
+                super::env_setup::spec_schema(),
+            ),
+            Kind::ApplyEnv => (
+                "apply_env",
+                "套用這次 try_env 通過的環境規格（spec 要和通過的那份一字不差），之後這個 project 的 worker 都用它。\
+                 summary 寫你分析了什麼（語言、工具鏈、系統套件與依據的檔案）、為什麼這樣裝。呼叫後任務完成、這一輪結束。",
+                object(
+                    json!({
+                        "spec": super::env_setup::spec_schema(),
+                        "summary": {"type": "string"},
+                    }),
+                    &["spec", "summary"],
+                ),
+            ),
         };
         ToolSpec {
             name: name.into(),
@@ -404,6 +427,8 @@ impl WorkerTool {
                 | Kind::FailTask
                 | Kind::Escalate
                 | Kind::PostToTeam
+                | Kind::TryEnv
+                | Kind::ApplyEnv
         );
         if mutating && self.ctx.finished.load(Ordering::SeqCst) {
             return Err(bad(
@@ -472,6 +497,8 @@ impl WorkerTool {
                 let args: SubagentArgs = parse(a)?;
                 super::subagent::run(&self.ctx, &args.profile, args.tasks).await
             }
+            Kind::TryEnv => super::env_setup::try_env(&self.ctx, self.work()?, parse(a)?).await,
+            Kind::ApplyEnv => super::env_setup::apply_env(&self.ctx, self.work()?, parse(a)?).await,
         }
     }
 
@@ -883,10 +910,12 @@ impl WorkerTool {
             }
             if matches!(kind, TeamPostKind::Question | TeamPostKind::Blocker)
                 && to.is_none()
-                && tasks::goal_kind(txn.conn(), goal).await? == "quick"
+                && tasks::kind_without_planner(&tasks::goal_kind(txn.conn(), goal).await?)
             {
                 return Ok(Err(
-                    "快速修改沒有 Planner：需要決定的事用 escalate 升級成一般 Goal".into(),
+                    "這個 Goal 沒有 Planner：快速修改需要決定的事用 escalate 升級成一般 Goal；\
+                     環境分析要問使用者用 ask_user"
+                        .into(),
                 ));
             }
             // 交接與 Planner 對某個任務的決定會叫醒那個任務。worker 的交接只叫醒還在進行（或等待）的

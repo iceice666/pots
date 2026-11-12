@@ -50,6 +50,10 @@ pub struct ExecSpec {
     /// 容器的標籤：啟動時清掉這個實例之前（其他次啟動）留下的容器。
     pub instance: String,
     pub boot: String,
+    /// project 環境的環境變數（容器以 `-e` 帶入；本機加在每個指令上）。
+    pub env: Vec<(String, String)>,
+    /// project 環境的快取：主機目錄掛到容器裡的路徑（本機不掛）。
+    pub mounts: Vec<(PathBuf, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +94,8 @@ pub struct Env {
     run_dir: PathBuf,
     /// 這次 run 的輸出目錄（主機路徑；執行環境可寫）。
     out_dir: PathBuf,
+    /// project 環境的環境變數（本機執行時加在每個指令上；容器在啟動時就帶了）。
+    extra_env: Vec<(String, String)>,
 }
 
 /// 本機執行時留給指令的環境變數。
@@ -160,7 +166,7 @@ pub fn kill_group(pid: Option<u32>, signal: i32) {
 #[cfg(not(unix))]
 pub fn kill_group(_pid: Option<u32>, _signal: i32) {}
 
-async fn output_with_timeout(
+pub(crate) async fn output_with_timeout(
     mut cmd: Command,
     stdin: Option<Vec<u8>>,
     timeout: Duration,
@@ -254,9 +260,13 @@ impl Env {
             },
             run_dir: run_dir.to_path_buf(),
             out_dir,
+            extra_env: spec.env.clone(),
         };
         if spec.kind == ExecKind::Local {
             return Ok(env);
+        }
+        for (host, _) in &spec.mounts {
+            std::fs::create_dir_all(host).map_err(|e| format!("無法建立快取目錄：{e}"))?;
         }
         let name = container_name(run);
         let mut cmd = Command::new(&spec.runtime);
@@ -289,6 +299,12 @@ impl Env {
                     "-e",
                     &format!("CLAUDE_CONFIG_DIR={CONTAINER_CLAUDE_CONFIG}"),
                 ]);
+        }
+        for (host, path) in &spec.mounts {
+            cmd.arg("-v").arg(format!("{}:{path}", host.display()));
+        }
+        for (k, v) in &spec.env {
+            cmd.arg("-e").arg(format!("{k}={v}"));
         }
         cmd.args(["-e", &format!("HOME={CONTAINER_HOME}")])
             .args(["-w", &env.workdir]);
@@ -366,6 +382,9 @@ impl Env {
                 let mut cmd = Command::new(program);
                 cmd.current_dir(&self.task_dir);
                 restrict_env(&mut cmd, prefixes);
+                for (k, v) in &self.extra_env {
+                    cmd.env(k, v);
+                }
                 for (k, v) in env {
                     cmd.env(k, v);
                 }
@@ -493,6 +512,8 @@ mod tests {
             claude: None,
             instance: "i".into(),
             boot: "b".into(),
+            env: vec![("POTS_ENV_X".into(), "from-env".into())],
+            mounts: Vec::new(),
         };
         let env = Env::start(&spec, &task, &tmp.path().join("run"), "r1", "t1")
             .await
@@ -530,6 +551,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.stdout.trim(), "[]");
+        // project 環境的環境變數會帶給指令。
+        let out = env
+            .exec("echo \"[$POTS_ENV_X]\"", None, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(out.stdout.trim(), "[from-env]");
         assert!(env.hard_stop().is_none());
         let run_dir = env.run_dir().to_path_buf();
         assert!(run_dir.exists());

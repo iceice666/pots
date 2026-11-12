@@ -18,6 +18,7 @@
 
 pub mod claude;
 pub mod code;
+pub mod env_setup;
 pub mod exec;
 pub mod mcp;
 pub mod repo;
@@ -86,6 +87,13 @@ const CLAUDE_NOTE: &str = "\n\n# 在 Claude Code 裡\n\n\
 mcp__pots__fail_task、mcp__pots__escalate、mcp__pots__request_approval、mcp__pots__post_to_team、\
 mcp__pots__report_progress、mcp__pots__ask_user（要問使用者時用它，不要用 AskUserQuestion）。\
 不要用背景執行（run_in_background），也不要自己排程或等待：要等 CI 或其他事件一律用 mcp__pots__wait_for。";
+/// 環境 worker（Claude Code）的提醒與說明。
+const ENV_NUDGE: &str = "你還沒有用平台工具結束這一輪。請依情況呼叫 mcp__pots__apply_env（套用 try_env \
+通過的規格）、mcp__pots__fail_task（做不到）或 mcp__pots__ask_user（需要使用者決定）。";
+const ENV_CLAUDE_NOTE: &str = "\n\n# 在 Claude Code 裡\n\n\
+讀檔與在目前的容器裡試指令用 Claude Code 自己的工具（Read、Grep、Bash），不要改 repo 的檔案。平台工具的名稱前面有 \
+`mcp__pots__`：mcp__pots__try_env、mcp__pots__apply_env、mcp__pots__fail_task、mcp__pots__report_progress、\
+mcp__pots__ask_user（要問使用者時用它，不要用 AskUserQuestion）。不要用背景執行（run_in_background）。";
 /// worker 用 escalate 交回時任務原因的開頭（Planner 的決定只叫醒這種需要決定的任務）。
 pub const ESCALATED: &str = "worker 需要決定：";
 /// 快速修改的範圍上限。
@@ -366,7 +374,15 @@ pub async fn end_task(
     let Some(goal) = tasks::goal(txn.conn(), task.goal).await? else {
         return Ok(Ends::default());
     };
-    let quick = tasks::goal_kind(txn.conn(), goal.id).await? == "quick";
+    let kind = tasks::goal_kind(txn.conn(), goal.id).await?;
+    let quick = tasks::kind_without_planner(&kind);
+    // 卡片上的名稱：環境分析的 Goal 和快速修改一樣只有一個任務。
+    let (name, end) = match (kind.as_str(), end) {
+        // 環境 worker 沒有 escalate；萬一有也當成需要你決定。
+        ("env", TaskEnd::Escalate(r)) => ("環境分析", TaskEnd::NeedsHuman(r)),
+        ("env", e) => ("環境分析", e),
+        (_, e) => ("快速修改", e),
+    };
     let (state, label, detail) = match &end {
         TaskEnd::Done(s) => (TaskState::Done { outcome: s.clone() }, "完成", s.clone()),
         TaskEnd::Failed(e) => (TaskState::Failed { error: e.clone() }, "失敗", e.clone()),
@@ -414,7 +430,7 @@ pub async fn end_task(
                         summary: summary.clone(),
                     },
                     by,
-                    "快速修改完成",
+                    &format!("{name}完成"),
                 )
                 .await?;
                 ends.closed = Some(goal.id);
@@ -423,7 +439,7 @@ pub async fn end_task(
                     goal.project,
                     Card::Milestone {
                         goal: goal.id,
-                        text: format!("快速修改完成：{summary}{pr}"),
+                        text: format!("{name}完成：{summary}{pr}"),
                     },
                     run,
                 )
@@ -438,7 +454,7 @@ pub async fn end_task(
                         reason: format!("worker 沒有完成：{e}"),
                     },
                     by,
-                    "快速修改失敗",
+                    &format!("{name}失敗"),
                 )
                 .await?;
                 ends.closed = Some(goal.id);
@@ -447,7 +463,7 @@ pub async fn end_task(
                     goal.project,
                     Card::Milestone {
                         goal: goal.id,
-                        text: format!("快速修改沒有完成：{e}{pr}"),
+                        text: format!("{name}沒有完成：{e}{pr}"),
                     },
                     run,
                 )
@@ -477,7 +493,7 @@ pub async fn end_task(
                     goal.project,
                     Card::Milestone {
                         goal: goal.id,
-                        text: format!("快速修改卡住了：{}{pr}", tasks::one_line(&r, 500)),
+                        text: format!("{name}卡住了：{}{pr}", tasks::one_line(&r, 500)),
                     },
                     run,
                 )
@@ -565,15 +581,93 @@ pub async fn open_quick(
     reader: Option<&str>,
 ) -> Result<Result<(GoalId, TaskId), String>, Error> {
     let brief = format!("## 要做的事\n\n{}", description.trim());
-    let (goal, _) = match crate::tools::open_goal_with_brief(
+    open_single(
         txn,
         project,
         title,
         &brief,
+        description,
+        repo,
+        by,
+        reader,
+        crate::tools::Opening::Quick,
+        "快速修改",
+    )
+    .await
+}
+
+/// 環境分析的任務說明（環境 worker 的規則在 `profiles/env.toml`）。
+const ENV_TASK: &str = "分析這個 repo 需要什麼環境才能建置與測試，寫出環境規格，用 try_env 實際驗證到通過，\
+再用 apply_env 套用。";
+
+/// 開一個環境分析：`env` Goal 加一個任務，直接派給環境 worker，不經 Planner（project 設定的「分析並
+/// 建立環境」）。`note` 是你給它的額外說明。同一個 project 已經有進行中的環境分析時回錯誤。
+pub async fn open_env(
+    txn: &mut LogTxn<'_>,
+    project: ProjectId,
+    note: &str,
+    by: &Principal,
+) -> Result<Result<(GoalId, TaskId), String>, Error> {
+    if crate::project_env::setup_goal(txn.conn(), project)
+        .await?
+        .is_some()
+    {
+        return Ok(Err("這個 project 已經有一個環境分析在進行".into()));
+    }
+    let repo = match pick_workdir(txn.conn(), project, None).await? {
+        Ok(r) => r,
+        Err(e) => return Ok(Err(e)),
+    };
+    let note = note.trim();
+    let mut description = ENV_TASK.to_string();
+    let mut brief = format!("## 要做的事\n\n{ENV_TASK}");
+    if !note.is_empty() {
+        let note = tasks::truncate(note, 2000);
+        description.push_str(&format!("\n\n使用者的說明：{note}"));
+        brief.push_str(&format!("\n\n## 使用者的說明\n\n{note}"));
+    }
+    let opened = open_single(
+        txn,
+        project,
+        "分析並建立環境",
+        &brief,
+        &description,
+        &repo,
+        by,
+        None,
+        crate::tools::Opening::Env,
+        "環境分析",
+    )
+    .await?;
+    if opened.is_ok() {
+        crate::project_env::push(txn, project).await?;
+    }
+    Ok(opened)
+}
+
+/// 開一個只有一個任務、不經 Planner 的 Goal（快速修改、環境分析）。
+#[allow(clippy::too_many_arguments)]
+async fn open_single(
+    txn: &mut LogTxn<'_>,
+    project: ProjectId,
+    title: &str,
+    brief: &str,
+    description: &str,
+    repo: &str,
+    by: &Principal,
+    reader: Option<&str>,
+    opening: crate::tools::Opening,
+    reason: &str,
+) -> Result<Result<(GoalId, TaskId), String>, Error> {
+    let (goal, _) = match crate::tools::open_goal_with_brief(
+        txn,
+        project,
+        title,
+        brief,
         by,
         &by.label(),
         reader,
-        crate::tools::Opening::Quick,
+        opening,
     )
     .await?
     {
@@ -589,7 +683,7 @@ pub async fn open_quick(
         &task,
         &Cause {
             by: by.clone(),
-            reason: "快速修改".into(),
+            reason: reason.into(),
         },
     )
     .await?;
@@ -601,7 +695,8 @@ pub async fn open_quick(
 // ---------------------------------------------------------------------------
 // 設定
 
-/// 目前的 worker 設定（資料庫沒有時用 `defaults`）。
+/// 目前的 worker 設定（資料庫沒有時用 `defaults`）。worker 只在容器裡跑：資料庫裡舊的「本機」設定
+/// 讀出時當成容器（本機執行只留給測試，由 `defaults` 指定）。
 pub async fn load_settings(
     conn: &mut SqliteConnection,
     defaults: &WorkerSettingsDraft,
@@ -612,7 +707,11 @@ pub async fn load_settings(
             .fetch_optional(conn)
             .await?;
     Ok(text
-        .and_then(|t| serde_json::from_str(&t).ok())
+        .and_then(|t| serde_json::from_str::<WorkerSettingsDraft>(&t).ok())
+        .map(|mut d| {
+            d.exec = ExecKind::Container;
+            d
+        })
         .unwrap_or_else(|| defaults.clone()))
 }
 
@@ -640,9 +739,12 @@ pub fn check_settings(d: &WorkerSettingsDraft) -> Result<WorkerSettingsDraft, St
     if !(1..=8).contains(&d.max_parallel) {
         return Err("同時執行的 worker 要在 1 到 8 個之間".into());
     }
+    if d.exec != ExecKind::Container {
+        return Err("worker 只能在容器裡執行".into());
+    }
     Ok(WorkerSettingsDraft {
         backend: d.backend,
-        exec: d.exec,
+        exec: ExecKind::Container,
         runtime: runtime.into(),
         image: image.into(),
         claude_model: model.into(),
@@ -712,6 +814,8 @@ pub struct WorkCtx {
     pub checkout: Checkout,
     pub quick: bool,
     pub task: TaskId,
+    /// 環境分析的任務（`try_env`、`apply_env` 用）；一般任務是 `None`。
+    pub setup: Option<env_setup::EnvSetupCtx>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -727,6 +831,8 @@ struct Active {
     goal: GoalId,
     cancel: CancellationToken,
     reason: Option<StopReason>,
+    /// 執行時間上限（開始計時後才有；逾時的說明用）。
+    limit: Option<Duration>,
 }
 
 struct Inner {
@@ -1103,6 +1209,7 @@ impl Worker {
                         goal: goal.id,
                         cancel: cancel.clone(),
                         reason: None,
+                        limit: None,
                     },
                 );
             })
@@ -1142,39 +1249,20 @@ impl Worker {
                 }
             })
         };
-        // 執行時間上限。
-        let timer = {
-            let w = self.clone();
-            let task = job.task;
-            let limit = inner.config.run_timeout;
-            let beat = beat.clone();
-            tokio::spawn(async move {
-                tokio::select! {
-                    () = beat.cancelled() => {}
-                    () = tokio::time::sleep(limit) => {
-                        if let Some(a) = w.inner.active.lock().unwrap().get_mut(&task) {
-                            a.reason.get_or_insert(StopReason::Timeout);
-                            a.cancel.cancel();
-                        }
-                    }
-                }
-            })
-        };
-
         let result = self.run(&job).await;
         beat.cancel();
         let _ = heartbeat.await;
-        let _ = timer.await;
 
-        let reason = {
+        let (reason, limit) = {
             let mut active = inner.active.lock().unwrap();
-            let reason = active.get(&job.task).and_then(|a| a.reason);
+            let a = active.get(&job.task);
+            let out = (a.and_then(|a| a.reason), a.and_then(|a| a.limit));
             if active.get(&job.task).is_some_and(|a| a.run == job.run) {
                 active.remove(&job.task);
             }
-            reason
+            out
         };
-        if let Err(e) = self.finish(&job, result, reason).await {
+        if let Err(e) = self.finish(&job, result, reason, limit).await {
             tracing::error!(run = %job.run, error = %e, "無法記錄 worker run 的結束");
             if let Err(e) = mark_failed(&inner.store, job.run).await {
                 tracing::error!(run = %job.run, error = %e, "無法把 worker run 標成失敗");
@@ -1190,7 +1278,7 @@ impl Worker {
         let Some(project) = inner.store.project(job.project).await? else {
             return Ok(RunEnd::Skipped);
         };
-        let (task, goal, quick) = {
+        let (task, goal, kind, current_env) = {
             let mut conn = inner.store.acquire().await?;
             let Some(task) = tasks::task(&mut conn, job.task).await? else {
                 return Ok(RunEnd::Skipped);
@@ -1198,9 +1286,13 @@ impl Worker {
             let Some(goal) = tasks::goal(&mut conn, job.goal).await? else {
                 return Ok(RunEnd::Skipped);
             };
-            let quick = tasks::goal_kind(&mut conn, goal.id).await? == "quick";
-            (task, goal, quick)
+            let kind = tasks::goal_kind(&mut conn, goal.id).await?;
+            let current_env = crate::project_env::current(&mut conn, project.id).await?;
+            (task, goal, kind, current_env)
         };
+        let quick = kind == "quick";
+        // 環境分析的任務：環境 worker 的 profile、較長的執行時間上限。
+        let setup_task = kind == "env";
         if !goal.state.is_active() || task.state != TaskState::Running {
             return Ok(RunEnd::Skipped);
         }
@@ -1276,15 +1368,21 @@ impl Worker {
         }
 
         // 觸發訊息先組好（之後出錯時不會留下容器）。
-        let message = {
+        let mut message = {
             let mut txn = inner.hub.begin().await?;
             let m = render_prompt(&mut txn, &task, &goal, &job.triggers, &checkout, quick).await?;
             txn.commit().await?;
             m
         };
+        if setup_task {
+            message.push_str(&env_setup::describe_current(
+                current_env.as_ref(),
+                &settings.image,
+            ));
+        }
 
-        // 執行環境。
-        let spec = ExecSpec {
+        // 執行環境：project 有使用中的環境時用它的 image、環境變數與快取。
+        let base_spec = ExecSpec {
             kind: settings.exec,
             runtime: settings.runtime.clone(),
             image: settings.image.clone(),
@@ -1296,7 +1394,59 @@ impl Worker {
             }),
             instance: inner.instance.clone(),
             boot: inner.boot.clone(),
+            env: Vec::new(),
+            mounts: Vec::new(),
         };
+        let mut spec = base_spec.clone();
+        if let Some((rev, env_spec)) = &current_env {
+            let image = if settings.exec == ExecKind::Container {
+                {
+                    let mut txn = inner.hub.begin().await?;
+                    tasks::set_task_work(txn.conn(), task.id, None, None, Some("準備環境 image…"))
+                        .await?;
+                    tasks::push_goal(&mut txn, goal.id).await?;
+                    txn.commit().await?;
+                }
+                let built = tokio::select! {
+                    () = job.cancel.cancelled() => return Ok(RunEnd::Cancelled),
+                    r = crate::project_env::ensure_image(
+                        &settings.runtime,
+                        &inner.data_dir,
+                        project.id,
+                        env_spec,
+                        &settings.image,
+                        &inner.instance,
+                    ) => r,
+                };
+                match built {
+                    Ok(b) => Some(b.tag),
+                    // 環境分析不靠目前的環境：建不起來就在平台的 image 裡分析。
+                    Err(e) if setup_task => {
+                        message.push_str(&format!(
+                            "\n（第 {rev} 版的 image 建不起來，你現在跑在平台的 worker image 裡：{}）\n",
+                            tasks::one_line(&e, 500)
+                        ));
+                        None
+                    }
+                    Err(e) => {
+                        return Ok(RunEnd::Stuck(format!(
+                            "project 環境（第 {rev} 版）的 image 建不起來，可以到 project 設定重新分析環境\
+                             或換回其他版本：{}",
+                            tasks::one_line(&e, 1500)
+                        )));
+                    }
+                }
+            } else {
+                Some(String::new())
+            };
+            if let Some(image) = image {
+                if settings.exec == ExecKind::Container {
+                    spec.image = image;
+                }
+                spec.env = env_spec.env.clone();
+                spec.mounts = crate::project_env::mounts(&inner.data_dir, project.id, env_spec);
+            }
+        }
         let run_name = job.run.to_string();
         let run_dir = inner.data_dir.join("worker-runs").join(&run_name);
         let task_name = task.id.to_string();
@@ -1309,13 +1459,70 @@ impl Worker {
             Err(e) => return Ok(RunEnd::Stuck(e)),
         };
 
+        // 環境的準備腳本（環境分析不跑：它可能就是壞掉的那部分）。不算進執行時間上限。
+        if !setup_task
+            && let Some((rev, env_spec)) = &current_env
+            && !env_spec.prepare.is_empty()
+        {
+            {
+                let mut txn = inner.hub.begin().await?;
+                tasks::set_task_work(txn.conn(), task.id, None, None, Some("執行環境的準備腳本…"))
+                    .await?;
+                tasks::push_goal(&mut txn, goal.id).await?;
+                txn.commit().await?;
+            }
+            let script = format!("set -e\n{}", env_spec.prepare);
+            let out = tokio::select! {
+                () = job.cancel.cancelled() => None,
+                r = env.exec(&script, None, crate::project_env::PREPARE_TIMEOUT) => Some(r),
+            };
+            let failure = match out {
+                None => {
+                    stop_env(env).await;
+                    return Ok(RunEnd::Cancelled);
+                }
+                Some(Err(e)) => Some(e),
+                Some(Ok(o)) if o.timed_out => Some(format!(
+                    "超過 {} 分鐘",
+                    crate::project_env::PREPARE_TIMEOUT.as_secs() / 60
+                )),
+                Some(Ok(o)) if !o.ok() => Some(format!(
+                    "exit code {:?}：{}",
+                    o.code,
+                    tasks::one_line(
+                        &crate::project_env::tail(format!("{}{}", o.stdout, o.stderr).trim(), 1200),
+                        1500
+                    )
+                )),
+                Some(Ok(_)) => None,
+            };
+            if let Some(why) = failure {
+                stop_env(env).await;
+                return Ok(RunEnd::Stuck(format!(
+                    "project 環境（第 {rev} 版）的準備腳本失敗，可以到 project 設定重新分析環境或換回其他版本：{why}"
+                )));
+            }
+        }
+        // 執行時間從這裡開始算：準備工作目錄、建 image 與準備腳本都不算。
+        let limit = if setup_task {
+            inner.config.env_run_timeout
+        } else {
+            inner.config.run_timeout
+        };
+        let _timer = self.arm_timer(job, limit);
+
         // USER.md 在最前面，Project Notes 接在 project 指示後面（Claude Code 一樣經 append-system-prompt
         // 帶入：本機模式的設定目錄是你自己的，容器的設定目錄由所有任務共用，都不適合寫 CLAUDE.md）。
         let (head, tail) = {
             let mut conn = inner.store.acquire().await?;
             crate::user_md::compose(&mut conn, project.id).await?
         };
-        let mut instructions = format!("{head}{}", inner.profiles.worker.role_prompt());
+        let profile = if setup_task {
+            &inner.profiles.env
+        } else {
+            &inner.profiles.worker
+        };
+        let mut instructions = format!("{head}{}", profile.role_prompt());
         instructions.push_str(&format!(
             "\n\n這個任務屬於 project「{}」。",
             tasks::one_line(&project.name, 200)
@@ -1333,27 +1540,46 @@ impl Worker {
             checkout: checkout.clone(),
             quick,
             task: task.id,
+            setup: setup_task.then(|| env_setup::EnvSetupCtx {
+                project: project.id,
+                exec: base_spec,
+                default_image: settings.image.clone(),
+                data_dir: inner.data_dir.clone(),
+                run: job.run,
+                verified: Default::default(),
+                tries: Default::default(),
+            }),
         });
         let result = match settings.backend {
             WorkerBackendKind::Builtin => {
-                self.run_builtin(job, &task, work, instructions, message)
+                self.run_builtin(job, &task, profile, work, instructions, message)
                     .await
             }
             WorkerBackendKind::ClaudeCode => {
-                self.run_claude(job, &task, &settings, work, instructions, message)
+                self.run_claude(job, &task, profile, &settings, work, instructions, message)
                     .await
             }
         };
-        match Arc::try_unwrap(env) {
-            Ok(env) => env.stop().await,
-            Err(env) => {
-                // 還有工具拿著（不應該發生）：至少把容器收掉。
-                if let Some(stop) = env.hard_stop() {
-                    stop().await;
-                }
-            }
-        }
+        stop_env(env).await;
         result
+    }
+
+    /// 開始計時：超過 `limit` 就中斷這個 run（逾時）。回傳的 guard 被丟掉時停止計時。
+    fn arm_timer(&self, job: &Job, limit: Duration) -> AbortOnDrop {
+        if let Some(a) = self.inner.active.lock().unwrap().get_mut(&job.task)
+            && a.run == job.run
+        {
+            a.limit = Some(limit);
+        }
+        let w = self.clone();
+        let task = job.task;
+        AbortOnDrop(tokio::spawn(async move {
+            tokio::time::sleep(limit).await;
+            if let Some(a) = w.inner.active.lock().unwrap().get_mut(&task) {
+                a.reason.get_or_insert(StopReason::Timeout);
+                a.cancel.cancel();
+            }
+        }))
     }
 
     async fn tool_ctx(
@@ -1414,6 +1640,7 @@ impl Worker {
         &self,
         job: &Job,
         task: &TaskRow,
+        profile: &AgentProfile,
         work: Arc<WorkCtx>,
         instructions: String,
         message: String,
@@ -1436,9 +1663,9 @@ impl Worker {
             provider: route.provider,
             model: route.model,
             instructions: Some(instructions),
-            tools: crate::tools::build(&inner.profiles.worker, ctx.clone()),
+            tools: crate::tools::build(profile, ctx.clone()),
             hook: Arc::new(ctx.gate()),
-            max_turns: inner.profiles.worker.max_turns,
+            max_turns: profile.max_turns,
             session_id: Some(format!("task:{}", task.id)),
         };
         let (events, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1484,6 +1711,7 @@ impl Worker {
         &self,
         job: &Job,
         task: &TaskRow,
+        profile: &AgentProfile,
         settings: &WorkerSettingsDraft,
         work: Arc<WorkCtx>,
         instructions: String,
@@ -1494,8 +1722,8 @@ impl Worker {
             return Ok(RunEnd::Stuck("服務還沒準備好".into()));
         };
         let env = work.env.clone();
-        // 平台工具：worker profile 去掉 Claude Code 自己就有的（改檔、執行、subagent）。
-        let mut profile: AgentProfile = inner.profiles.worker.clone();
+        // 平台工具：profile 去掉 Claude Code 自己就有的（改檔、執行、subagent）。
+        let mut profile: AgentProfile = profile.clone();
         profile.tools.retain(|t| {
             !matches!(
                 t,
@@ -1547,7 +1775,15 @@ impl Worker {
             }
             ExecKind::Local => ("user".to_string(), None),
         };
-        let instructions = format!("{instructions}{CLAUDE_NOTE}");
+        let setup_task = work_is_setup(&ctx);
+        let instructions = format!(
+            "{instructions}{}",
+            if setup_task {
+                ENV_CLAUDE_NOTE
+            } else {
+                CLAUDE_NOTE
+            }
+        );
 
         // session：有就續接（官方 session 檔還在時），否則開新的。
         let previous = session_of(&inner.store, task.id).await?;
@@ -1591,7 +1827,7 @@ impl Worker {
                 allowed_tools: allowed.clone(),
                 disallowed_tools: CLAUDE_DISALLOWED.iter().map(|s| s.to_string()).collect(),
                 policy: Arc::new(claude_policy),
-                nudge: Some(NUDGE.into()),
+                nudge: Some(if setup_task { ENV_NUDGE } else { NUDGE }.into()),
                 finished: ctx.finished.clone(),
                 stop: ctx.stop.clone(),
                 grace: inner.config.grace,
@@ -1696,6 +1932,7 @@ impl Worker {
         job: &Job,
         result: Result<RunEnd, Error>,
         reason: Option<StopReason>,
+        limit: Option<Duration>,
     ) -> Result<(), Error> {
         let inner = &self.inner;
         let shutdown = inner.shutdown.is_cancelled();
@@ -1741,7 +1978,7 @@ impl Worker {
                         t,
                         TaskEnd::NeedsHuman(format!(
                             "worker 超過執行時間上限（{} 分鐘）",
-                            inner.config.run_timeout.as_secs() / 60
+                            limit.unwrap_or(inner.config.run_timeout).as_secs() / 60
                         )),
                         &Principal::System,
                         Some(job.run),
@@ -1816,6 +2053,32 @@ impl Worker {
         }
         Ok(())
     }
+}
+
+/// 計時的 task：丟掉時停止。
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// 收掉執行環境（移除容器、run 目錄）。
+async fn stop_env(env: Arc<Env>) {
+    match Arc::try_unwrap(env) {
+        Ok(env) => env.stop().await,
+        Err(env) => {
+            // 還有工具拿著（不應該發生）：至少把容器收掉。
+            if let Some(stop) = env.hard_stop() {
+                stop().await;
+            }
+        }
+    }
+}
+
+fn work_is_setup(ctx: &ToolCtx) -> bool {
+    ctx.work.as_ref().is_some_and(|w| w.setup.is_some())
 }
 
 fn work_dir(ctx: &ToolCtx) -> String {
@@ -2169,8 +2432,11 @@ mod tests {
         let mut bad = d.clone();
         bad.runtime = "docker; rm -rf /".into();
         assert!(check_settings(&bad).is_err());
-        let mut bad = d;
+        let mut bad = d.clone();
         bad.max_parallel = 0;
+        assert!(check_settings(&bad).is_err());
+        let mut bad = d;
+        bad.exec = ExecKind::Local;
         assert!(check_settings(&bad).is_err());
     }
 }

@@ -1441,9 +1441,10 @@ impl PlatformTool {
                 "這個 Goal 還是草稿，沒有 Planner 可以改方向：要改就帶 edits 改 Brief",
             ));
         }
-        if tasks::goal_kind(txn.conn(), g.id).await.map_err(internal)? == "quick" {
+        if tasks::kind_without_planner(&tasks::goal_kind(txn.conn(), g.id).await.map_err(internal)?)
+        {
             return Err(bad(
-                "這是快速修改，沒有 Planner 可以改方向：要改就用 cancel_goal 取消它，再開一個新的",
+                "這個 Goal 沒有 Planner 可以改方向（快速修改或環境分析）：要改就用 cancel_goal 取消它，再開一個新的",
             ));
         }
         let mut rev = None;
@@ -1907,6 +1908,10 @@ pub async fn close_goal(
         automation::push(txn, Timestamp::now()).await?;
     }
     tasks::push_goal(txn, g.id).await?;
+    // 環境分析結束：project 設定的「正在分析」跟著更新。
+    if tasks::goal_kind(txn.conn(), g.id).await? == "env" {
+        crate::project_env::push(txn, g.project).await?;
+    }
     Ok(cancelled)
 }
 
@@ -1957,6 +1962,8 @@ pub(crate) enum Opening {
     Draft,
     /// 快速修改：種類是 `quick`，不排 Planner（呼叫端自己建任務）。
     Quick,
+    /// 環境 worker：種類是 `env`，不排 Planner（呼叫端自己建任務）。
+    Env,
 }
 
 /// 開 Goal 與 Brief，見 [`Opening`]。
@@ -2032,6 +2039,7 @@ pub(crate) async fn open_goal_with_brief(
     }
     match opening {
         Opening::Quick => tasks::set_goal_kind(txn.conn(), goal.id, "quick").await?,
+        Opening::Env => tasks::set_goal_kind(txn.conn(), goal.id, "env").await?,
         Opening::Draft => {}
         Opening::Start => {
             planner::enqueue(

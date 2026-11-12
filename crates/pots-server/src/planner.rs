@@ -187,7 +187,7 @@ pub async fn enqueue(
     goal: GoalId,
     trigger: &PlannerTrigger,
 ) -> Result<(), Error> {
-    if tasks::goal_kind(conn, goal).await? == "quick" {
+    if tasks::kind_without_planner(&tasks::goal_kind(conn, goal).await?) {
         return Ok(());
     }
     let queued = sqlx::query(

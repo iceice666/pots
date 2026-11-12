@@ -21,6 +21,7 @@ const BUILTIN_WORKER: &str = include_str!("../profiles/worker.toml");
 const BUILTIN_EXPLORER: &str = include_str!("../profiles/explorer.toml");
 const BUILTIN_REVIEWER: &str = include_str!("../profiles/reviewer.toml");
 const BUILTIN_GLOBAL: &str = include_str!("../profiles/global.toml");
+const BUILTIN_ENV: &str = include_str!("../profiles/env.toml");
 
 /// 唯讀基礎集以外、要在 profile 裡授權的工具。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -75,6 +76,10 @@ pub enum ToolName {
     ProposeProjectNote,
     /// 問你一個問題（可帶選項）；你回答後叫醒問的 agent（對話 agent、Planner、worker）。
     AskUser,
+    /// 建置並驗證一份環境規格（環境 worker）。
+    TryEnv,
+    /// 套用驗證過的環境規格（環境 worker；任務完成）。
+    ApplyEnv,
     // worker 的工具
     EditFile,
     Run,
@@ -119,6 +124,8 @@ impl ToolName {
             Self::ProposeUserMdEdit => "propose_user_md_edit",
             Self::ProposeProjectNote => "propose_project_note",
             Self::AskUser => "ask_user",
+            Self::TryEnv => "try_env",
+            Self::ApplyEnv => "apply_env",
             Self::EditFile => "edit_file",
             Self::Run => "run",
             Self::OpenPr => "open_pr",
@@ -173,6 +180,8 @@ pub struct Profiles {
     pub reviewer: AgentProfile,
     /// 總管：跨 project 的全域對話（M6）。
     pub global: AgentProfile,
+    /// 環境 worker：分析 repo、建立 project 的環境。
+    pub env: AgentProfile,
 }
 
 struct Rules {
@@ -260,6 +269,22 @@ const WORKER_RULES: Rules = Rules {
     kinds: &[ArtifactKind::Report],
 };
 
+/// 環境 worker：讀 repo、在容器裡試指令、建置與套用環境；不改 repo、不開 PR。
+const ENV_RULES: Rules = Rules {
+    name: "env",
+    memory: MemoryMode::Stateless,
+    tools: &[
+        ToolName::Run,
+        ToolName::TryEnv,
+        ToolName::ApplyEnv,
+        ToolName::ReportProgress,
+        ToolName::FailTask,
+        ToolName::AskUser,
+        ToolName::RunSubagent,
+    ],
+    kinds: &[],
+};
+
 /// subagent 只有唯讀工具（不能再開 subagent）。
 const EXPLORER_RULES: Rules = Rules {
     name: "explorer",
@@ -307,6 +332,7 @@ impl Profiles {
                 .expect("內建 reviewer.toml"),
             global: parse(BUILTIN_GLOBAL, &GLOBAL_RULES, "內建 global.toml")
                 .expect("內建 global.toml"),
+            env: parse(BUILTIN_ENV, &ENV_RULES, "內建 env.toml").expect("內建 env.toml"),
         }
     }
 
@@ -334,6 +360,7 @@ impl Profiles {
             explorer: one(BUILTIN_EXPLORER, &EXPLORER_RULES)?,
             reviewer: one(BUILTIN_REVIEWER, &REVIEWER_RULES)?,
             global: one(BUILTIN_GLOBAL, &GLOBAL_RULES)?,
+            env: one(BUILTIN_ENV, &ENV_RULES)?,
         })
     }
 }
@@ -405,6 +432,9 @@ mod tests {
         assert!(p.worker.has(ToolName::AskUser));
         assert!(p.chat.has(ToolName::ProposeProjectNote));
         assert_eq!(p.planner.artifact_kinds, [ArtifactKind::Ledger]);
+        assert!(p.env.has(ToolName::TryEnv) && p.env.has(ToolName::ApplyEnv));
+        assert!(!p.env.has(ToolName::EditFile) && !p.env.has(ToolName::OpenPr));
+        assert!(!p.worker.has(ToolName::ApplyEnv));
         assert!(!p.planner.role_prompt().ends_with('\n'));
     }
 

@@ -207,7 +207,7 @@ impl Hub {
     async fn snapshot(&self, state: &HubState) -> Result<InstanceSnapshot, Error> {
         let mut projects = Vec::new();
         for p in self.store.list_projects().await? {
-            let (memory, goals, artifacts, repos, merge_method) = {
+            let (memory, goals, artifacts, repos, merge_method, env) = {
                 let mut conn = self.store.acquire().await?;
                 let memory = crate::memory::view(&mut conn, p.id).await?;
                 let goals = crate::tasks::project_goals(&mut conn, p.id).await?;
@@ -218,7 +218,8 @@ impl Hub {
                     .collect();
                 let repos = crate::automation::project_repos(&mut conn, p.id).await?;
                 let merge = crate::approvals::project_merge_method(&mut conn, p.id).await?;
-                (memory, goals, artifacts, repos, merge)
+                let env = crate::project_env::view(&mut conn, p.id).await?;
+                (memory, goals, artifacts, repos, merge, env)
             };
             projects.push(ProjectSnapshot {
                 id: p.id,
@@ -232,6 +233,7 @@ impl Hub {
                 repos,
                 workdir: p.workdir.clone(),
                 merge_method,
+                env,
             });
         }
         let (automation, approvals, notifications, user_md) = {

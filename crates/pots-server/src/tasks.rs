@@ -678,7 +678,12 @@ pub async fn set_assignee(
     Ok(())
 }
 
-/// Goal 的種類：`feature` 或 `quick`。
+/// 沒有 Planner 的 Goal 種類：快速修改與環境 worker 都只有一個任務、直接派給 worker。
+pub fn kind_without_planner(kind: &str) -> bool {
+    matches!(kind, "quick" | "env")
+}
+
+/// Goal 的種類：`feature`、`quick` 或 `env`（環境 worker）。
 pub async fn goal_kind(conn: &mut SqliteConnection, id: GoalId) -> Result<String, Error> {
     Ok(sqlx::query_scalar("SELECT kind FROM goals WHERE id = ?")
         .bind(id.to_string())
@@ -708,6 +713,7 @@ pub async fn goal_view(conn: &mut SqliteConnection, g: &GoalRow) -> Result<GoalV
         .await?
         .map(|a| a.body)
         .unwrap_or_default();
+    let kind = goal_kind(conn, g.id).await?;
     Ok(GoalView {
         id: g.id,
         title: g.title.clone(),
@@ -717,7 +723,8 @@ pub async fn goal_view(conn: &mut SqliteConnection, g: &GoalRow) -> Result<GoalV
         tasks: views,
         team: crate::team::views(conn, g.id).await?,
         brief,
-        quick: goal_kind(conn, g.id).await? == "quick",
+        quick: kind == "quick",
+        env: kind == "env",
     })
 }
 

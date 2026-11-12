@@ -25,6 +25,7 @@ mod notifications;
 mod planner;
 mod preset_provider;
 mod profiles;
+mod project_env;
 mod providers;
 mod runs;
 pub mod service;

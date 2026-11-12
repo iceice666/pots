@@ -1322,3 +1322,232 @@ async fn local_workdir_applies_the_branch_on_approval() {
     );
     srv.stop().await;
 }
+
+const ENV_WORKER: &str = "你是 Pots 的環境 worker";
+
+/// project 設定的「分析並建立環境」：環境 worker 用 try_env 驗證（失敗、沒驗證過的不能套用、修好後通過）、
+/// apply_env 套用成第 1 版，之後的 worker 在 run 開始前跑環境的 prepare、拿到環境變數；換回「不用環境」。
+#[tokio::test]
+async fn env_worker_verifies_and_applies_environment() {
+    let env = env().await;
+    let worker_outputs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = worker_outputs.clone();
+    // 這個檔案存在時 prepare 失敗。
+    let marker = env.dir.join("break-prepare");
+    let prepare = format!("test ! -e '{}'\necho prep > prepared.txt", marker.display());
+    let bad = json!({
+        "prepare": "echo prep > prepared.txt",
+        "verify": "exit 3",
+        "env": {"APP_MODE": "ci"},
+        "caches": ["/cache/target"],
+    });
+    let good = json!({
+        "prepare": prepare,
+        "verify": "test \"$APP_MODE\" = ci && test -f prepared.txt && echo verified",
+        "env": {"APP_MODE": "ci"},
+        "caches": ["/cache/target"],
+    });
+    let model = FnProvider::new("m", move |req| {
+        let instr = instructions(req);
+        let outputs = tool_outputs(req);
+        if instr.starts_with(ENV_WORKER) {
+            let user = first_user(req);
+            assert!(user.contains("還沒有環境"), "{user}");
+            assert!(user.contains("用 ci 模式"), "{user}");
+            return match outputs.len() {
+                0 => ScriptedTurn::new().tool_call("e0", "try_env", bad.to_string()),
+                1 => {
+                    assert!(outputs[0].contains("沒有通過"), "{}", outputs[0]);
+                    assert!(outputs[0].contains("exit code 3"), "{}", outputs[0]);
+                    ScriptedTurn::new().tool_call(
+                        "e1",
+                        "apply_env",
+                        json!({"spec": bad, "summary": "試試"}).to_string(),
+                    )
+                }
+                2 => {
+                    assert!(
+                        outputs[1].contains("還沒有用 try_env 驗證通過"),
+                        "{}",
+                        outputs[1]
+                    );
+                    ScriptedTurn::new().tool_call("e2", "try_env", good.to_string())
+                }
+                3 => {
+                    assert!(outputs[2].contains("通過"), "{}", outputs[2]);
+                    assert!(outputs[2].contains("verified"), "{}", outputs[2]);
+                    ScriptedTurn::new().tool_call(
+                        "e3",
+                        "apply_env",
+                        json!({"spec": good, "summary": "CI 模式"}).to_string(),
+                    )
+                }
+                _ => ScriptedTurn::reply("不該到這裡"),
+            };
+        }
+        if instr.starts_with(WORKER) {
+            return match outputs.len() {
+                0 => ScriptedTurn::new().tool_call(
+                    "w0",
+                    "run",
+                    json!({"command": "echo \"[$APP_MODE]\"; cat prepared.txt"}).to_string(),
+                ),
+                _ => {
+                    seen.lock().unwrap().push(outputs[0].clone());
+                    ScriptedTurn::new().tool_call(
+                        "w1",
+                        "complete_task",
+                        json!({"summary": "看過環境"}).to_string(),
+                    )
+                }
+            };
+        }
+        chat_turn(req)
+    });
+    let srv = launch(config(&env, WorkerBackendKind::Builtin, None), model).await;
+    let mut c = srv.client().await;
+    let project = setup(&mut c).await;
+
+    c.send(&ClientCommand::SetupProjectEnv {
+        project,
+        note: "用 ci 模式".into(),
+    })
+    .await;
+    // 同一個 project 同時只能有一個環境分析。
+    c.send(&ClientCommand::SetupProjectEnv {
+        project,
+        note: String::new(),
+    })
+    .await;
+    c.until(
+        |e| matches!(e, ServerEvent::Error { message } if message.contains("已經有一個環境分析")),
+    )
+    .await;
+    let g = until_goal(&mut c, |g| {
+        g.env && matches!(g.state, GoalState::Done { .. })
+    })
+    .await;
+    assert_eq!(g.title, "分析並建立環境");
+    let events = c
+        .until(|e| {
+            matches!(e, ServerEvent::ProjectEnv { env, .. }
+                if env.current == Some(1) && env.setup_goal.is_none())
+        })
+        .await;
+    let Some(ServerEvent::ProjectEnv { env: view, .. }) = events.last() else {
+        unreachable!()
+    };
+    let rev = view.current_rev().unwrap();
+    assert_eq!(rev.summary, "CI 模式");
+    assert_eq!(rev.spec.env, [("APP_MODE".to_string(), "ci".to_string())]);
+    assert_eq!(rev.spec.caches, ["/cache/target"]);
+
+    // 之後的 worker：prepare 先在工作目錄跑過、環境變數帶進指令。
+    c.say(
+        project,
+        &call(
+            "quick_fix",
+            json!({"title": "看環境", "description": "看看環境"}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    until_goal(&mut c, |g| {
+        g.quick && matches!(g.state, GoalState::Done { .. })
+    })
+    .await;
+    let out = worker_outputs.lock().unwrap().clone();
+    assert!(
+        out[0].contains("[ci]") && out[0].contains("prep"),
+        "{out:?}"
+    );
+
+    // prepare 失敗：任務交給你，說明可以重新分析環境。
+    std::fs::write(&marker, "").unwrap();
+    c.say(
+        project,
+        &call(
+            "quick_fix",
+            json!({"title": "再看一次", "description": "再看看環境"}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    let g = until_goal(&mut c, |g| {
+        g.quick
+            && g.title == "再看一次"
+            && matches!(
+                g.tasks.first().map(|t| &t.state),
+                Some(TaskStateView::NeedsHuman { .. })
+            )
+    })
+    .await;
+    let TaskStateView::NeedsHuman { reason } = &g.tasks[0].state else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("準備腳本失敗") && reason.contains("重新分析環境"),
+        "{reason}"
+    );
+    assert_eq!(worker_outputs.lock().unwrap().len(), 1, "worker 不該開始");
+
+    // 換回不用環境。
+    c.send(&ClientCommand::UseProjectEnv { project, rev: None })
+        .await;
+    c.until(|e| matches!(e, ServerEvent::ProjectEnv { env, .. } if env.current.is_none()))
+        .await;
+    c.send(&ClientCommand::UseProjectEnv {
+        project,
+        rev: Some(9),
+    })
+    .await;
+    c.until(
+        |e| matches!(e, ServerEvent::Error { message } if message.contains("找不到這個環境版本")),
+    )
+    .await;
+    srv.stop().await;
+}
+
+/// Claude Code 的環境 worker：平台的 try_env、apply_env 經 MCP 提供，套用後 Goal 完成。
+#[tokio::test]
+async fn claude_code_env_worker_applies_via_mcp() {
+    let env = env().await;
+    let spec = json!({"prepare": "true", "verify": "echo ok", "env": {"MODE": "x"}});
+    let script = env.dir.join("script.json");
+    std::fs::write(
+        &script,
+        json!({
+            "new": [
+                {"mcp": {"tool": "try_env", "args": spec}},
+                {"expect_contains": "通過"},
+                {"mcp": {"tool": "apply_env", "args": {"spec": spec, "summary": "簡單的環境"}}},
+                {"expect_contains": "第 1 版"},
+                {"sleep_ms": 30000},
+            ],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let log = env.dir.join("claude.log");
+    let claude = fake_claude(&env.dir, &script, &log);
+    let srv = launch(
+        config(&env, WorkerBackendKind::ClaudeCode, Some(&claude)),
+        FnProvider::new("m", chat_turn),
+    )
+    .await;
+    let mut c = srv.client().await;
+    let project = setup(&mut c).await;
+    c.send(&ClientCommand::SetupProjectEnv {
+        project,
+        note: String::new(),
+    })
+    .await;
+    let g = until_goal(&mut c, |g| g.env && g.state != GoalState::Active).await;
+    assert!(matches!(g.state, GoalState::Done { .. }), "{:?}", g.state);
+    let log = std::fs::read_to_string(&log).unwrap();
+    // 環境 worker 的說明與工具。
+    assert!(log.contains("你是 Pots 的環境 worker"), "{log}");
+    assert!(log.contains("mcp__pots__apply_env"), "{log}");
+    assert!(!log.contains("mcp__pots__open_pr"), "{log}");
+    srv.stop().await;
+}

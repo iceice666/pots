@@ -50,7 +50,8 @@ cargo run -p pots-server -- [--data-dir <路徑>] [--port <port>]
 
 - **派工**（`src/worker/mod.rs`）：任務建立、被喚醒、收到交接或你 `RetryTask` 時排一個 `worker` 的 `agent_runs`；同時最多「Worker」設定的個數。worker 以 `complete_task`、`fail_task`、`escalate` 或 `wait_for` 結束一輪，沒有就結束時任務轉 `NeedsHuman`。
 - **程式碼**（`src/worker/repo.rs`）：平台用 GitHub token 維護 bare 鏡像（`repos/`），每個任務一個獨立的 git repo（`worktrees/<任務>`、分支 `pots/…`）。平台在主機上不對工作目錄執行 git：worker 的 commit 由執行環境打成 bundle 交回，在鏡像裡檢查、push、開 PR（`open_pr`）。
-- **執行環境**（`src/worker/exec.rs`）：容器（`docker build -t pots-worker:latest docker/worker`）或本機（沒有沙箱）。
+- **執行環境**（`src/worker/exec.rs`）：一律是容器（`docker build -t pots-worker:latest docker/worker`）；本機執行只留給整合測試（`WorkerConfig::defaults`），資料庫裡舊的本機設定讀出時當成容器。
+- **Project 環境**（`src/project_env.rs`、`src/worker/env_setup.rs`、`profiles/env.toml`、`0014_project_env.sql`）：`SetupProjectEnv` 開一個 `env` 種類的 Goal，派環境 worker 分析 repo；它用 `try_env` 建衍生 image（`pots-env-<project>:<hash>`，資料目錄的 `env-builds/`）並在新容器跑 `prepare`、`verify`，通過的規格才能用 `apply_env` 套用成新版本（不用核准，`UseProjectEnv` 可以換回其他版本或不用環境）。一般 worker 的 run 用使用中版本的 image、環境變數與快取（`worker-caches/<project>/`），先跑 `prepare`（上限 20 分鐘）；執行時間上限（60 分鐘，環境 worker 120 分鐘）從 `prepare` 之後才開始算。設計見 [`proposal/agent-runtime.md`](../../proposal/agent-runtime.md#project-環境由環境-worker-建立)。
 - **後端**：內建 worker（pots-llm 的 loop，用使用中的模型 provider）或 Claude Code（`src/worker/claude.rs`：未修改的官方 CLI、雙向 stream-json；平台工具經 `src/worker/mcp.rs` 的 MCP server `/mcp`，每個 run 一個 capability token）。設定是 `SaveWorkerSettings`／`Worker` 事件；Claude Code 由你照設定裡的指令自己官方登入。
 - **快速修改、subagent 與 team**：對話 agent 的 `quick_fix`、`run_subagent`（explorer／reviewer，唯讀），Planner 與 worker 的 `post_to_team`／`read_team`（`src/team.rs`）。
 - `pots-fake-claude` 是測試用的假 Claude Code CLI（劇本格式見 `src/bin/pots-fake-claude.rs`），不是給使用者的程式。
@@ -98,7 +99,7 @@ cargo run -p pots-server -- [--data-dir <路徑>] [--port <port>]
 ## 驗證
 
 ```sh
-cargo test -p pots-server   # 單元測試，加上用腳本化模型跑完整協定的整合測試（M2 在 tests/tasks.rs，M3 在 tests/watcher.rs：假的 GitHub API 與手動時鐘，M4 在 tests/worker.rs：本機 bare repo 當 remote、假的 Claude Code CLI）
+cargo test -p pots-server   # 單元測試，加上用腳本化模型跑完整協定的整合測試（M2 在 tests/tasks.rs，M3 在 tests/watcher.rs：假的 GitHub API 與手動時鐘，M4 在 tests/worker.rs：本機 bare repo 當 remote、假的 Claude Code CLI；project 環境也在這裡，以本機執行代替容器）
 
 # M1 的驗收對真的模型跑一次（會花 token）：早期做決定 → 對話累積超過 10 萬 token → 再問那個決定
 POTS_OM_API_KEY=sk-... cargo run -p pots-server --example om_acceptance -- \

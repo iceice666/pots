@@ -116,6 +116,10 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
         ClientCommand::SetProjectWorkdir { project, workdir } => {
             set_project_workdir(app, project, workdir).await
         }
+        ClientCommand::SetupProjectEnv { project, note } => {
+            setup_project_env(app, project, note).await
+        }
+        ClientCommand::UseProjectEnv { project, rev } => use_project_env(app, project, rev).await,
         ClientCommand::RenameAgent { project, name } => rename_agent(app, project, name).await,
         ClientCommand::Send {
             project,
@@ -553,6 +557,7 @@ async fn create_project(app: &App, name: String, workdir: Option<WorkDir>) -> Re
             repos: Vec::new(),
             workdir: row.workdir.clone(),
             merge_method: Default::default(),
+            env: Default::default(),
         };
         txn.push(|seq| ServerEvent::ProjectAdded { seq, project })
             .await?;
@@ -590,6 +595,47 @@ async fn set_project_workdir(
     }
     .await;
     result.map_err(internal)
+}
+
+/// 派環境 worker 分析並建立 project 的環境（project 設定的「分析並建立環境」）。
+async fn setup_project_env(app: &App, project: ProjectId, note: String) -> Result<(), String> {
+    if !owns(app, project).await.map_err(internal)? {
+        return Err("找不到這個 project".into());
+    }
+    if note.chars().count() > 2000 {
+        return Err("說明最多 2000 字".into());
+    }
+    let result: Result<Result<(), String>, crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        match crate::worker::open_env(&mut txn, project, &note, &Principal::Human).await? {
+            Ok(_) => {
+                let worker = app.worker.clone();
+                txn.commit_then(|| worker.kick()).await?;
+                Ok(Ok(()))
+            }
+            Err(e) => Ok(Err(e)),
+        }
+    }
+    .await;
+    result.map_err(internal)?
+}
+
+/// 換使用中的環境版本（`None` 是不用環境）。之後開始的 run 才會用到。
+async fn use_project_env(app: &App, project: ProjectId, rev: Option<u32>) -> Result<(), String> {
+    if !owns(app, project).await.map_err(internal)? {
+        return Err("找不到這個 project".into());
+    }
+    let result: Result<Result<(), String>, crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        if !crate::project_env::set_current(txn.conn(), project, rev).await? {
+            return Ok(Err("找不到這個環境版本".into()));
+        }
+        crate::project_env::push(&mut txn, project).await?;
+        txn.commit().await?;
+        Ok(Ok(()))
+    }
+    .await;
+    result.map_err(internal)?
 }
 
 /// 幫 project 的負責人改名字。之後的回覆與 instructions 都用新名字；舊訊息的作者欄不改寫。
@@ -1001,10 +1047,10 @@ async fn cancel_task(app: &App, id: TaskId) -> Result<(), String> {
             },
         )
         .await?;
-        // 快速修改只有這一個任務、沒有 Planner：任務取消就是 Goal 取消。
+        // 快速修改與環境分析只有這一個任務、沒有 Planner：任務取消就是 Goal 取消。
         let goal = tasks::goal(txn.conn(), task.goal).await?;
         if let Some(g) = goal.filter(|g| g.state.is_active())
-            && tasks::goal_kind(txn.conn(), g.id).await? == "quick"
+            && tasks::kind_without_planner(&tasks::goal_kind(txn.conn(), g.id).await?)
         {
             crate::tools::close_goal(
                 &mut txn,

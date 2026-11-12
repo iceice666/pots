@@ -50,8 +50,10 @@ pub struct WorkerConfig {
     pub claude_bin: String,
     /// 測試用：git 的 base URL（例如 `file:///tmp/remotes`）；`None` 時依 GitHub API 推算。
     pub git_base: Option<String>,
-    /// 一次 worker run 最多跑多久。
+    /// 一次 worker run 最多跑多久（從環境的準備腳本跑完開始算）。
     pub run_timeout: Duration,
+    /// 環境分析（環境 worker）一次 run 最多跑多久：建置 image 很慢。
+    pub env_run_timeout: Duration,
     /// 中斷後等 CLI 收尾的時間。
     pub grace: Duration,
     /// `false` 時不處理 worker 佇列（任務排著不跑），給只測規劃與等待的測試用。
@@ -72,6 +74,7 @@ impl Default for WorkerConfig {
             claude_bin: "claude".into(),
             git_base: None,
             run_timeout: Duration::from_secs(60 * 60),
+            env_run_timeout: Duration::from_secs(120 * 60),
             grace: Duration::from_secs(15),
             run_queue: true,
         }

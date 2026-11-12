@@ -34,7 +34,9 @@ use uuid::Uuid;
 /// - 15：每個 project 有自己的負責人（`ProjectAgentName`、`RenameAgent`）。
 /// - 16：agent 問你問題（`ApprovalActionView::AskUser`，用 `Decide` 回答）。
 /// - 17：Goal 草稿（`GoalState::Draft`、`StartGoal`、`DiscardGoal`）。
-pub const PROTOCOL_VERSION: u32 = 17;
+/// - 18：project 環境（`EnvSpec`、`ProjectEnvView`、`ProjectEnv`、`SetupProjectEnv`、`UseProjectEnv`、
+///   `GoalView::env`、快照帶 project 的環境）；worker 只在容器裡執行。
+pub const PROTOCOL_VERSION: u32 = 18;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -300,6 +302,9 @@ pub struct ProjectView {
     /// 平台 merge PR 時預設的方式（agent 申請時可以另外指定）。
     #[serde(default)]
     pub merge_method: MergeMethod,
+    /// worker 的環境（環境 worker 建立的版本）。
+    #[serde(default)]
+    pub env: ProjectEnvView,
 }
 
 /// project 的工作資料夾：程式碼在哪、worker 在哪裡改。一個 project 只有一個。
@@ -823,6 +828,9 @@ pub struct GoalView {
     /// 快速修改（`quick_fix`）：不經 Planner、只有一個任務。
     #[serde(default)]
     pub quick: bool,
+    /// 環境 worker 的 Goal（project 設定的「分析並建立環境」）：一樣不經 Planner、只有一個任務。
+    #[serde(default)]
+    pub env: bool,
 }
 
 impl GoalView {
@@ -1873,13 +1881,14 @@ impl WorkerBackendKind {
     }
 }
 
-/// worker 在哪裡執行。
+/// worker 在哪裡執行。使用者只能選容器；`Local` 只留給伺服器的整合測試，資料庫裡舊的
+/// `Local` 設定讀出時當成 `Container`。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecKind {
     /// 每次 run 一個 Docker／Podman 容器，只掛任務的工作目錄與 Claude Code 的專屬 home。
     #[default]
     Container,
-    /// 直接在這台電腦上執行（沒有沙箱）。
+    /// 直接在這台電腦上執行（沒有沙箱）；只給測試用。
     Local,
 }
 
@@ -1918,6 +1927,60 @@ pub struct WorkerSettingsDraft {
     pub image: String,
     pub claude_model: String,
     pub max_parallel: u8,
+}
+
+// ---------------------------------------------------------------------------
+// Project 環境（`proposal/agent-runtime.md#project-環境由環境-worker-建立`）
+
+/// project 的 worker 環境規格：由環境 worker 分析 repo 後產生、實際驗證過才套用。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EnvSpec {
+    /// 基底 image；空字串是「Worker」設定的 image。
+    #[serde(default)]
+    pub base_image: String,
+    /// 建 image 時以 root 執行的安裝腳本（看不到 repo）。
+    #[serde(default)]
+    pub install: String,
+    /// 每次 run 開始時在工作目錄執行的準備腳本。
+    #[serde(default)]
+    pub prepare: String,
+    /// 證明環境可用的指令（只在驗證時執行）。
+    #[serde(default)]
+    pub verify: String,
+    /// 非機密的環境變數。
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// 跨 run 保留的容器路徑（絕對路徑）。
+    #[serde(default)]
+    pub caches: Vec<String>,
+}
+
+/// 環境的一個版本。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvRevView {
+    pub rev: u32,
+    pub spec: EnvSpec,
+    /// 環境 worker 的說明（分析了什麼、為什麼這樣裝）。
+    pub summary: String,
+    pub created_at: Timestamp,
+}
+
+/// project 的環境：使用中的版本、歷史與正在分析的 Goal。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectEnvView {
+    /// 使用中的版本；`None` 是不用環境（「Worker」設定的 image）。
+    pub current: Option<u32>,
+    /// 所有版本，新的在前。
+    pub revs: Vec<EnvRevView>,
+    /// 正在分析環境的 Goal。
+    pub setup_goal: Option<GoalId>,
+}
+
+impl ProjectEnvView {
+    pub fn current_rev(&self) -> Option<&EnvRevView> {
+        let cur = self.current?;
+        self.revs.iter().find(|r| r.rev == cur)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2251,6 +2314,8 @@ pub struct ProjectSnapshot {
     pub workdir: Option<WorkDir>,
     #[serde(default)]
     pub merge_method: MergeMethod,
+    #[serde(default)]
+    pub env: ProjectEnvView,
 }
 
 /// 模型 provider（ChatGPT Plan，經 SIWC 授權）的狀態。不含任何 token；`Debug` 不印出
@@ -2443,6 +2508,12 @@ pub enum ServerEvent {
         project: ProjectId,
         workdir: Option<WorkDir>,
     },
+    /// project 的環境有變（新版本、換版本、開始或結束分析），整份替換。
+    ProjectEnv {
+        seq: u64,
+        project: ProjectId,
+        env: ProjectEnvView,
+    },
     /// project 負責人（對話 agent）的名字改了。
     ProjectAgentName {
         seq: u64,
@@ -2495,6 +2566,7 @@ impl ServerEvent {
             | Self::Github { seq, .. }
             | Self::ProjectRepos { seq, .. }
             | Self::ProjectWorkdir { seq, .. }
+            | Self::ProjectEnv { seq, .. }
             | Self::ProjectAgentName { seq, .. }
             | Self::Worker { seq, .. } => Some(*seq),
             Self::GithubTest { .. }
@@ -2528,6 +2600,17 @@ pub enum ClientCommand {
     SetProjectWorkdir {
         project: ProjectId,
         workdir: Option<WorkDir>,
+    },
+    /// 派環境 worker 分析並建立 project 的環境（`note` 是給它的額外說明）；伺服器回 `ProjectEnv`。
+    SetupProjectEnv {
+        project: ProjectId,
+        #[serde(default)]
+        note: String,
+    },
+    /// 把使用中的環境改成某一版（`None` 是不用環境）；伺服器回 `ProjectEnv`。
+    UseProjectEnv {
+        project: ProjectId,
+        rev: Option<u32>,
     },
     /// 幫 project 的負責人（對話 agent）改名字。
     RenameAgent {
