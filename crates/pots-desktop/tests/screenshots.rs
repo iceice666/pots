@@ -24,12 +24,12 @@ mod shots {
         WindowOptions, px, size,
     };
     use markdown_editor::{EditorCommand, MarkKind};
-    use pots_desktop::app::{AutomationSection, GoalTab, Panel, PotsApp, SettingsTab};
+    use pots_desktop::app::{AutomationSection, CardKey, GoalTab, Panel, PotsApp, SettingsTab};
     use pots_desktop::members::MemberTarget;
     use pots_desktop::mock;
     use pots_desktop::model::{
-        ArtifactKind, ClientCommand, ExecKind, InboxAction, ModelRole, ProviderId, ProviderKind,
-        TaskId, ThinkingLevel, WorkerBackendKind,
+        ArtifactKind, ClientCommand, ExecKind, GoalState, InboxAction, ModelRole, ProviderId,
+        ProviderKind, TaskId, ThinkingLevel, WorkerBackendKind,
     };
 
     struct Shooter {
@@ -83,16 +83,16 @@ mod shots {
             }
         }
 
-        fn update(
+        fn update<R>(
             &mut self,
-            f: impl FnOnce(&mut PotsApp, &mut gpui_kit::Window, &mut gpui_kit::Context<PotsApp>),
-        ) {
+            f: impl FnOnce(&mut PotsApp, &mut gpui_kit::Window, &mut gpui_kit::Context<PotsApp>) -> R,
+        ) -> R {
             let view = self.view.clone();
             self.cx
                 .update_window(self.window, |_, window, cx| {
-                    view.update(cx, |app, cx| f(app, window, cx));
+                    view.update(cx, |app, cx| f(app, window, cx))
                 })
-                .expect("update window");
+                .expect("update window")
         }
 
         /// 直接對視窗送事件；點擊的 listener 會自己更新 `PotsApp`，不能再包一層 `update`。
@@ -720,6 +720,18 @@ mod shots {
             })
         });
         s.shot("24c-live-question-answered");
+        // 處理完的核准／問題收成一行；點開回答過的問題。
+        s.update(|app, _, cx| {
+            let id = app
+                .store
+                .inbox
+                .iter()
+                .find(|i| i.kind == pots_desktop::model::InboxKind::Question && !i.is_open())
+                .map(|i| i.id)
+                .expect("已回答的問題");
+            app.toggle_card(CardKey::Approval(id), cx);
+        });
+        s.shot("24d-live-question-expanded");
 
         // 設定的「通知」：開啟靜音時段。
         s.update(|app, window, cx| {
@@ -759,6 +771,29 @@ mod shots {
     fn mock_screens() {
         let mut s = Shooter::new();
         s.shot("01-channel-goal");
+
+        // 已結束的 Goal 在對話裡收成一行，點開是完整卡片；之後改回進行中。
+        let done_goal = s.update(|app, _, cx| {
+            let instance = app.instance;
+            let goal = app
+                .current_project()
+                .and_then(|p| p.goals.first())
+                .map(|g| g.id)
+                .expect("auth-service 有 Goal");
+            app.store.goal_mut(instance, goal).unwrap().state = GoalState::Done {
+                summary: "OAuth 登入上線：Google 與 GitHub 兩個 provider、refresh token 輪替、舊 session 遷移都已 merge，CI 全綠".into(),
+            };
+            cx.notify();
+            goal
+        });
+        s.shot("01e-goal-done-collapsed");
+        s.update(|app, _, cx| app.toggle_card(CardKey::Goal(done_goal), cx));
+        s.shot("01f-goal-done-expanded");
+        s.update(|app, _, cx| {
+            let instance = app.instance;
+            app.store.goal_mut(instance, done_goal).unwrap().state = GoalState::Active;
+            app.toggle_card(CardKey::Goal(done_goal), cx);
+        });
 
         // Goal 面板：任務依狀態分組（進度、需要你、失敗的原因、PR），Team 分頁新的在上面。
         s.update(|app, _, cx| {

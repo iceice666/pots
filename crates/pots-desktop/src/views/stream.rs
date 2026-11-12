@@ -6,14 +6,14 @@ use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 
 use super::text::{
     agent_stream, agent_text, agent_text_muted, agent_text_prefixed, fact_note, milestone_parts,
 };
 use super::widgets::*;
-use crate::app::{AutomationSection, GoalTab, Panel, PotsApp};
+use crate::app::{AutomationSection, CardKey, GoalTab, Panel, PotsApp};
 use crate::model::*;
 use crate::theme;
 
@@ -357,6 +357,52 @@ impl PotsApp {
         }
     }
 
+    /// 收成一行的卡片：右箭頭加上一行摘要，點一下展開。`content` 是橫向排開的摘要。
+    fn collapsed_card(
+        &self,
+        scope: &str,
+        key: CardKey,
+        max_w: f32,
+        content: Div,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        card_frame(max_w)
+            .id(SharedString::from(format!("collapsed-{scope}-{key:?}")))
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .px(px(14.))
+            .py(px(8.))
+            .rounded(px(10.))
+            .text_size(px(13.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::subtle_bg()))
+            .child(icon(IconName::ChevronRight, 14., theme::text_muted()))
+            .child(content.flex_1().min_w_0().flex().items_center().gap(px(8.)))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_card(key, cx)))
+            .into_any_element()
+    }
+
+    /// 展開後的收合卡片右上角的「收起」。
+    fn collapse_button(&self, scope: &str, key: CardKey, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(SharedString::from(format!("collapse-{scope}-{key:?}")))
+            .flex_none()
+            .size(px(22.))
+            .rounded(px(4.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::track()))
+            .child(icon(IconName::ChevronDown, 14., theme::text_muted()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_card(key, cx)
+            }))
+            .tip("收起")
+    }
+
     /// 渲染一張卡片。`index` 是它在同一則訊息裡的序號：同一則訊息可能帶多張卡片
     /// （例如 milestone + 核准），卡片內部的元素 id 只靠訊息 id 會撞在一起。
     pub fn render_card(
@@ -583,74 +629,135 @@ impl PotsApp {
                 title,
                 body,
                 actions,
-            } => card_frame(560.)
-                .gap(px(8.))
-                .px(px(16.))
-                .py(px(12.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .font_weight(FontWeight::BOLD)
-                        .child(icon(IconName::CircleCheck, 16., theme::ok()))
-                        .child(title.clone()),
-                )
-                .child(agent_text_muted(
-                    SharedString::from(format!("notice-body-{}", scope)),
-                    body.clone(),
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.))
-                        // 已經恢復就不再顯示「立即恢復」。
-                        .children(
-                            actions
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, a)| {
-                                    **a != NoticeAction::ResumeAutomations
-                                        || self.current_instance().automation_pause.is_some()
-                                })
-                                .map(|(i, &action)| {
-                                    link_button(
-                                        SharedString::from(format!("notice-{}-{i}", scope)),
-                                        action.label(),
-                                    )
-                                    .px(px(0.))
-                                    .mr(px(12.))
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| match action {
-                                            NoticeAction::ViewAutomations => {
-                                                this.open_automations(
-                                                    AutomationSection::Schedules,
-                                                    cx,
-                                                )
-                                            }
-                                            NoticeAction::ResumeAutomations => {
-                                                this.resume_automations(cx)
-                                            }
-                                        },
-                                    ))
-                                }),
-                        ),
-                )
-                .into_any_element(),
+            } => {
+                // 已經恢復就不再顯示「立即恢復」。
+                let actions: Vec<(usize, NoticeAction)> = actions
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        *a != NoticeAction::ResumeAutomations
+                            || self.current_instance().automation_pause.is_some()
+                    })
+                    .collect();
+                // 沒有可按的動作只是一則回報，預設收成一行。
+                let key = CardKey::Notice(item, index);
+                let collapsible = actions.is_empty();
+                if collapsible && !self.expanded_cards.contains(&key) {
+                    return self.collapsed_card(
+                        &scope,
+                        key,
+                        560.,
+                        div()
+                            .child(icon(IconName::CircleCheck, 14., theme::ok()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(relative(0.6))
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme::text_muted())
+                                    .child(body.clone()),
+                            ),
+                        cx,
+                    );
+                }
+                card_frame(560.)
+                    .gap(px(8.))
+                    .px(px(16.))
+                    .py(px(12.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(icon(IconName::CircleCheck, 16., theme::ok()))
+                            .child(title.clone())
+                            .when(collapsible, |d| {
+                                d.child(self.collapse_button(&scope, key, cx).ml_auto())
+                            }),
+                    )
+                    .child(agent_text_muted(
+                        SharedString::from(format!("notice-body-{}", scope)),
+                        body.clone(),
+                    ))
+                    .child(div().flex().gap(px(4.)).children(actions.into_iter().map(
+                        |(i, action)| {
+                            link_button(
+                                SharedString::from(format!("notice-{}-{i}", scope)),
+                                action.label(),
+                            )
+                            .px(px(0.))
+                            .mr(px(12.))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| match action {
+                                    NoticeAction::ViewAutomations => {
+                                        this.open_automations(AutomationSection::Schedules, cx)
+                                    }
+                                    NoticeAction::ResumeAutomations => this.resume_automations(cx),
+                                },
+                            ))
+                        },
+                    )))
+                    .into_any_element()
+            }
         }
     }
 
+    /// 對話裡的 Goal 卡片：已結束的 Goal 預設收成一行（標題與結果）。
     pub fn render_goal_card(
         &self,
         scope: &str,
         goal: &GoalView,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        self.goal_card(scope, goal, true, cx)
+    ) -> AnyElement {
+        let key = CardKey::Goal(goal.id);
+        if goal.state.is_open() || self.expanded_cards.contains(&key) {
+            return self.goal_card(scope, goal, true, cx).into_any_element();
+        }
+        let outcome = match &goal.state {
+            GoalState::Done { summary } => summary.clone(),
+            GoalState::Cancelled { reason } => reason.clone(),
+            GoalState::Draft | GoalState::Active => String::new(),
+        };
+        self.collapsed_card(
+            scope,
+            key,
+            560.,
+            div()
+                .child(tag("GOAL", theme::accent(), theme::accent_soft()))
+                .child(tag(goal.state.label(), theme::text_muted(), theme::track()))
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(relative(0.6))
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(goal.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme::text_muted())
+                        .child(outcome),
+                ),
+            cx,
+        )
     }
 
     /// Goal 卡片。`hint` 是對話裡的「在右側開啟」提示；右欄的 Goals 列表本身就在右側，不顯示。
     /// `scope` 讓同一個 Goal 出現在不同容器時（對話卡片、右欄列表）元素 id 不撞。
+    /// 對話裡已結束的 Goal 是使用者點開的，右上角多一個「收起」。
     pub(super) fn goal_card(
         &self,
         scope: &str,
@@ -708,6 +815,9 @@ impl PotsApp {
                                     "在右側開啟"
                                 }),
                         )
+                    })
+                    .when(hint && !goal.state.is_open(), |d| {
+                        d.child(self.collapse_button(scope, CardKey::Goal(gid), cx))
                     }),
             )
             .when(!goal.state.is_draft(), |d| {
@@ -825,7 +935,7 @@ impl PotsApp {
         ))
     }
 
-    /// 核准／ask_user 卡片。`scope` 是它在畫面上的位置（`render_card` 給的
+    /// 核准／ask_user 卡片：處理完的預設收成一行（結果與標題），點開才看說明與 diff。`scope` 是它在畫面上的位置（`render_card` 給的
     /// `msg-{訊息}-{序號}`）：同一筆核准可能同時出現在 thread 與頻道、或同一則訊息裡
     /// 兩張卡，`TextView` 的 id 只靠 approval id 會讓 `use_keyed_state` 共用同一份 state。
     pub fn render_approval_card(
@@ -833,7 +943,7 @@ impl PotsApp {
         a: &InboxItem,
         scope: &str,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let id = a.id;
         let question = super::preferences::question_of(a);
         let (banner, banner_fg, banner_bg, border) = match &a.decision {
@@ -872,6 +982,29 @@ impl PotsApp {
             ),
         };
         let pending = a.is_open();
+        let title = question
+            .map(|(q, _, _)| q.to_string())
+            .unwrap_or_else(|| a.title.clone());
+        let key = CardKey::Approval(id);
+        if !pending && !self.expanded_cards.contains(&key) {
+            return self.collapsed_card(
+                scope,
+                key,
+                560.,
+                div()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(relative(0.6))
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(banner_fg)
+                            .child(banner),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(title)),
+                cx,
+            );
+        }
 
         card_frame(560.)
             .overflow_hidden()
@@ -890,6 +1023,9 @@ impl PotsApp {
                     .child(banner)
                     .when_some(a.expiry.clone().filter(|_| pending), |d, e| {
                         d.child(div().ml_auto().font_weight(FontWeight::MEDIUM).child(e))
+                    })
+                    .when(!pending, |d| {
+                        d.child(self.collapse_button(scope, key, cx).ml_auto())
                     }),
             )
             .child(
@@ -960,6 +1096,7 @@ impl PotsApp {
                         d.child(self.render_actions(id, &a.actions, scope, cx))
                     }),
             )
+            .into_any_element()
     }
 
     /// 核准／處理按鈕列；第一個動作用主要樣式。

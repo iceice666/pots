@@ -559,6 +559,17 @@ pub enum GoalTab {
     Team,
 }
 
+/// 對話流裡預設收成一行的卡片：事情已經結束，通常看過就不會再看。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CardKey {
+    /// 已處理的核准或已回答的問題。
+    Approval(ApprovalId),
+    /// 已完成或已取消的 Goal。
+    Goal(GoalId),
+    /// 沒有可按動作的 Notice：所在的訊息與它在訊息卡片裡的位置。
+    Notice(ItemId, usize),
+}
+
 /// 右欄（狀態面板）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Panel {
@@ -698,6 +709,8 @@ pub struct PotsApp {
     pub send_mode: SendMode,
     /// 已展開的「用了 N 個工具」摘要。
     pub expanded_tools: HashSet<ItemId>,
+    /// 使用者點開的收合卡片（見 [`CardKey`]）；只存在記憶體，重開回到收起。
+    pub expanded_cards: HashSet<CardKey>,
     /// 「為什麼」面板的內容（`ClientCommand::Why` 的結果）。
     pub why: Option<WhyView>,
     /// 問「為什麼」的那則訊息附帶的工具摘要。
@@ -833,6 +846,7 @@ impl PotsApp {
             artifact_editor: None,
             send_mode: SendMode::Queue,
             expanded_tools: HashSet::new(),
+            expanded_cards: HashSet::new(),
             why: None,
             why_tools: None,
             usage_range: UsageRange::Week,
@@ -2623,6 +2637,13 @@ impl PotsApp {
     pub fn toggle_tools(&mut self, id: ItemId, cx: &mut Context<Self>) {
         if !self.expanded_tools.remove(&id) {
             self.expanded_tools.insert(id);
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_card(&mut self, key: CardKey, cx: &mut Context<Self>) {
+        if !self.expanded_cards.remove(&key) {
+            self.expanded_cards.insert(key);
         }
         cx.notify();
     }

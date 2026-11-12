@@ -50,7 +50,7 @@ PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" cargo run 
 | --- | --- |
 | 實例直列 | 切換「我的筆電」（桌面版）與「家用伺服器」（多設備版）、開全域 Inbox；徽章是待處理數。只連一個實例時不顯示 |
 | 左欄 | 目前實例的 project 列表（待核准數、「需要你」、未讀）、總管、Inbox、用量、排程與 Listener（批次暫停時顯示「已暫停」） |
-| 頻道 | agent 狀態、預算、停止、「成員」切換；對話流（訊息、工具摘要可展開、事件、Goal／核准／Artifact／「你不在期間」卡片）；輸入框（Enter 送出、Shift+Enter 換行，「排隊」或「改方向」） |
+| 頻道 | agent 狀態、預算、停止、「成員」切換；對話流（訊息、工具摘要可展開、事件、Goal／核准／Artifact／「你不在期間」卡片；處理完的核准與問題、已結束的 Goal、沒有動作的通知預設收成一行，點一下展開，展開狀態不保存）；輸入框（Enter 送出、Shift+Enter 換行，「排隊」或「改方向」） |
 | 成員列表 | 頻道標題列的人像按鈕（打開時是選取狀態）切換右欄的成員列表，像 Discord 的成員欄：依「工作中」「等待中」「待命」分組（「工作中 — 2」），成員是你、對話 agent、每個進行中 Goal 的 Planner（快速修改沒有）與進行中／等待中／需要你的任務的 worker（已規劃與結束的不列）。每列是頭像與狀態點、名稱與 AGENT／PLANNER／WORKER 標籤、狀態或進度（等待中是原因）、實際用的模型與 thinking（Claude Code worker 是「Claude Code · 模型」）。點 worker 開任務 thread、點 Planner 開那個 Goal 的面板（右欄換成那個內容）、點對話 agent 開設定的「角色」。成員列表開著時換 project 會留著 |
 | Goal 面板 | 任務依狀態分組（進度、需要你、失敗的原因、PR）、最新 Team 貼文、Brief、Team 分頁（含交接對象）；留言給 Planner；Brief 與 Ledger 分頁可以開啟對應的 artifact。dotfiles 的 Goal 是快速修改 |
 | Artifacts | 頻道「Artifacts」分頁列出 Spec、Brief、Ledger、Report、Project Notes；點列表或對話裡的 artifact 卡片，右欄開編輯器（gpui-kit-markdown-editor）。編輯器依 `##` 區段切開：你改過的區段標出時間，agent 正在寫的區段唯讀；按「儲存」才寫回（假資料只改本地，沒有版本紀錄）；Project Notes 顯示待核准的提案數 |
