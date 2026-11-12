@@ -175,8 +175,12 @@ fn team_post(post: &TeamPost, id: SharedString) -> Div {
                         .child(format!("{} · {}", team_route(post), post.at.hh_mm())),
                 ),
         )
-        // 貼文本文原本繼承 app 根節點的 14px（不是右欄較小的 13px）。
-        .child(agent_text(id, post.body.clone()).text_size(px(14.)))
+        // 貼文本文原本繼承 app 根節點的 14px（不是右欄較小的 13px）、行高 1.5。
+        .child(
+            agent_text(id, post.body.clone())
+                .text_size(px(14.))
+                .line_height(relative(1.5)),
+        )
 }
 
 pub(super) fn white_box() -> Div {

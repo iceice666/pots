@@ -145,6 +145,7 @@ impl PotsApp {
                     clamp_markdown(&status, 2),
                 )
                 .text_size(px(13.))
+                .line_height(relative(1.4))
                 .text_color(status_text)
                 .max_lines(2);
                 div()

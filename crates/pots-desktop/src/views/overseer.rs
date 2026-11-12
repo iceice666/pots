@@ -221,7 +221,8 @@ impl PotsApp {
                                     SharedString::from(format!("overview-note-{name}")),
                                     o.note.clone(),
                                 )
-                                .text_size(px(13.)),
+                                .text_size(px(13.))
+                                .line_height(relative(1.5)),
                             ),
                     )
                     .when_some(project, |d, pid| {
@@ -268,7 +269,8 @@ impl PotsApp {
                                 SharedString::from(format!("overseer-memory-{i}")),
                                 m.text.clone(),
                             )
-                            .text_size(px(13.)),
+                            .text_size(px(13.))
+                            .line_height(relative(1.5)),
                         ),
                     )
             }))

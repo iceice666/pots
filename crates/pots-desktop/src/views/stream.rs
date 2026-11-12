@@ -210,7 +210,7 @@ impl PotsApp {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(self.render_card(item.id, card, cx)),
+                        .child(self.render_card(item.id, 0, card, cx)),
                 )
                 .into_any_element(),
             StreamItemKind::Human(msg) | StreamItemKind::Agent(msg) => {
@@ -329,7 +329,12 @@ impl PotsApp {
                     .child(header)
                     .children(narration)
                     .children(body)
-                    .children(msg.cards.iter().map(|c| self.render_card(id, c, cx))),
+                    .children(
+                        msg.cards
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| self.render_card(id, i, c, cx)),
+                    ),
             );
 
         // 只有 agent 訊息能問「為什麼這樣回答」；右鍵叫出選單。
@@ -352,9 +357,17 @@ impl PotsApp {
         }
     }
 
-    pub fn render_card(&self, item: ItemId, card: &Card, cx: &mut Context<Self>) -> AnyElement {
+    /// 渲染一張卡片。`index` 是它在同一則訊息裡的序號：同一則訊息可能帶多張卡片
+    /// （例如 milestone + 核准），卡片內部的元素 id 只靠訊息 id 會撞在一起。
+    pub fn render_card(
+        &self,
+        item: ItemId,
+        index: usize,
+        card: &Card,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // 同一個 Goal 可能同時出現在對話卡片與右欄列表，元素 id 要加上來源才唯一。
-        let scope = SharedString::from(format!("msg-{}", item.0));
+        let scope = SharedString::from(format!("msg-{}-{index}", item.0));
         match card {
             Card::GoalCreated { goal } => match self.store.goal(self.instance, *goal) {
                 Some(g) => self.render_goal_card(&scope, g, cx).into_any_element(),
@@ -385,7 +398,7 @@ impl PotsApp {
                 let open = matches!(self.panel, Some(Panel::Artifact(a)) if a == artifact);
                 let what = format!("{} · {title}", kind.label());
                 card_frame(480.)
-                    .id(SharedString::from(format!("artifact-{}", item.0)))
+                    .id(SharedString::from(format!("artifact-{}", scope)))
                     .flex_row()
                     .items_center()
                     .gap(px(12.))
@@ -434,7 +447,7 @@ impl PotsApp {
                     .goal(self.instance, gid)
                     .map_or_else(|| "Goal 已不存在".to_string(), |g| g.title.clone());
                 card_frame(520.)
-                    .id(SharedString::from(format!("milestone-{}", item.0)))
+                    .id(SharedString::from(format!("milestone-{}", scope)))
                     .flex_row()
                     .items_start()
                     .gap(px(10.))
@@ -457,7 +470,7 @@ impl PotsApp {
                                 // Markdown；其他里程碑整段都是它的原文。卡片原本吃 14px。
                                 let (prefix, body) = milestone_parts(text);
                                 let body = agent_text(
-                                    SharedString::from(format!("milestone-text-{}", item.0)),
+                                    SharedString::from(format!("milestone-text-{}", scope)),
                                     body.to_string(),
                                 )
                                 .text_size(px(14.));
@@ -515,7 +528,7 @@ impl PotsApp {
                 // 原本是 14px／1.5 行高的摘要內文。
                 .child(
                     agent_text(
-                        SharedString::from(format!("catchup-summary-{}", item.0)),
+                        SharedString::from(format!("catchup-summary-{}", scope)),
                         summary.clone(),
                     )
                     .text_size(px(14.))
@@ -549,15 +562,19 @@ impl PotsApp {
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(k.clone()),
                                 )
-                                // 右邊是 agent 寫的一句話，可能帶行內 Markdown。
-                                .child(agent_text_muted(
-                                    SharedString::from(format!("digest-row-{}-{i}", item.0)),
-                                    v.clone(),
-                                ))
+                                // 右邊是 agent 寫的一句話，可能帶行內 Markdown；原本是
+                                // 14px 的淡色字（`TextView` 預設 15px，這裡壓回去）。
+                                .child(
+                                    agent_text_muted(
+                                        SharedString::from(format!("digest-row-{}-{i}", scope)),
+                                        v.clone(),
+                                    )
+                                    .text_size(px(14.)),
+                                )
                         }),
                     ))
                     .child(agent_text_muted(
-                        SharedString::from(format!("digest-footer-{}", item.0)),
+                        SharedString::from(format!("digest-footer-{}", scope)),
                         footer.clone(),
                     ))
                     .into_any_element()
@@ -580,7 +597,7 @@ impl PotsApp {
                         .child(title.clone()),
                 )
                 .child(agent_text_muted(
-                    SharedString::from(format!("notice-body-{}", item.0)),
+                    SharedString::from(format!("notice-body-{}", scope)),
                     body.clone(),
                 ))
                 .child(
@@ -598,7 +615,7 @@ impl PotsApp {
                                 })
                                 .map(|(i, &action)| {
                                     link_button(
-                                        SharedString::from(format!("notice-{}-{i}", item.0)),
+                                        SharedString::from(format!("notice-{}-{i}", scope)),
                                         action.label(),
                                     )
                                     .px(px(0.))
@@ -644,7 +661,9 @@ impl PotsApp {
         let gid = goal.id;
         let open = matches!(self.panel, Some(Panel::Goal(g, _)) if g == gid);
         card_frame(560.)
-            .id(SharedString::from(format!("goal-card-{}", gid.0)))
+            // 同一個 Goal 可能同時出現在對話卡片與右欄 Goals 列表，`scope` 讓兩張卡的
+            // 元素 id 不撞（原本只有 `goal-card-{gid}`，兩個容器同畫面時會重複）。
+            .id(SharedString::from(format!("goal-card-{scope}-{}", gid.0)))
             .gap(px(12.))
             .px(px(16.))
             .py(px(14.))

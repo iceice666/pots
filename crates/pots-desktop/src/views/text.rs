@@ -20,7 +20,6 @@
 //! 串流中的訊息另外處理游標，見 [`agent_stream`]／[`streaming_markdown`]。
 
 use gpui_kit::component::text::TextView;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Div, ElementId, ParentElement as _, SharedString, Styled as _, div, px, relative};
 
 use crate::theme;
@@ -61,17 +60,23 @@ pub fn agent_text_muted(id: impl Into<ElementId>, text: impl Into<SharedString>)
 ///
 /// 「需要你：」「失敗 N 次：」「你的理由：」這類前綴是平台自己加的字，不是 Markdown
 /// 的一部分；只把後面的原文交給 Markdown 解析，前綴就不會因為鄰近的 `*`／`_` 被吃掉
-/// 或誤判成語法。前綴與內文分成兩行（Markdown 是區塊層渲染，接不成同一行）。
+/// 或誤判成語法。Markdown 是區塊層渲染、接不成同一行，所以前綴與原文並排：文字短時
+/// 看起來是一行，原文換行時像懸掛縮排。前綴很長、剩下的寬度不夠（facts 的「你申請 ·
+/// 動作 … · 你的理由：」）時原文整段換到下一行，不會被壓成直條。
 ///
 /// 字級與顏色下在回傳的 `Div` 上：前綴吃得到，`body` 沒有自己指定顏色時也會沿用。
-/// 前綴是空的（表示整段都是 agent 原文）時不會多出一行空白。
+/// 前綴是空的（表示整段都是 agent 原文）時就只畫原文。
 pub fn agent_text_prefixed(prefix: impl Into<SharedString>, body: TextView) -> Div {
     let prefix = prefix.into();
+    if prefix.is_empty() {
+        return div().child(body);
+    }
     div()
         .flex()
-        .flex_col()
-        .when(!prefix.is_empty(), |d| d.child(div().child(prefix)))
-        .child(body)
+        .flex_wrap()
+        .items_start()
+        .child(div().flex_none().child(prefix))
+        .child(div().flex_1().min_w(px(120.)).child(body))
 }
 
 /// `facts` 裡夾帶使用者原話的那一條（「你的理由：…」）。
