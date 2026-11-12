@@ -153,6 +153,8 @@ PM 用 `start_task` 分派工作時也會自動開 thread。
 
 **結案（Archive）：** 用不到的 thread 可以封存，讓它從左側欄消失。滑鼠移到左側欄的 thread 上點 ✓，或在 thread 面板標題列點 **Archive**。封存只是藏起來：訊息、clone 和 branch 都還在，頻道裡起頭訊息下面的 thread 卡片會標上 Archived，點進去按 **Unarchive** 就拿回來。有人（包括 agent）在封存的 thread 裡發新訊息時，它會自動回到側欄。
 
+Engineer 用 `task_done` 回報任務完成（status 是 done）時，Pots 會自動封存那個 thread，結果由 PM 到 #general 跟你回報。卡住（stuck）、還有等你回答的選擇卡或 merge request、或是沒有 PM 可以回報時，thread 會留在側欄。
+
 ### DM
 
 - 不用 @，講什麼那個 agent 都會回。

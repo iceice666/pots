@@ -447,6 +447,12 @@ impl Workspace {
         ts
     }
 
+    /// Whether thread `t` still has a card (a question, a merge request)
+    /// waiting on the owner.
+    pub fn waits_on_owner(&self, t: usize) -> bool {
+        self.threads[t].messages.iter().any(|m| m.card.as_ref().is_some_and(Card::is_open))
+    }
+
     /// Threads of `channel` that aren't archived, for the sidebar.
     pub fn open_threads(&self, channel: usize) -> Vec<usize> {
         let mut ts = self.channel_threads(channel);
@@ -664,6 +670,20 @@ mod tests {
         ws.post(Conv::Thread(t), ws.me, "one more thing");
         assert!(!ws.threads[t].archived, "a new message reopens it");
         assert!(ws.open_threads(eng).contains(&t));
+    }
+
+    #[test]
+    fn a_thread_waits_on_the_owner_while_a_card_is_unanswered() {
+        let mut ws = seed();
+        let eng = ws.find_channel("engineering").unwrap();
+        let t = ws.channel_threads(eng)[0];
+        assert!(!ws.waits_on_owner(t));
+        let ix = ws.post(Conv::Thread(t), 1, "which one?");
+        let choice = |answer| Card::Choice { question: "?".into(), options: vec!["a".into(), "b".into()], recommended: None, answer };
+        ws.message_mut(Conv::Thread(t), ix).card = Some(choice(None));
+        assert!(ws.waits_on_owner(t));
+        ws.message_mut(Conv::Thread(t), ix).card = Some(choice(Some(0)));
+        assert!(!ws.waits_on_owner(t));
     }
 
     #[test]

@@ -698,7 +698,7 @@ impl ChatApp {
             Ok(done) => done,
             Err(e) => return (e, true),
         };
-        let Some((conv @ Conv::Thread(_), _)) = self.ws.locate(id) else {
+        let Some((conv @ Conv::Thread(t), _)) = self.ws.locate(id) else {
             return ("task_done only works in a task's thread.".to_string(), true);
         };
         let coordinators = self.agents.coordinators(&self.ws, conv);
@@ -714,6 +714,12 @@ impl ChatApp {
         };
         let names: Vec<String> = coordinators.iter().map(|&c| self.agents.list[c].config.name.clone()).collect();
         self.wake_coordinators(conv, note, shown, cx);
+        // A finished task is closed: its outcome reaches the owner through
+        // the coordinator, so the thread leaves the sidebar. Not when it's
+        // stuck, or still has a card for the owner to answer.
+        if done.status == agent::tools::DoneStatus::Done && !self.ws.waits_on_owner(t) {
+            self.set_archived(t, true, cx);
+        }
         cx.notify();
         (format!("{} will tell the owner. Finish your reply here as usual.", names.join(", ")), false)
     }
