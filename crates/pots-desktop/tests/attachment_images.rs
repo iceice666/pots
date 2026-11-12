@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use pots_desktop::connection::{Target, UploadJob, Uploads};
-use pots_desktop::images::{AttachmentImages, ImageState};
+use pots_desktop::images::{AttachmentImages, FetchEvent, ImageState};
 use pots_proto::{AttachmentId, ProjectId};
 
 /// 總管對話的 project id（服務啟動時就建立；上傳端點只檢查 project 存不存在）。
@@ -97,7 +97,10 @@ async fn a_message_image_is_fetched_and_becomes_drawable() {
         images.get_or_fetch(view.id, &view.mime, Some(&server.target())),
         Some(ImageState::Loading)
     ));
-    let (id, mime, result) = fetched.next().await.expect("取圖結果");
+    let FetchEvent::Fetched { id, mime, result } = fetched.next().await.expect("取圖結果")
+    else {
+        panic!("取圖機制不該壞掉");
+    };
     assert_eq!(id, view.id);
     assert_eq!(mime, "image/png");
     images.finish(id, &mime, result);
@@ -123,7 +126,10 @@ async fn a_missing_attachment_keeps_the_server_message() {
     let (mut images, mut fetched) = AttachmentImages::spawn();
     let missing = AttachmentId::new();
     images.get_or_fetch(missing, "image/png", Some(&server.target()));
-    let (id, mime, result) = fetched.next().await.expect("取圖結果");
+    let FetchEvent::Fetched { id, mime, result } = fetched.next().await.expect("取圖結果")
+    else {
+        panic!("取圖機制不該壞掉");
+    };
     assert_eq!(id, missing);
     images.finish(id, &mime, result);
     match images.state(&missing) {
@@ -145,7 +151,10 @@ async fn fetching_with_a_bad_token_is_reported() {
 
     let (mut images, mut fetched) = AttachmentImages::spawn();
     images.get_or_fetch(view.id, &view.mime, Some(&target));
-    let (id, mime, result) = fetched.next().await.expect("取圖結果");
+    let FetchEvent::Fetched { id, mime, result } = fetched.next().await.expect("取圖結果")
+    else {
+        panic!("取圖機制不該壞掉");
+    };
     images.finish(id, &mime, result);
     match images.state(&view.id) {
         Some(ImageState::Failed(reason)) => assert!(reason.contains("需要 token"), "{reason}"),

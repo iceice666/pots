@@ -10,6 +10,7 @@ use gpui_kit::{
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 
+use super::images::ImageState;
 use super::text::agent_text;
 use super::widgets::icon;
 use crate::app::{PotsApp, WorkdirKind};
@@ -333,19 +334,28 @@ impl PotsApp {
         )
     }
 
+    /// 大圖 viewer 內文的一句話（載入中、取不到時）。
+    fn viewer_placeholder(text: impl Into<SharedString>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(24.))
+            .text_size(px(13.))
+            .text_color(theme::text_muted())
+            .child(text.into())
+            .into_any_element()
+    }
+
     /// 訊息附圖的大圖：暗色 backdrop 上一張置中的卡片，點 backdrop 或右上角的 ✕ 關閉。
     ///
     /// 尺寸照 `task_inspect` 的對話框（`max_w(relative(0.92))`、`h(relative(0.86))`），
     /// 圖片用 `Contain` 撐進卡片內，不放大失真。
     pub fn render_image_viewer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let viewer = self.image_viewer.as_ref()?;
-        let image = self
-            .attachment_images
-            .state(&viewer.image.id)
-            .and_then(|state| match state {
-                crate::views::images::ImageState::Ready(image) => Some(image.clone()),
-                _ => None,
-            });
+        let state = self.attachment_images.state(&viewer.image.id);
         let size = viewer
             .image
             .width
@@ -360,29 +370,23 @@ impl PotsApp {
                 .clone()
                 .unwrap_or_else(|| "圖片".into()),
         );
-        let body = match image {
-            Some(image) => div()
+        let body = match state {
+            Some(ImageState::Ready(image)) => div()
                 .flex_1()
                 .min_h_0()
                 .p(px(12.))
                 .flex()
                 .child(
-                    img(ImageSource::Image(image))
+                    img(ImageSource::Image(image.clone()))
                         .flex_1()
                         .h_full()
                         .object_fit(ObjectFit::Contain),
                 )
                 .into_any_element(),
-            None => div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(13.))
-                .text_color(theme::text_muted())
-                .child("圖片已不在快取裡，請重新點開縮圖")
-                .into_any_element(),
+            None | Some(ImageState::Loading) => Self::viewer_placeholder("正在取得圖片…"),
+            // 真的失敗（404「找不到這個附件」、500「讀不到這張圖片的內容」）就把服務回的
+            // 中文原因照顯示；快取被淘汰掉的話下一次 render 會重新排隊抓。
+            Some(ImageState::Failed(reason)) => Self::viewer_placeholder(reason.clone()),
         };
         let dialog = div()
             .id("image-viewer-dialog")
@@ -437,6 +441,8 @@ impl PotsApp {
                 .id("image-viewer-backdrop")
                 .absolute()
                 .inset_0()
+                // 蓋住整個畫面：開著大圖時底下的對話流不該繼續接到滾輪與滑鼠事件。
+                .occlude()
                 .flex()
                 .items_center()
                 .justify_center()

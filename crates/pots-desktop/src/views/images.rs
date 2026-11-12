@@ -11,8 +11,12 @@
 //!    在每次 render 開頭排定。
 //!
 //! 沒有連線目標時（假資料模式、還沒收到 `ConnEvent::Target`）不送請求，畫面上只有佔位。
+//!
+//! 只抓「這一帧真的看得到」的圖（目前畫面的對話流、右欄任務 thread、開著的大圖），
+//! 不是整份 `Store`：快照一次會帶來上百則訊息，每則又能帶四張圖，全部預抓等於把整段
+//! 歷史的圖片位元組都留在記憶體裡。快取本身也有張數上限（[`MAX_CACHED`]）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +25,7 @@ use tokio::sync::mpsc;
 use gpui_kit::{Image as GpuiImage, ImageFormat as GpuiImageFormat};
 
 use crate::connection::Target;
-use crate::model::{AttachmentId, AttachmentView, Msg, StreamItemKind};
+use crate::model::{AttachmentId, AttachmentView, Msg, StreamItemView};
 
 /// 一張附圖現在能畫什麼。
 #[derive(Clone, Debug)]
@@ -42,8 +46,19 @@ pub struct FetchJob {
     pub mime: String,
 }
 
-/// 抓圖的結果：`(附件 id, MIME, 位元組或中文原因)`。
-pub type FetchResult = (AttachmentId, String, Result<Vec<u8>, String>);
+/// 取圖執行緒回來的東西。
+#[derive(Debug)]
+pub enum FetchEvent {
+    /// 一張圖的結果：附件 id、MIME、位元組或中文原因。
+    Fetched {
+        id: AttachmentId,
+        mime: String,
+        result: Result<Vec<u8>, String>,
+    },
+    /// 取圖機制本身壞了（runtime／HTTP client 起不來、執行緒結束）：不是某張圖的問題，
+    /// 由呼叫端顯示在底部提示，不要塞進快取。
+    Broken(String),
+}
 
 /// 抓圖的執行緒把手。丟掉它執行緒就會結束（與 [`crate::connection::Uploads`] 一樣）。
 #[derive(Clone)]
@@ -52,15 +67,22 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
-    pub fn fetch(&self, target: Target, job: FetchJob) {
-        let _ = self.jobs.send((target, job));
+    /// 排一個取圖工作；取圖執行緒已經結束時回 `false`。
+    pub fn fetch(&self, target: Target, job: FetchJob) -> bool {
+        self.jobs.send((target, job)).is_ok()
     }
 }
+
+/// 快取最多留幾張圖。超過就丟最久以前放進來的那張（大圖 viewer 正在看的下一次 render
+/// 會重新排隊抓回來）。單張上限 10 MiB，64 張是「夠回溯一兩屏」與記憶體的折衷。
+pub const MAX_CACHED: usize = 64;
 
 /// 附圖的快取。放在 [`crate::app::PotsApp`] 上，單一 UI 執行緒存取。
 #[derive(Default)]
 pub struct AttachmentImages {
     entries: HashMap<AttachmentId, ImageState>,
+    /// 進快取的順序，淘汰時從最舊的開始。
+    order: VecDeque<AttachmentId>,
     /// 假資料模式沒有服務可以取圖，就沒有 fetcher。
     fetcher: Option<Fetcher>,
 }
@@ -69,64 +91,6 @@ impl AttachmentImages {
     /// 不取圖的快取（假資料模式、測試）：只記錄狀態，`get_or_fetch` 一律回 `None`。
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// 真的會取圖的快取：自己的執行緒＋tokio runtime，結果由呼叫端的 GPUI task 讀。
-    pub fn spawn() -> (Self, futures::channel::mpsc::UnboundedReceiver<FetchResult>) {
-        let (jobs, mut job_rx) = mpsc::unbounded_channel::<(Target, FetchJob)>();
-        let (res_tx, res_rx) = futures::channel::mpsc::unbounded();
-        std::thread::Builder::new()
-            .name("pots-attachment-images".into())
-            .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        let _ = res_tx.unbounded_send((
-                            AttachmentId::new(),
-                            String::new(),
-                            Err(format!("無法啟動取圖：{e}")),
-                        ));
-                        return;
-                    }
-                };
-                runtime.block_on(async move {
-                    let client = match reqwest::Client::builder()
-                        .timeout(Duration::from_secs(60))
-                        .build()
-                    {
-                        Ok(client) => client,
-                        Err(e) => {
-                            let _ = res_tx.unbounded_send((
-                                AttachmentId::new(),
-                                String::new(),
-                                Err(format!("無法建立 HTTP client：{e}")),
-                            ));
-                            return;
-                        }
-                    };
-                    while let Some((target, job)) = job_rx.recv().await {
-                        let mime = job.mime.clone();
-                        let id = job.id;
-                        let result = fetch_one(&client, &target, job).await;
-                        if res_tx.unbounded_send((id, mime, result)).is_err() {
-                            return;
-                        }
-                    }
-                });
-            })
-            .expect("無法建立取圖執行緒");
-        let images = Self {
-            entries: HashMap::new(),
-            fetcher: Some(Fetcher { jobs }),
-        };
-        (images, res_rx)
-    }
-
-    pub fn has_fetcher(&self) -> bool {
-        self.fetcher.is_some()
     }
 
     /// 不啟執行緒的快取，回傳 fetcher 的收件端：測試可以直接看排了哪些工作，不必真的
@@ -139,10 +103,62 @@ impl AttachmentImages {
         (
             Self {
                 entries: HashMap::new(),
+                order: VecDeque::new(),
                 fetcher: Some(Fetcher { jobs }),
             },
             job_rx,
         )
+    }
+
+    /// 真的會取圖的快取：自己的執行緒＋tokio runtime，結果由呼叫端的 GPUI task 讀。
+    pub fn spawn() -> (Self, futures::channel::mpsc::UnboundedReceiver<FetchEvent>) {
+        let (jobs, mut job_rx) = mpsc::unbounded_channel::<(Target, FetchJob)>();
+        let (res_tx, res_rx) = futures::channel::mpsc::unbounded();
+        std::thread::Builder::new()
+            .name("pots-attachment-images".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ =
+                            res_tx.unbounded_send(FetchEvent::Broken(format!("無法啟動取圖：{e}")));
+                        return;
+                    }
+                };
+                runtime.block_on(async move {
+                    let client = match reqwest::Client::builder()
+                        .timeout(Duration::from_secs(60))
+                        .build()
+                    {
+                        Ok(client) => client,
+                        Err(e) => {
+                            let _ = res_tx.unbounded_send(FetchEvent::Broken(format!(
+                                "無法建立 HTTP client：{e}"
+                            )));
+                            return;
+                        }
+                    };
+                    while let Some((target, job)) = job_rx.recv().await {
+                        let mime = job.mime.clone();
+                        let id = job.id;
+                        let result = fetch_one(&client, &target, job).await;
+                        let event = FetchEvent::Fetched { id, mime, result };
+                        if res_tx.unbounded_send(event).is_err() {
+                            return;
+                        }
+                    }
+                });
+            })
+            .expect("無法建立取圖執行緒");
+        let images = Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            fetcher: Some(Fetcher { jobs }),
+        };
+        (images, res_rx)
     }
 
     /// 這張圖現在能畫什麼；`None` 是還沒抓過（也沒有請求在跑）。
@@ -165,20 +181,27 @@ impl AttachmentImages {
         let (Some(target), Some(fetcher)) = (target, self.fetcher.as_ref()) else {
             return None;
         };
-        fetcher.fetch(
+        if fetcher.fetch(
             target.clone(),
             FetchJob {
                 id,
                 mime: mime.to_string(),
             },
-        );
-        self.entries.entry(id).or_insert(ImageState::Loading);
+        ) {
+            self.remember(id, ImageState::Loading);
+        } else {
+            // 取圖執行緒已經結束：標成失敗，使用者才看得到「無法載入」而不是永遠灰著。
+            self.remember(id, ImageState::Failed("取圖功能已停止".into()));
+        }
         self.entries.get(&id)
     }
 
-    /// 失敗的那張圖重新抓一次（使用者點「無法載入」的縮圖時）。
+    /// 失敗的那張圖重新抓一次（使用者點「無法載入」的縮圖時）。只有失敗的才清掉：
+    /// 還在抓的狀態被清掉會讓下一帧再排一個請求，連點兩下就送出兩份。
     pub fn retry(&mut self, id: AttachmentId) {
-        self.entries.remove(&id);
+        if matches!(self.entries.get(&id), Some(ImageState::Failed(_))) {
+            self.remove(id);
+        }
     }
 
     /// 取圖結果回來了：解碼成 [`GpuiImage`] 放進快取。
@@ -190,7 +213,33 @@ impl AttachmentImages {
             },
             Err(reason) => ImageState::Failed(reason),
         };
+        self.remember(id, state);
+    }
+
+    /// 現在快取裡有幾張（測試與除錯用）。
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn remember(&mut self, id: AttachmentId, state: ImageState) {
+        if !self.entries.contains_key(&id) {
+            self.order.push_back(id);
+        }
         self.entries.insert(id, state);
+        while self.order.len() > MAX_CACHED {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn remove(&mut self, id: AttachmentId) {
+        self.entries.remove(&id);
+        self.order.retain(|i| *i != id);
     }
 }
 
@@ -241,43 +290,34 @@ pub fn message_images(msg: &Msg) -> Option<&[AttachmentView]> {
     (!msg.attachments.is_empty()).then_some(msg.attachments.as_slice())
 }
 
-/// 目前畫面上可能出現的所有附圖（`(id, mime)`，已去重）。
+/// 這一帧要看得到的附圖（`(id, mime)`，已去重）：目前的對話流／總管對話／右欄任務
+/// thread 的訊息，加上開著的大圖。
 ///
-/// 一次走完整份 `Store`：訊息可能出現在 project 頻道、總管的對話、任務 thread 與
-/// Goal 留言，逐處登記會漏。每帧走一遍只是幾個 HashMap 查詢的成本，換來「只要畫得到
-/// 就一定抓得到」。
-pub fn wanted_images(store: &crate::model::Store) -> Vec<(AttachmentId, String)> {
+/// **只算畫面上看得到的**：整份 `Store` 一次可能帶著上百則歷史訊息，全部預抓等於把
+/// 整段歷史的圖片位元組都拉進記憶體。Goal 留言（`TeamPost`）沒有附件欄位，不用算。
+pub fn wanted_images<'a>(
+    items: impl IntoIterator<Item = &'a StreamItemView>,
+    viewer: Option<&AttachmentView>,
+) -> Vec<(AttachmentId, String)> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    let mut push = |msg: &Msg| {
-        for a in &msg.attachments {
-            if seen.insert(a.id) {
-                out.push((a.id, a.mime.clone()));
-            }
+    let mut push = |a: &AttachmentView| {
+        if seen.insert(a.id) {
+            out.push((a.id, a.mime.clone()));
         }
     };
-    for instance in &store.instances {
-        for item in &instance.overseer.items {
-            if let StreamItemKind::Human(msg) | StreamItemKind::Agent(msg) = &item.kind {
-                push(msg);
+    // 開著的大圖排最前面：取圖是序列的，使用者剛點開的那張不該排在整條對話後面。
+    if let Some(image) = viewer {
+        push(image);
+    }
+    for item in items {
+        match &item.kind {
+            crate::model::StreamItemKind::Human(msg) | crate::model::StreamItemKind::Agent(msg) => {
+                msg.attachments.iter().for_each(&mut push)
             }
-        }
-        for project in &instance.projects {
-            for item in &project.items {
-                if let StreamItemKind::Human(msg) | StreamItemKind::Agent(msg) = &item.kind {
-                    push(msg);
-                }
-            }
-            for goal in &project.goals {
-                for task in &goal.tasks {
-                    for item in &task.thread {
-                        if let StreamItemKind::Human(msg) | StreamItemKind::Agent(msg) = &item.kind
-                        {
-                            push(msg);
-                        }
-                    }
-                }
-            }
+            crate::model::StreamItemKind::Card(_)
+            | crate::model::StreamItemKind::Event { .. }
+            | crate::model::StreamItemKind::DayDivider(_) => {}
         }
     }
     out
@@ -385,7 +425,7 @@ mod tests {
         );
         assert!(jobs.try_recv().is_err(), "失敗的不自動重抓");
 
-        // 使用者按重試：清掉狀態，下一次重新排工作。
+        // 使用者按重試：清掉失敗狀態，下一次重新排工作。
         images.retry(id);
         assert!(images.state(&id).is_none());
         assert!(matches!(
@@ -450,6 +490,121 @@ mod tests {
             ..msg
         };
         assert_eq!(message_images(&with).map(<[_]>::len), Some(1));
+    }
+
+    #[test]
+    fn retrying_while_loading_does_not_send_a_second_request() {
+        let (mut images, mut jobs) = fake();
+        let id = AttachmentId::from_u64(5);
+        images.get_or_fetch(id, "image/png", Some(&target()));
+        assert!(jobs.try_recv().is_ok());
+
+        // 連點「無法載入」的縮圖時，狀態可能已經是 Loading：不能被清掉再排一次。
+        images.retry(id);
+        assert!(matches!(images.state(&id), Some(ImageState::Loading)));
+        assert!(jobs.try_recv().is_err(), "載入中重試不該再送一份請求");
+
+        // 已經拿到的圖也不會被重試清掉。
+        images.finish(id, "image/png", Ok(vec![1, 2, 3]));
+        images.retry(id);
+        assert!(matches!(images.state(&id), Some(ImageState::Ready(_))));
+    }
+
+    #[test]
+    fn the_cache_is_capped_and_drops_the_oldest_image() {
+        let (mut images, _jobs) = fake();
+        for i in 0..(MAX_CACHED as u64 + 3) {
+            images.finish(
+                AttachmentId::from_u64(i),
+                "image/png",
+                Err("找不到這個附件".into()),
+            );
+        }
+        assert_eq!(images.len(), MAX_CACHED, "超過上限要淘汰");
+        assert!(
+            images.state(&AttachmentId::from_u64(0)).is_none(),
+            "最舊的被丟掉"
+        );
+        assert!(
+            images
+                .state(&AttachmentId::from_u64(MAX_CACHED as u64 + 2))
+                .is_some(),
+            "最新的留著"
+        );
+    }
+
+    #[test]
+    fn a_dead_fetch_thread_shows_a_failure_instead_of_a_permanent_placeholder() {
+        // 先放掉執行緒端，模擬取圖執行緒已經結束。
+        let (mut images, jobs) = fake();
+        drop(jobs);
+        let id = AttachmentId::from_u64(2);
+        match images.get_or_fetch(id, "image/png", Some(&target())) {
+            Some(ImageState::Failed(reason)) => {
+                assert!(reason.contains("取圖功能已停止"), "{reason}")
+            }
+            other => panic!("應該是失敗：{other:?}"),
+        }
+    }
+
+    fn stream_item(id: u64, attachments: Vec<AttachmentView>) -> StreamItemView {
+        StreamItemView {
+            id: crate::model::ItemId::from_u64(id),
+            at: crate::model::Timestamp(0),
+            kind: crate::model::StreamItemKind::Human(Msg {
+                author: crate::model::Author::Human,
+                text: String::new(),
+                narration: Vec::new(),
+                status: crate::model::MsgStatus::Done,
+                tools: None,
+                cards: Vec::new(),
+                steer: false,
+                attachments,
+            }),
+        }
+    }
+
+    #[test]
+    fn wanted_images_covers_the_visible_items_and_dedups() {
+        let items = vec![
+            stream_item(1, vec![view(10, "image/png", None, None)]),
+            // 卡片與分隔線沒有附件，不影響結果。
+            StreamItemView {
+                id: crate::model::ItemId::from_u64(2),
+                at: crate::model::Timestamp(0),
+                kind: crate::model::StreamItemKind::DayDivider("今天".into()),
+            },
+            // 同一張圖再出現一次（例如重送）：只算一次。
+            stream_item(3, vec![view(10, "image/png", None, None)]),
+            stream_item(
+                4,
+                vec![
+                    view(11, "image/jpeg", None, None),
+                    view(12, "image/webp", None, None),
+                ],
+            ),
+        ];
+        let wanted = wanted_images(&items, None);
+        assert_eq!(
+            wanted,
+            vec![
+                (AttachmentId::from_u64(10), "image/png".to_string()),
+                (AttachmentId::from_u64(11), "image/jpeg".to_string()),
+                (AttachmentId::from_u64(12), "image/webp".to_string()),
+            ]
+        );
+
+        // 開著的大圖就算不在目前畫面的訊息裡也要抓（快取被淘汰後重開的狀況），
+        // 而且排在前面：取圖是序列的。
+        let viewer = view(99, "image/gif", None, None);
+        let wanted = wanted_images(&items[..1], Some(&viewer));
+        assert_eq!(
+            wanted,
+            vec![
+                (AttachmentId::from_u64(99), "image/gif".to_string()),
+                (AttachmentId::from_u64(10), "image/png".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ use crate::notify::{self, Notifier};
 use crate::sync::{self, Notice, Sync};
 use crate::theme;
 use crate::views::composer_attach::PendingAttachments;
-use crate::views::images::AttachmentImages;
+use crate::views::images::{AttachmentImages, FetchEvent};
 
 gpui_kit::actions!(pots, [OpenOverseer, CloseSettings]);
 
@@ -1059,16 +1059,19 @@ impl PotsApp {
             }
         })
         .detach();
-        // 取圖結果寫回快取，順便讓畫面重畫那一格縮圖。
+        // 取圖結果寫回快取，順便讓畫面重畫那一格縮圖；取圖機制本身壞了顯示在底部提示。
         cx.spawn_in(window, async move |this, cx| {
-            while let Some((id, mime, result)) = fetched.next().await {
-                if this
-                    .update_in(cx, |app, _window, cx| {
-                        app.attachment_images.finish(id, &mime, result);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
+            while let Some(event) = fetched.next().await {
+                let alive = this.update_in(cx, |app, _window, cx| {
+                    match event {
+                        FetchEvent::Fetched { id, mime, result } => {
+                            app.attachment_images.finish(id, &mime, result)
+                        }
+                        FetchEvent::Broken(reason) => app.toast = Some(reason),
+                    }
+                    cx.notify();
+                });
+                if alive.is_err() {
                     break;
                 }
             }
@@ -2856,12 +2859,40 @@ impl PotsApp {
 
     /// 這一帧看得到的附圖如果還沒抓過，排進取圖佇列。沒有連線目標（假資料模式、還沒
     /// 收到 `ConnEvent::Target`）就什麼都不做，畫面上只有佔位。
+    ///
+    /// 只算這一帧真的畫得到的訊息（目前的頻道／總管對話、右欄任務 thread、開著的大圖），
+    /// 不是整份 `Store`——連上服務時快照會帶來整段歷史，全部預抓會把每張圖的位元組都
+    /// 留在記憶體裡。
     fn request_attachment_images(&mut self) {
         let target = self.live.as_ref().and_then(|live| live.target.clone());
         if target.is_none() {
             return;
         }
-        for (id, mime) in crate::views::images::wanted_images(&self.store) {
+        let mut items: Vec<&StreamItemView> = Vec::new();
+        match self.screen {
+            Screen::Project(project) => {
+                if let Some(p) = self.store.project(self.instance, project) {
+                    items.extend(p.items.iter());
+                }
+            }
+            Screen::Overseer => {
+                if let Some(instance) = self.store.instance(self.instance) {
+                    items.extend(instance.overseer.items.iter());
+                }
+            }
+            Screen::Inbox(_) | Screen::Usage | Screen::Automations => {}
+        }
+        // 右欄的任務 thread：頻道與總管畫面都可能開著。
+        if let Some(Panel::Task(task)) = self.panel
+            && let Some((_, t)) = self.store.task(self.instance, task)
+        {
+            items.extend(t.thread.iter());
+        }
+        let wanted = crate::views::images::wanted_images(
+            items,
+            self.image_viewer.as_ref().map(|v| &v.image),
+        );
+        for (id, mime) in wanted {
             self.attachment_images
                 .get_or_fetch(id, &mime, target.as_ref());
         }
