@@ -11,6 +11,7 @@
 //! png/jpeg/webp/gif（`pots_proto::ATTACHMENT_MIMES`），所以轉檔在客戶端做。
 
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::Arc;
 
 use gpui_kit::{ClipboardEntry, ClipboardItem, Image as GpuiImage, ImageFormat as GpuiImageFormat};
@@ -215,6 +216,26 @@ impl PendingAttachments {
         Ok(key)
     }
 
+    /// 拖進來（或選檔選到）的檔案，`files` 是已經在背景讀完的內容。回傳是否有任一張
+    /// 被收下；全部被拒時把所有中文原因串起來放在 [`Self::error`]，不只留最後一個。
+    pub fn accept_read(&mut self, files: Vec<DroppedFile>) -> bool {
+        let mut took = false;
+        let mut reasons: Vec<String> = Vec::new();
+        for file in files {
+            match file.bytes {
+                Ok(bytes) => match self.accept_bytes(bytes, Some(file.name)) {
+                    Ok(_) => took = true,
+                    Err(reason) => reasons.push(reason),
+                },
+                Err(reason) => reasons.push(reason),
+            }
+        }
+        if !reasons.is_empty() {
+            self.error = Some(reasons.join("；"));
+        }
+        took
+    }
+
     /// 貼上的內容。`true` 代表這次貼上被吃掉了（有圖片被收下），呼叫端不要讓文字插進
     /// 輸入框；全部被拒時回 `false`，讓一般文字貼上照常運作。
     pub fn accept_clipboard(&mut self, item: &ClipboardItem) -> bool {
@@ -253,6 +274,40 @@ impl PendingAttachments {
     fn reject(&mut self, message: String) -> String {
         self.error = Some(message.clone());
         message
+    }
+}
+
+/// 拖進來的一個路徑讀完了：`bytes` 成功是檔案的位元組，失敗是中文原因。
+pub struct DroppedFile {
+    /// 檔名（或整條路徑，取不到檔名時）；顯示與上傳都用它。
+    pub name: String,
+    pub bytes: Result<Vec<u8>, String>,
+}
+
+/// 讀一個拖進來的路徑。**會阻塞**，呼叫端要在背景執行緒跑（見
+/// [`crate::app::PotsApp::accept_dropped`]）。資料夾與讀不到都是中文原因。
+pub fn read_dropped(path: &Path) -> DroppedFile {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.is_dir()
+    {
+        return DroppedFile {
+            name: name.clone(),
+            bytes: Err(format!("{name} 是資料夾，不是圖片檔")),
+        };
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => DroppedFile {
+            name,
+            bytes: Ok(bytes),
+        },
+        Err(e) => DroppedFile {
+            name: name.clone(),
+            bytes: Err(format!("讀不到 {name}：{e}")),
+        },
     }
 }
 
