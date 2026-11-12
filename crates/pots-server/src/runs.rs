@@ -976,35 +976,33 @@ async fn goal_overview(inner: &Inner, project: ProjectId) -> Result<String, Erro
         }
     }
     let mut milestones = Vec::new();
-    for item in Store::recent_cards(&mut tx, project, RECENT_MILESTONES * 4).await? {
-        if let StreamItemKind::Card(Card::Milestone { goal, text }) = item.kind {
-            let title = goals
-                .iter()
-                .find(|g| g.id == goal)
-                .map_or("（已刪除）", |g| g.title.as_str());
-            let state = goals
-                .iter()
-                .find(|g| g.id == goal)
-                .map(|g| &g.state)
-                .filter(|s| !matches!(s, GoalState::Active))
-                .map(|s| format!("（{}）", s.label()))
-                .unwrap_or_default();
-            milestones.push(format!(
-                "- {} 「{}」{state}：{}",
-                format_utc(item.at),
-                tasks::one_line(title, 120),
-                tasks::one_line(&text, 300)
-            ));
-            if milestones.len() as u32 >= RECENT_MILESTONES {
-                break;
-            }
-        }
+    for (goal, a) in tasks::recent_activity(&mut tx, project, RECENT_MILESTONES).await? {
+        let title = goals
+            .iter()
+            .find(|g| g.id == goal)
+            .map_or("（已刪除）", |g| g.title.as_str());
+        let state = goals
+            .iter()
+            .find(|g| g.id == goal)
+            .map(|g| &g.state)
+            .filter(|s| !matches!(s, GoalState::Active))
+            .map(|s| format!("（{}）", s.label()))
+            .unwrap_or_default();
+        milestones.push(format!(
+            "- {} 「{}」{state}：{}",
+            format_utc(a.at),
+            tasks::one_line(title, 120),
+            tasks::one_line(&a.text, 300)
+        ));
     }
     if !milestones.is_empty() {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str("# Planner 最近的里程碑（新的在前；使用者在對話流裡也看得到）\n\n");
+        out.push_str(
+            "# Goal 最近的動態（新的在前；使用者在 Goal 面板的「動態」看得到，\
+             只有 Goal 結束與需要使用者處理的會出現在對話流）\n\n",
+        );
         out.push_str(&milestones.join("\n"));
         out.push('\n');
     }

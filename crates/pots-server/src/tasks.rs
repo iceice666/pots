@@ -10,12 +10,13 @@
 //! 核准後平台 merge、任務 `Done`；拒絕時叫醒 worker；逾時轉 `NeedsHuman`。
 
 use pots_proto::{
-    ArtifactKind, GoalId, GoalState, GoalView, ProjectId, ServerEvent, TaskId, TaskStateView,
-    TaskStep, TaskView, Timestamp,
+    ArtifactKind, Card, GoalActivity, GoalId, GoalState, GoalView, ProjectId, ServerEvent, TaskId,
+    TaskStateView, TaskStep, TaskView, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnection, SqliteRow};
+use uuid::Uuid;
 
 use crate::Error;
 use crate::artifacts;
@@ -722,10 +723,96 @@ pub async fn goal_view(conn: &mut SqliteConnection, g: &GoalRow) -> Result<GoalV
         budget_used_pct,
         tasks: views,
         team: crate::team::views(conn, g.id).await?,
+        activity: activity(conn, g.id).await?,
         brief,
         quick: kind == "quick",
         env: kind == "env",
     })
+}
+
+/// 一筆動態要不要同時貼到對話流。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// 只記在 Goal 的「動態」：Planner 的進展、開工、排程。
+    Goal,
+    /// 也貼一張里程碑卡片到對話流：Goal 結束、需要使用者處理。
+    Chat,
+}
+
+/// 記一筆 Goal 的動態，並記一筆 `GoalChanged`。
+pub async fn record_activity(
+    txn: &mut LogTxn<'_>,
+    project: ProjectId,
+    goal: GoalId,
+    text: &str,
+    reach: Reach,
+    run_id: Option<Uuid>,
+) -> Result<(), Error> {
+    let now = Timestamp::now();
+    sqlx::query(
+        "INSERT INTO goal_activity (goal_id, seq, text, at) \
+         SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ? FROM goal_activity WHERE goal_id = ?",
+    )
+    .bind(goal.to_string())
+    .bind(text)
+    .bind(now.0)
+    .bind(goal.to_string())
+    .execute(txn.conn())
+    .await?;
+    if reach == Reach::Chat {
+        let card = Card::Milestone {
+            goal,
+            text: text.to_string(),
+        };
+        crate::tools::post_card(txn, project, card, run_id).await?;
+    }
+    push_goal(txn, goal).await
+}
+
+/// Goal 的動態，舊的在前。
+pub async fn activity(
+    conn: &mut SqliteConnection,
+    goal: GoalId,
+) -> Result<Vec<GoalActivity>, Error> {
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT text, at FROM goal_activity WHERE goal_id = ? ORDER BY seq")
+            .bind(goal.to_string())
+            .fetch_all(conn)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(text, at)| GoalActivity {
+            at: Timestamp(at),
+            text,
+        })
+        .collect())
+}
+
+/// project 最近 `limit` 筆動態（新的在前），給對話 agent 的 Goal 概況用。
+pub async fn recent_activity(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    limit: u32,
+) -> Result<Vec<(GoalId, GoalActivity)>, Error> {
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT a.goal_id, a.text, a.at FROM goal_activity a JOIN goals g ON g.id = a.goal_id \
+         WHERE g.project_id = ? ORDER BY a.at DESC, a.seq DESC LIMIT ?",
+    )
+    .bind(project.to_string())
+    .bind(i64::from(limit))
+    .fetch_all(conn)
+    .await?;
+    rows.into_iter()
+        .map(|(goal, text, at)| {
+            Ok((
+                parse_id(goal)?,
+                GoalActivity {
+                    at: Timestamp(at),
+                    text,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// project 的所有 Goal 檢視，快照用。

@@ -202,6 +202,11 @@ async fn create_goal_hands_off_to_planner() {
                     r##"{"kind":"Ledger","edits":[{"op":"replace_all","body_md":"# Ledger\n\n## 任務\n\n- [ ] 換掉登入頁\n- [ ] 資料遷移"}]}"##,
                 )
                 .tool_call("t4", "post_milestone", r#"{"text":"已拆成兩個任務"}"#)
+                .tool_call(
+                    "t5",
+                    "schedule",
+                    r#"{"kind":"once","in_minutes":30,"prompt":"看資料遷移的進度"}"#,
+                )
                 .usage(100, 20),
             _ => ScriptedTurn::reply("拆成兩個任務，Ledger 已建立"),
         }
@@ -270,9 +275,22 @@ async fn create_goal_hands_off_to_planner() {
             .body
             .starts_with("# 登入重構\n\n## 目標")
     );
-    assert!(p.items.iter().any(|i| matches!(
+    // Planner 的里程碑與排程只記在 Goal 的動態，不貼到對話流。
+    let activity: Vec<_> = p.goals[0]
+        .activity
+        .iter()
+        .map(|a| a.text.as_str())
+        .collect();
+    assert_eq!(activity.len(), 3, "{activity:?}");
+    assert_eq!(activity[0], "你開始了這個 Goal，交給 Planner");
+    assert_eq!(activity[1], "已拆成兩個任務");
+    assert!(
+        activity[2].starts_with("已建立排程 · 單次") && activity[2].contains("看資料遷移的進度"),
+        "{activity:?}"
+    );
+    assert!(!p.items.iter().any(|i| matches!(
         &i.kind,
-        StreamItemKind::Card(Card::Milestone { goal, text }) if *goal == goal_id && text == "已拆成兩個任務"
+        StreamItemKind::Card(Card::Milestone { .. } | Card::Notice { .. })
     )));
 
     // Planner 的 context 是 Brief 與任務樹，不含對話。
@@ -626,6 +644,14 @@ async fn cancel_and_complete_goals() {
         &i.kind,
         StreamItemKind::Card(Card::Milestone { goal, text }) if *goal == done.id && text == "Goal 完成：不需要做了"
     )));
+    // 對話流的完成卡片在 Goal 的動態也有一筆。
+    let done_view = p.goals.iter().find(|g| g.id == done.id).unwrap();
+    assert!(
+        done_view
+            .activity
+            .iter()
+            .any(|a| a.text == "Goal 完成：不需要做了")
+    );
     let turns: Vec<_> = model
         .requests()
         .into_iter()

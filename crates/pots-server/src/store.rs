@@ -588,23 +588,6 @@ impl Store {
         Ok(n as u64)
     }
 
-    /// 最近 `limit` 張卡片，由新到舊。
-    pub async fn recent_cards(
-        conn: &mut SqliteConnection,
-        project: ProjectId,
-        limit: u32,
-    ) -> Result<Vec<StreamItemView>, Error> {
-        let rows = sqlx::query(
-            "SELECT id, body, created_at FROM stream_items WHERE project_id = ? AND kind = 'card' \
-             ORDER BY ord DESC LIMIT ?",
-        )
-        .bind(project.to_string())
-        .bind(i64::from(limit))
-        .fetch_all(conn)
-        .await?;
-        rows.iter().map(item_from_row).collect()
-    }
-
     /// 某個狀態的所有 item，依 project 與順序。給啟動時的復原用。
     pub async fn items_with_status(
         conn: &mut SqliteConnection,

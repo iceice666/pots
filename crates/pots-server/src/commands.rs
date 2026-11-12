@@ -1094,13 +1094,12 @@ async fn start_goal(app: &App, id: GoalId, start: bool) -> Result<(), String> {
         }
         if start {
             crate::tools::start_goal(&mut txn, &goal).await?;
-            crate::tools::post_card(
+            crate::tasks::record_activity(
                 &mut txn,
                 goal.project,
-                Card::Milestone {
-                    goal: goal.id,
-                    text: "你開始了這個 Goal，交給 Planner".into(),
-                },
+                goal.id,
+                "你開始了這個 Goal，交給 Planner",
+                crate::tasks::Reach::Goal,
                 None,
             )
             .await?;

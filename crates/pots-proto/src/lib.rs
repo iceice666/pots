@@ -774,6 +774,13 @@ pub struct TeamPost {
     pub to: Option<String>,
 }
 
+/// Goal 面板「動態」分頁的一筆。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GoalActivity {
+    pub at: Timestamp,
+    pub text: String,
+}
+
 /// Goal 的狀態。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GoalState {
@@ -824,6 +831,10 @@ pub struct GoalView {
     pub budget_used_pct: u8,
     pub tasks: Vec<TaskView>,
     pub team: Vec<TeamPost>,
+    /// Goal 的動態，舊的在前：Planner 的里程碑、開工、Planner 設的排程。
+    /// 只有 Goal 結束與需要使用者處理的同時貼到對話流。
+    #[serde(default)]
+    pub activity: Vec<GoalActivity>,
     pub brief: String,
     /// 快速修改（`quick_fix`）：不經 Planner、只有一個任務。
     #[serde(default)]

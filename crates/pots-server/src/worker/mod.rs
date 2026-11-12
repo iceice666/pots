@@ -34,7 +34,7 @@ use std::time::Duration;
 use pots_llm::agent::{self, RunConfig};
 use pots_llm::{Item, LlmError};
 use pots_proto::{
-    Card, ExecKind, GoalId, GoalState, ModelRole, ProjectId, ServerEvent, TaskId, Timestamp,
+    ExecKind, GoalId, GoalState, ModelRole, ProjectId, ServerEvent, TaskId, Timestamp,
     WorkerBackendKind, WorkerSettingsDraft, WorkerSettingsView,
 };
 use serde::{Deserialize, Serialize};
@@ -434,13 +434,12 @@ pub async fn end_task(
                 )
                 .await?;
                 ends.closed = Some(goal.id);
-                crate::tools::post_card(
+                tasks::record_activity(
                     txn,
                     goal.project,
-                    Card::Milestone {
-                        goal: goal.id,
-                        text: format!("{name}完成：{summary}{pr}"),
-                    },
+                    goal.id,
+                    &format!("{name}完成：{summary}{pr}"),
+                    tasks::Reach::Chat,
                     run,
                 )
                 .await?;
@@ -458,13 +457,12 @@ pub async fn end_task(
                 )
                 .await?;
                 ends.closed = Some(goal.id);
-                crate::tools::post_card(
+                tasks::record_activity(
                     txn,
                     goal.project,
-                    Card::Milestone {
-                        goal: goal.id,
-                        text: format!("{name}沒有完成：{e}{pr}"),
-                    },
+                    goal.id,
+                    &format!("{name}沒有完成：{e}{pr}"),
+                    tasks::Reach::Chat,
                     run,
                 )
                 .await?;
@@ -472,29 +470,26 @@ pub async fn end_task(
             TaskEnd::Escalate(r) => {
                 upgrade_quick(txn, &goal, task, &r).await?;
                 ends.planner = true;
-                crate::tools::post_card(
+                tasks::record_activity(
                     txn,
                     goal.project,
-                    Card::Milestone {
-                        goal: goal.id,
-                        text: format!(
-                            "快速修改超出範圍，已升級成一般 Goal 交給 Planner：{}",
-                            tasks::one_line(&r, 300)
-                        ),
-                    },
+                    goal.id,
+                    &format!(
+                        "快速修改超出範圍，已升級成一般 Goal 交給 Planner：{}",
+                        tasks::one_line(&r, 300)
+                    ),
+                    tasks::Reach::Goal,
                     run,
                 )
                 .await?;
             }
             TaskEnd::NeedsHuman(r) => {
-                tasks::push_goal(txn, goal.id).await?;
-                crate::tools::post_card(
+                tasks::record_activity(
                     txn,
                     goal.project,
-                    Card::Milestone {
-                        goal: goal.id,
-                        text: format!("{name}卡住了：{}{pr}", tasks::one_line(&r, 500)),
-                    },
+                    goal.id,
+                    &format!("{name}卡住了：{}{pr}", tasks::one_line(&r, 500)),
+                    tasks::Reach::Chat,
                     run,
                 )
                 .await?;

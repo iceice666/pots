@@ -503,7 +503,8 @@ impl Tool for PlatformTool {
             ),
             Kind::Granted(ToolName::PostMilestone) => (
                 "post_milestone",
-                "在使用者的對話流貼一張里程碑卡片，回報值得讓使用者知道的進展（一句話）。",
+                "在 Goal 的「動態」記一句進展（例如規劃完成、改派重試）。使用者在 Goal 面板看，\
+                 不會貼到對話流，也不會通知；要使用者決定的事用 ask_user，Goal 完成用 complete_goal。",
                 object(json!({"text": {"type": "string"}}), &["text"]),
             ),
             Kind::Granted(ToolName::WaitFor) => (
@@ -1821,10 +1822,12 @@ impl PlatformTool {
         let mut txn = ctx.hub.begin().await.map_err(internal)?;
         self.active_goal(txn.conn(), goal).await?;
         let result: Result<(), Error> = async {
-            post_card(
+            tasks::record_activity(
                 &mut txn,
                 ctx.project,
-                Card::Milestone { goal, text },
+                goal,
+                &text,
+                tasks::Reach::Goal,
                 Some(ctx.run_id),
             )
             .await?;
@@ -1833,7 +1836,7 @@ impl PlatformTool {
         .await;
         result.map_err(internal)?;
         ctx.milestones.fetch_add(1, Ordering::SeqCst);
-        Ok("已貼到使用者的對話流".into())
+        Ok("已記在 Goal 的「動態」".into())
     }
 
     async fn complete_goal(&self, args: CompleteGoalArgs) -> Result<String, ToolError> {
@@ -1854,13 +1857,12 @@ impl PlatformTool {
                 "Goal 已完成",
             )
             .await?;
-            post_card(
+            tasks::record_activity(
                 &mut txn,
                 ctx.project,
-                Card::Milestone {
-                    goal,
-                    text: format!("Goal 完成：{summary}"),
-                },
+                goal,
+                &format!("Goal 完成：{summary}"),
+                tasks::Reach::Chat,
                 Some(ctx.run_id),
             )
             .await?;
@@ -2320,23 +2322,35 @@ impl PlatformTool {
                 Ok(r) => r,
                 Err(e) => return Ok(Err(e)),
             };
-            let card = notice(
-                "已建立排程",
-                format!(
-                    "{}：{}（下一次 {}）",
-                    row.spec.cadence(),
-                    tasks::one_line(&row.prompt, 200),
-                    automation::local(row.next_at)
-                ),
+            let body = format!(
+                "{}：{}（下一次 {}）",
+                row.spec.cadence(),
+                tasks::one_line(&row.prompt, 200),
+                automation::local(row.next_at)
             );
             match ctx.scope {
                 Scope::Project => {
                     automation::push(&mut txn, now).await?;
                     txn.commit().await?;
                     // 對話 agent 的卡片附在這則回覆下面（commit 成功後才加）。
-                    ctx.cards.lock().unwrap().push(card);
+                    ctx.cards.lock().unwrap().push(notice("已建立排程", body));
                 }
-                Scope::Goal(_) | Scope::Task { .. } | Scope::Global => {
+                // Planner 叫醒自己的排程只記在 Goal 的動態，不打擾對話流。
+                Scope::Goal(goal) => {
+                    tasks::record_activity(
+                        &mut txn,
+                        ctx.project,
+                        goal,
+                        &format!("已建立排程 · {body}"),
+                        tasks::Reach::Goal,
+                        Some(ctx.run_id),
+                    )
+                    .await?;
+                    automation::push(&mut txn, now).await?;
+                    txn.commit().await?;
+                }
+                Scope::Task { .. } | Scope::Global => {
+                    let card = notice("已建立排程", body);
                     post_card(&mut txn, ctx.project, card, Some(ctx.run_id)).await?;
                     automation::push(&mut txn, now).await?;
                     txn.commit().await?;
