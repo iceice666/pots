@@ -1,8 +1,0 @@
-{
-  "new": [
-    {"text": "做完了，但忘了呼叫結束工具"},
-    {"end_turn": "第一輪結束"},
-    {"mcp": {"tool": "complete_task", "args": {"summary": "被提醒後完成"}}},
-    {"end_turn": "第二輪結束"}
-  ]
-}

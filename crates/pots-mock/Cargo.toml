@@ -1,0 +1,9 @@
+[package]
+name = "pots-mock"
+description = "A fake Anthropic/OpenAI-compatible LLM server, for running Pots without an API key and for tests."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true

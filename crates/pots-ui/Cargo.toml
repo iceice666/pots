@@ -1,0 +1,18 @@
+[package]
+name = "pots-ui"
+description = "The Pots desktop app (GPUI)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pots"
+path = "src/main.rs"
+
+[dependencies]
+futures.workspace = true
+gpui.workspace = true
+pots-agent.workspace = true
+pots-llm.workspace = true
+serde_json.workspace = true
+unicode-segmentation.workspace = true
