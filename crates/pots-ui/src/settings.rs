@@ -94,14 +94,22 @@ impl Settings {
         // Enter moves down the fields, then saves.
         for (field, next) in [(&name, Some(&base_url)), (&base_url, Some(&api_key)), (&api_key, Some(&api_key_env)), (&api_key_env, None)] {
             let next = next.cloned();
-            subscriptions.push(cx.subscribe_in(field, window, move |this, _, _: &ComposerEvent, window, cx| match &next {
-                Some(next) => window.focus(&next.read(cx).focus_handle(cx)),
-                None => this.save(window, cx),
+            subscriptions.push(cx.subscribe_in(field, window, move |this, _, event: &ComposerEvent, window, cx| {
+                if let ComposerEvent::Submit(_) = event {
+                    match &next {
+                        Some(next) => window.focus(&next.read(cx).focus_handle(cx)),
+                        None => this.save(window, cx),
+                    }
+                }
             }));
             // Hints and the Save button follow what's typed.
             subscriptions.push(cx.observe(field, |_, _, cx| cx.notify()));
         }
-        subscriptions.push(cx.subscribe_in(&model, window, |this, _, _: &ComposerEvent, window, cx| this.save_agent(window, cx)));
+        subscriptions.push(cx.subscribe_in(&model, window, |this, _, event: &ComposerEvent, window, cx| {
+            if let ComposerEvent::Submit(_) = event {
+                this.save_agent(window, cx)
+            }
+        }));
         subscriptions.push(cx.observe(&model, |_, _, cx| cx.notify()));
         let mut this = Self {
             focus: cx.focus_handle(),

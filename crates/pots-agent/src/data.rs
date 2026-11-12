@@ -126,15 +126,20 @@ impl Message {
         markdown::mentions(&self.blocks)
     }
 
-    /// The message's text on one line, cut to `max` characters.
-    pub fn snippet(&self, max: usize) -> String {
+    /// The message's text as shown (no markdown markers), on one line.
+    pub fn plain_text(&self) -> String {
         let text = markdown::fragments(&self.blocks)
             .iter()
             .map(|f| f.text.trim())
             .filter(|t| !t.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The message's text on one line, cut to `max` characters.
+    pub fn snippet(&self, max: usize) -> String {
+        let text = self.plain_text();
         if text.chars().count() <= max {
             text
         } else {

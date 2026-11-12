@@ -4,33 +4,41 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
     AnyElement, AnyView, AsyncApp, ClipboardItem, Context, Entity, EntityInputHandler, FocusHandle, Focusable,
-    FontWeight, KeyBinding, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Subscription, Task, WeakEntity, Window, actions, canvas, div, list,
-    prelude::*, px, rgb,
+    FontWeight, HighlightStyle, KeyBinding, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ScrollHandle, SharedString, StyledText, Subscription, Task, WeakEntity, Window,
+    actions, canvas, div, list, prelude::*, px, rgb,
 };
 
 use pots_agent::agent::{self, Agents};
 use pots_agent::data::{self, Card, Conv, MergeOutcome, Message, UserKind, Workspace};
 use pots_agent::markdown::{self, Sep};
 use pots_agent::reply::{Host, Outcome, blocking};
+use pots_agent::search::{Hit, MessageHit};
 use pots_agent::{sandbox, store};
 use pots_llm::Usage;
 use pots_llm::cost::{self, Catalog};
 
-use crate::composer::{Composer, ComposerEvent};
+use crate::composer::{self, Composer, ComposerEvent};
 use crate::selection::{Pos, Selection, SharedSelection};
 use crate::settings::{Settings, SettingsEvent};
 use crate::{render_md, theme};
 
 actions!(messages, [CopySelection, SelectAllMessages, ClearSelection]);
-actions!(pots, [OpenSettings]);
+actions!(pots, [OpenSettings, OpenSearch]);
 
 const MESSAGES_CONTEXT: &str = "Messages";
 /// Name of a thread started from the header when none is typed.
 const NEW_THREAD: &str = "New Thread";
+/// Most search results shown, for names and for messages each.
+const SEARCH_LIMIT: usize = 20;
+/// How long a message opened from search stays highlighted.
+const HIGHLIGHT_FOR: Duration = Duration::from_secs(3);
+/// Width of the top bar's search box and its results.
+const SEARCH_WIDTH: f32 = 560.;
 
 pub fn bind_keys(cx: &mut gpui::App) {
     let c = Some(MESSAGES_CONTEXT);
@@ -39,6 +47,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new("secondary-a", SelectAllMessages, c),
         KeyBinding::new("escape", ClearSelection, c),
         KeyBinding::new("secondary-,", OpenSettings, None),
+        KeyBinding::new("secondary-k", OpenSearch, None),
     ]);
 }
 
@@ -81,6 +90,14 @@ enum Panel {
     Thread(usize),
 }
 
+/// The top bar's search, while it's open.
+struct Search {
+    hits: Vec<Hit>,
+    /// The result Enter opens (an index into `hits`).
+    selected: usize,
+    scroll: ScrollHandle,
+}
+
 /// The channel dialog: creating a channel, or editing channel `editing`.
 struct ChannelDialog {
     editing: Option<usize>,
@@ -119,6 +136,12 @@ pub struct ChatApp {
     settings: Option<(Entity<Settings>, Subscription)>,
     /// Id of the channel message the mouse is over; it shows the action bar.
     hovered: Option<usize>,
+    search_box: Entity<Composer>,
+    search: Option<Search>,
+    /// Id of the message opened from search, shown highlighted for a while,
+    /// and which highlight that is (so an older timer leaves a newer one).
+    highlight: Option<usize>,
+    highlight_seq: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -149,29 +172,51 @@ impl ChatApp {
         let channel_name = cx.new(Composer::compact);
         let channel_topic = cx.new(Composer::compact);
         let channel_repo = cx.new(Composer::compact);
+        let search_box = cx.new(Composer::small);
+        search_box.update(cx, |c, cx| c.set_placeholder(format!("Search {}", ws.name), cx));
         let subscriptions = vec![
-            cx.subscribe(&composer, |this, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Submit(text) => this.send(text, cx),
+            cx.subscribe(&composer, |this, _, event: &ComposerEvent, cx| {
+                if let ComposerEvent::Submit(text) = event {
+                    this.send(text, cx)
+                }
             }),
             cx.subscribe_in(&thread_composer, window, |this, _, event: &ComposerEvent, window, cx| {
-                match event {
-                    ComposerEvent::Submit(text) => this.send_in_thread(text, window, cx),
+                if let ComposerEvent::Submit(text) = event {
+                    this.send_in_thread(text, window, cx)
                 }
             }),
             // Enter in the thread name field moves on to the message box.
             cx.subscribe_in(&thread_name, window, |this, _, event: &ComposerEvent, window, cx| {
-                match event {
-                    ComposerEvent::Submit(_) => window.focus(&this.thread_composer.read(cx).focus_handle(cx)),
+                if let ComposerEvent::Submit(_) = event {
+                    window.focus(&this.thread_composer.read(cx).focus_handle(cx))
                 }
             }),
             // The channel dialog: Enter moves down the fields, then saves.
-            cx.subscribe_in(&channel_name, window, |this, _, _: &ComposerEvent, window, cx| {
-                window.focus(&this.channel_topic.read(cx).focus_handle(cx))
+            cx.subscribe_in(&channel_name, window, |this, _, event: &ComposerEvent, window, cx| {
+                if let ComposerEvent::Submit(_) = event {
+                    window.focus(&this.channel_topic.read(cx).focus_handle(cx))
+                }
             }),
-            cx.subscribe_in(&channel_topic, window, |this, _, _: &ComposerEvent, window, cx| {
-                window.focus(&this.channel_repo.read(cx).focus_handle(cx))
+            cx.subscribe_in(&channel_topic, window, |this, _, event: &ComposerEvent, window, cx| {
+                if let ComposerEvent::Submit(_) = event {
+                    window.focus(&this.channel_repo.read(cx).focus_handle(cx))
+                }
             }),
-            cx.subscribe_in(&channel_repo, window, |this, _, _: &ComposerEvent, window, cx| this.save_channel(window, cx)),
+            cx.subscribe_in(&channel_repo, window, |this, _, event: &ComposerEvent, window, cx| {
+                if let ComposerEvent::Submit(_) = event {
+                    this.save_channel(window, cx)
+                }
+            }),
+            // Search as you type; while an input method is still composing,
+            // the last results stay until the text is final.
+            cx.subscribe_in(&search_box, window, |this, search_box, event: &ComposerEvent, window, cx| match event {
+                ComposerEvent::Changed if !search_box.read(cx).is_composing() => this.run_search(cx),
+                ComposerEvent::Changed => {}
+                ComposerEvent::Submit(_) => {
+                    let selected = this.search.as_ref().map_or(0, |s| s.selected);
+                    this.open_hit(selected, window, cx)
+                }
+            }),
         ];
         let mut this = Self {
             ws,
@@ -195,6 +240,10 @@ impl ChatApp {
             menu: false,
             settings: None,
             hovered: None,
+            search_box,
+            search: None,
+            highlight: None,
+            highlight_seq: 0,
             _subscriptions: subscriptions,
         };
         this.select_channel(active, window, cx);
@@ -295,6 +344,7 @@ impl ChatApp {
     fn select_channel(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix;
         self.hovered = None;
+        self.highlight = None;
         let channel = &mut self.ws.channels[ix];
         channel.unread = false;
         let placeholder = match channel.dm {
@@ -333,6 +383,7 @@ impl ChatApp {
     /// suggesting `name`.
     fn open_new_thread(&mut self, msg: Option<usize>, name: String, window: &mut Window, cx: &mut Context<Self>) {
         self.panel = Panel::NewThread { channel: self.active, msg };
+        self.highlight = None;
         self.side.reset(usize::from(msg.is_some()));
         self.thread_name.update(cx, |c, cx| {
             c.set_text("", cx);
@@ -346,6 +397,7 @@ impl ChatApp {
 
     fn open_thread(&mut self, t: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.panel = Panel::Thread(t);
+        self.highlight = None;
         self.side.reset(self.ws.len(Conv::Thread(t)));
         let placeholder = format!("Message {}", self.ws.threads[t].name);
         self.thread_composer.update(cx, |c, cx| c.set_placeholder(placeholder, cx));
@@ -371,8 +423,104 @@ impl ChatApp {
 
     fn close_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.panel = Panel::Closed;
+        self.highlight = None;
         self.side.reset(0);
         window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    // --- search ----------------------------------------------------------
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Not over the dialogs (they're on top of the top bar).
+        if self.dialog.is_some() || self.settings.is_some() {
+            return;
+        }
+        self.menu = false;
+        if self.search.is_none() {
+            self.search = Some(Search { hits: Vec::new(), selected: 0, scroll: ScrollHandle::new() });
+            self.run_search(cx);
+        }
+        window.focus(&self.search_box.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Close the search and forget what was typed.
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.take().is_none() {
+            return;
+        }
+        self.search_box.update(cx, |c, cx| c.set_text("", cx));
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_box.read(cx).text().to_string();
+        let hits = self.ws.search(&query, SEARCH_LIMIT);
+        if let Some(search) = &mut self.search {
+            search.hits = hits;
+            search.selected = 0;
+            search.scroll.scroll_to_item(0);
+            cx.notify();
+        }
+    }
+
+    /// Move the search's selection up (-1) or down (1), stopping at the ends.
+    fn move_hit(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        if search.hits.is_empty() {
+            return;
+        }
+        search.selected = search.selected.saturating_add_signed(delta).min(search.hits.len() - 1);
+        // The list has a heading before the names and one before the messages.
+        let names = search.hits.iter().filter(|h| !matches!(h, Hit::Message(_))).count();
+        let headings = usize::from(names > 0) + usize::from(search.selected >= names);
+        search.scroll.scroll_to_item(search.selected + headings);
+        cx.notify();
+    }
+
+    /// Go to search result `ix`, and close the search.
+    fn open_hit(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self.search.as_ref().and_then(|s| s.hits.get(ix)).cloned() else { return };
+        self.close_search(window, cx);
+        match hit {
+            Hit::Channel(c) if c < self.ws.channels.len() => self.select_channel(c, window, cx),
+            Hit::Thread(t) if t < self.ws.threads.len() => self.select_thread(t, window, cx),
+            Hit::Message(m) => {
+                let Some((conv, ix)) = self.ws.locate(m.id) else { return };
+                match conv {
+                    Conv::Channel(c) => {
+                        self.select_channel(c, window, cx);
+                        self.main.list.scroll_to_reveal_item(ix);
+                    }
+                    Conv::Thread(t) => {
+                        self.select_thread(t, window, cx);
+                        self.side.list.scroll_to_reveal_item(ix);
+                    }
+                }
+                // After switching, which clears any highlight.
+                self.highlight_message(m.id, cx);
+            }
+            Hit::Channel(_) | Hit::Thread(_) => {}
+        }
+    }
+
+    /// Highlight message `id` for a while.
+    fn highlight_message(&mut self, id: usize, cx: &mut Context<Self>) {
+        self.highlight_seq += 1;
+        let seq = self.highlight_seq;
+        self.highlight = Some(id);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HIGHLIGHT_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.highlight_seq == seq && this.highlight.take().is_some() {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1154,7 +1302,54 @@ impl ChatApp {
 
     // --- rendering -------------------------------------------------------
 
-    fn render_topbar(&self) -> impl IntoElement {
+    fn render_topbar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let search_box = div()
+            .id("search-box")
+            .w(px(SEARCH_WIDTH))
+            .h(px(26.))
+            // The top bar drags the window: a press here is for the box.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    if this.search.is_none() {
+                        this.open_search(window, cx);
+                    }
+                }),
+            );
+        let search_box = match self.search {
+            Some(_) => search_box
+                // Up and Down pick a result rather than move the cursor.
+                .capture_action(cx.listener(|this, _: &composer::Up, _, cx| {
+                    if !this.search_box.read(cx).is_composing() {
+                        cx.stop_propagation();
+                        this.move_hit(-1, cx);
+                    }
+                }))
+                .capture_action(cx.listener(|this, _: &composer::Down, _, cx| {
+                    if !this.search_box.read(cx).is_composing() {
+                        cx.stop_propagation();
+                        this.move_hit(1, cx);
+                    }
+                }))
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                    if e.keystroke.key == "escape" && !this.search_box.read(cx).is_composing() {
+                        cx.stop_propagation();
+                        this.close_search(window, cx);
+                    }
+                }))
+                .child(self.search_box.clone()),
+            None => search_box
+                .rounded_md()
+                .bg(theme::search_bg())
+                .flex()
+                .items_center()
+                .px_3()
+                .cursor_text()
+                .text_size(px(13.))
+                .text_color(theme::sidebar_text())
+                .child(format!("🔍  Search {}", self.ws.name)),
+        };
         div()
             .h(px(40.))
             .flex_none()
@@ -1162,19 +1357,170 @@ impl ChatApp {
             .items_center()
             .justify_center()
             .bg(theme::topbar())
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_search(window, cx);
+                    window.start_window_move();
+                }),
+            )
+            .child(search_box)
+    }
+
+    /// The search results, dropped down from the top bar's search box. A
+    /// click anywhere below it closes the search.
+    fn render_search(&self, search: &Search, cx: &Context<Self>) -> impl IntoElement {
+        let query = self.search_box.read(cx).text().trim().to_string();
+        let note = |text: String| div().px_4().py_3().text_size(px(13.)).text_color(theme::muted()).child(text);
+        let heading = |text: &'static str| {
+            div()
+                .px_4()
+                .pt_2()
+                .pb_1()
+                .text_size(px(11.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme::muted())
+                .child(text)
+        };
+        let row = |ix: usize| {
+            div()
+                .id(("search-hit", ix))
+                .mx_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .map(|d| match ix == search.selected {
+                    true => d.bg(rgb(0xe8f5fa)),
+                    false => d.hover(|s| s.bg(theme::hover())),
+                })
+                .on_click(cx.listener(move |this, _, window, cx| this.open_hit(ix, window, cx)))
+        };
+
+        let mut items: Vec<AnyElement> = Vec::new();
+        if query.is_empty() {
+            items.push(note("Search channel and thread names, and messages. ↑↓ to choose, Return to open.".into()).into_any_element());
+        } else if search.hits.is_empty() {
+            items.push(note(format!("No results for “{query}”.")).into_any_element());
+        }
+        let mut in_messages = false;
+        for (ix, hit) in search.hits.iter().enumerate() {
+            match hit {
+                Hit::Channel(_) | Hit::Thread(_) if ix == 0 => {
+                    items.push(heading("CHANNELS AND THREADS").into_any_element())
+                }
+                Hit::Message(_) if !in_messages => {
+                    in_messages = true;
+                    items.push(heading("MESSAGES").into_any_element());
+                }
+                _ => {}
+            }
+            let item = match hit {
+                Hit::Channel(c) => match self.ws.channels.get(*c) {
+                    Some(ch) => {
+                        let (name, kind) = match ch.dm {
+                            Some(_) => (ch.name.clone(), "Direct message"),
+                            None => (format!("#{}", ch.name), "Channel"),
+                        };
+                        row(ix)
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .text_size(px(14.))
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+                            .child(div().text_size(px(12.)).text_color(theme::faint()).child(kind))
+                    }
+                    None => continue,
+                },
+                Hit::Thread(t) => match self.ws.threads.get(*t) {
+                    Some(thread) => row(ix)
+                        .flex()
+                        .items_baseline()
+                        .gap_2()
+                        .text_size(px(14.))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("🧵 {}", thread.name)))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme::faint())
+                                .child(format!("Thread in #{}", self.ws.channels[thread.channel].name)),
+                        ),
+                    None => continue,
+                },
+                Hit::Message(m) => row(ix).child(self.render_message_hit(m)),
+            };
+            items.push(item.into_any_element());
+        }
+
+        div()
+            .id("search-backdrop")
+            .absolute()
+            .top(px(40.))
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_search(window, cx)))
+            .flex()
+            .justify_center()
             .child(
                 div()
-                    .w(px(560.))
-                    .h(px(26.))
-                    .rounded_md()
-                    .bg(theme::search_bg())
+                    .id("search-results")
+                    .w(px(SEARCH_WIDTH))
+                    .max_h(px(440.))
+                    .h_auto()
+                    .mt_1()
+                    .py_1()
                     .flex()
-                    .items_center()
-                    .px_3()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&search.scroll)
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::bg())
+                    .shadow_lg()
+                    .text_color(theme::text())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(items),
+            )
+    }
+
+    /// A message search result: who wrote it where and when, and the text
+    /// around the match, with the match in bold.
+    fn render_message_hit(&self, m: &MessageHit) -> impl IntoElement {
+        let author = self.ws.users.get(m.author).map_or(String::new(), |u| u.name.clone());
+        let place = match m.conv {
+            Conv::Channel(c) => self.ws.channels.get(c).map(|ch| match ch.dm {
+                Some(_) => ch.name.clone(),
+                None => format!("#{}", ch.name),
+            }),
+            Conv::Thread(t) => self
+                .ws
+                .threads
+                .get(t)
+                .map(|th| format!("🧵 {} in #{}", th.name, self.ws.channels[th.channel].name)),
+        };
+        let bold = HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() };
+        div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(author))
+                    .children(place.map(|p| div().text_color(theme::muted()).child(p)))
+                    .child(div().text_color(theme::faint()).child(data::format_time(m.ts))),
+            )
+            .child(
+                div()
                     .text_size(px(13.))
-                    .text_color(theme::sidebar_text())
-                    .child(format!("🔍  Search {}", self.ws.name)),
+                    .truncate()
+                    .child(StyledText::new(m.snippet.clone()).with_highlights([(m.matched.clone(), bold)])),
             )
     }
 
@@ -1676,6 +2022,8 @@ impl ChatApp {
             .pt(if grouped { px(2.) } else { px(8.) })
             .pb(px(2.))
             .hover(|s| s.bg(theme::hover()))
+            // Opened from search.
+            .when(self.highlight == Some(id), |d| d.bg(rgb(0xfdf3d0)))
             .when(pane == PaneId::Main, |d| {
                 d.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                     // Leaving is handled by the next message or the list itself, so
@@ -2483,15 +2831,17 @@ impl Render for ChatApp {
         let dialog = self.dialog.as_ref().map(|d| self.render_channel_dialog(d, cx));
         let menu = self.menu.then(|| self.render_menu(cx));
         let settings = self.settings.as_ref().map(|(s, _)| s.clone());
+        let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         div()
             .relative()
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.open_search(window, cx)))
             .size_full()
             .flex()
             .flex_col()
             .bg(theme::bg())
             .font_family(".SystemUIFont")
-            .child(self.render_topbar())
+            .child(self.render_topbar(cx))
             .child(
                 div()
                     .flex_1()
@@ -2510,6 +2860,7 @@ impl Render for ChatApp {
                     )
                     .children(panel),
             )
+            .children(search)
             .children(dialog)
             .children(menu)
             .children(settings)

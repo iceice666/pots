@@ -57,6 +57,9 @@ pub fn bind_keys(cx: &mut App) {
 
 pub enum ComposerEvent {
     Submit(String),
+    /// The text changed: typing, deleting, pasting, undo/redo, or an input
+    /// method composing (see `is_composing`). Not sent by `set_text`.
+    Changed,
 }
 
 pub struct Composer {
@@ -66,6 +69,8 @@ pub struct Composer {
     /// Single-line input without the formatting/send chrome. Enter emits
     /// `Submit` with the current text but keeps it.
     compact: bool,
+    /// A compact field sized for the top bar (the search box).
+    small: bool,
     /// Shows `*`s instead of the text (an API key), and won't copy it.
     secret: bool,
     selected_range: Range<usize>,
@@ -114,6 +119,7 @@ impl Composer {
             content: String::new(),
             placeholder: "Message".into(),
             compact: false,
+            small: false,
             secret: false,
             selected_range: 0..0,
             selection_reversed: false,
@@ -131,6 +137,14 @@ impl Composer {
         Self {
             compact: true,
             ..Self::new(cx)
+        }
+    }
+
+    /// A single-line field small enough for the top bar (the search box).
+    pub fn small(cx: &mut Context<Self>) -> Self {
+        Self {
+            small: true,
+            ..Self::compact(cx)
         }
     }
 
@@ -192,6 +206,11 @@ impl Composer {
         cx.notify();
     }
 
+    /// An input method is composing text that isn't final yet.
+    pub fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
     fn is_empty(&self) -> bool {
         self.content.is_empty()
     }
@@ -245,6 +264,7 @@ impl Composer {
         if let Some(snapshot) = self.undo_stack.pop() {
             self.redo_stack.push(self.snapshot());
             self.restore(snapshot);
+            cx.emit(ComposerEvent::Changed);
             cx.notify();
         }
     }
@@ -253,6 +273,7 @@ impl Composer {
         if let Some(snapshot) = self.redo_stack.pop() {
             self.undo_stack.push(self.snapshot());
             self.restore(snapshot);
+            cx.emit(ComposerEvent::Changed);
             cx.notify();
         }
     }
@@ -570,8 +591,11 @@ impl EntityInputHandler for Composer {
         self.marked_range.as_ref().map(|r| self.range_to_utf16(r))
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.marked_range = None;
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        // What was being composed stays, as final text.
+        if self.marked_range.take().is_some() {
+            cx.emit(ComposerEvent::Changed);
+        }
     }
 
     fn replace_text_in_range(
@@ -594,6 +618,7 @@ impl EntityInputHandler for Composer {
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range.take();
+        cx.emit(ComposerEvent::Changed);
         cx.notify();
     }
 
@@ -623,6 +648,7 @@ impl EntityInputHandler for Composer {
             .map(|r| self.range_from_utf16(r))
             .map(|r| r.start + range.start..r.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        cx.emit(ComposerEvent::Changed);
         cx.notify();
     }
 
@@ -721,6 +747,10 @@ impl Render for Composer {
                     .cursor(CursorStyle::IBeam)
                     .text_size(px(15.))
                     .line_height(px(22.))
+                    // Fits the 26 px top bar box with the border.
+                    .when(self.small, |d| {
+                        d.px_2().py(px(2.)).min_h(px(24.)).max_h(px(24.)).text_size(px(13.)).line_height(px(20.))
+                    })
                     .text_color(theme::text())
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
