@@ -15,6 +15,7 @@ use gpui_kit::{
     relative,
 };
 
+use super::automation_forms::chip;
 use super::channel::empty_state;
 use super::panel::{panel_frame, white_box};
 use super::text::agent_text;
@@ -80,6 +81,20 @@ fn section_heading(title: &'static str, note: String) -> Div {
         )
 }
 
+/// 帶右側操作元件的區塊標題列；標題與小字維持原本的基線對齊。
+///
+/// 右欄 project 面板很窄，小字加上操作元件放不下時讓元件換到下一行。
+fn section_heading_with_action(title: &'static str, note: String, action: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(10.))
+        .pb(px(10.))
+        .child(section_heading(title, note).pb(px(0.)).flex_1().min_w_0())
+        .child(div().flex_none().child(action))
+}
+
 fn empty_row(text: &'static str) -> Div {
     div()
         .px(px(16.))
@@ -108,6 +123,34 @@ fn schedules_note(schedules: &[&ScheduleView]) -> String {
         note
     } else {
         format!("{note}（另有 {finished} 個已結束）")
+    }
+}
+
+/// 排程表實際要渲染的列，以及被「隱藏已結束」開關藏起來的數量。
+///
+/// 開關關著時原樣回傳、`hidden` 為 0（與改動前的行為一致）。
+fn filter_finished(schedules: Vec<&ScheduleView>, hide: bool) -> (Vec<&ScheduleView>, usize) {
+    if !hide {
+        return (schedules, 0);
+    }
+    let hidden = schedules.iter().filter(|s| s.finished).count();
+    let kept = schedules.into_iter().filter(|s| !s.finished).collect();
+    (kept, hidden)
+}
+
+/// 排程表標題列的小字；開關開啟且真的藏了排程時，把 [`schedules_note`] 尾巴的
+/// 「另有 N 個已結束」換成「已隱藏 N 個已結束」。
+///
+/// 這是畫面上唯一說明「表格少掉了東西」的地方，藏起來卻不說，使用者會以為排程消失了。
+fn hide_finished_note(note: String, hidden: usize) -> String {
+    if hidden == 0 {
+        return note;
+    }
+    let suffix = format!("（另有 {hidden} 個已結束）");
+    match note.strip_suffix(suffix.as_str()) {
+        Some(base) => format!("{base}（已隱藏 {hidden} 個已結束）"),
+        // `schedules_note` 一定會帶這個尾巴（`hidden` 就是已結束的數量），這裡只是保險。
+        None => format!("{note}（已隱藏 {hidden} 個已結束）"),
     }
 }
 
@@ -486,7 +529,11 @@ impl PotsApp {
         let paused = inst.automation_pause.is_some();
         let mut schedules: Vec<&ScheduleView> = inst.schedules_for(project).collect();
         sort_schedules(&mut schedules);
+        // 小字用「全部」算（維持既有文案），再依開關決定實際要渲染的列。
+        let total = schedules.len();
         let note = schedules_note(&schedules);
+        let (schedules, hidden) = filter_finished(schedules, self.hide_finished_schedules);
+        let note = hide_finished_note(note, hidden);
         let app = cx.entity().downgrade();
 
         let head = table_head()
@@ -606,15 +653,37 @@ impl PotsApp {
                 )
         });
 
+        // 全部都被藏起來時不能說「沒有排程」，那會和標題的「已隱藏 N 個」互相打架。
+        let empty_text = if total == 0 {
+            "沒有排程。"
+        } else {
+            "沒有未結束的排程（已全部隱藏）。"
+        };
+
         div()
             .flex()
             .flex_col()
-            .child(section_heading("排程", note))
+            .child(section_heading_with_action(
+                "排程",
+                note,
+                chip(
+                    // 實例頁與右欄 project 面板可能同畫面出現，id 要帶 scope。
+                    SharedString::from(format!("{scope}-schedules-hide-finished")),
+                    "隱藏已結束",
+                    self.hide_finished_schedules,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.hide_finished_schedules = !this.hide_finished_schedules;
+                    // 篩選改變時關掉右欄詳情，與 `automation_filter` 的既有慣例一致。
+                    this.panel = None;
+                    cx.notify();
+                })),
+            ))
             .child(
                 table_frame()
                     .child(head)
                     .children(rows)
-                    .when(schedules.is_empty(), |d| d.child(empty_row("沒有排程。"))),
+                    .when(schedules.is_empty(), |d| d.child(empty_row(empty_text))),
             )
     }
 
@@ -1154,7 +1223,9 @@ impl PotsApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{schedule_row_next, schedules_note, sort_schedules};
+    use super::{
+        filter_finished, hide_finished_note, schedule_row_next, schedules_note, sort_schedules,
+    };
     use crate::model::*;
     use crate::theme;
 
@@ -1200,6 +1271,50 @@ mod tests {
             schedules_note(&refs),
             "1 個 · 每個專案最多 10 個，最短間隔 10 分鐘（另有 1 個已結束）"
         );
+    }
+
+    #[test]
+    fn hide_finished_filters_and_reports_count() {
+        let all = [
+            schedule(1, true, false),
+            schedule(2, true, true),
+            schedule(3, true, true),
+        ];
+        let refs: Vec<&ScheduleView> = all.iter().collect();
+        let note = schedules_note(&refs);
+
+        let (rows, hidden) = filter_finished(refs.clone(), true);
+        let ids: Vec<_> = rows.iter().map(|s| s.id).collect();
+        assert_eq!(ids, [ScheduleId::from_u64(1)]);
+        assert_eq!(hidden, 2);
+        assert_eq!(
+            hide_finished_note(note.clone(), hidden),
+            "1 個 · 每個專案最多 10 個，最短間隔 10 分鐘（已隱藏 2 個已結束）"
+        );
+
+        // 開關關著：原樣回傳、不藏也不報。
+        let (rows, hidden) = filter_finished(refs, false);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(hidden, 0);
+        assert_eq!(hide_finished_note(note, hidden), schedules_note(&rows));
+
+        // 沒有已結束的排程時，開著也不會多出提示。
+        let live = [schedule(1, true, false)];
+        let live: Vec<&ScheduleView> = live.iter().collect();
+        let note = schedules_note(&live);
+        let (rows, hidden) = filter_finished(live, true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(hidden, 0);
+        assert_eq!(hide_finished_note(note.clone(), hidden), note);
+    }
+
+    #[test]
+    fn hide_finished_can_empty_the_table() {
+        let all = [schedule(1, true, true), schedule(2, false, true)];
+        let refs: Vec<&ScheduleView> = all.iter().collect();
+        let (rows, hidden) = filter_finished(refs, true);
+        assert!(rows.is_empty());
+        assert_eq!(hidden, 2);
     }
 
     #[test]
