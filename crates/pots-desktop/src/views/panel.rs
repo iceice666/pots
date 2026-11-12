@@ -100,9 +100,7 @@ pub(super) fn task_detail(t: &TaskView) -> (String, String, Hsla) {
             or(reason, "worker 停下來了"),
             theme::warn_text(),
         ),
-        TaskStateView::Done { outcome } => {
-            (String::new(), or(outcome, "完成"), theme::ok())
-        }
+        TaskStateView::Done { outcome } => (String::new(), or(outcome, "完成"), theme::ok()),
         TaskStateView::Failed { attempts, error } => (
             format!("失敗 {attempts} 次："),
             or(error, "沒有說明"),
@@ -855,19 +853,12 @@ impl PotsApp {
                             .flex()
                             .gap(px(8.))
                             .pb(px(12.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .line_height(relative(1.4))
-                                    .child(agent_text(
-                                        SharedString::from(format!(
-                                            "task-step-{}-{i}",
-                                            tid.0
-                                        )),
-                                        s.text.clone(),
-                                    )),
-                            )
+                            .child(div().flex_1().min_w_0().line_height(relative(1.4)).child(
+                                agent_text(
+                                    SharedString::from(format!("task-step-{}-{i}", tid.0)),
+                                    s.text.clone(),
+                                ),
+                            ))
                             .child(
                                 div()
                                     .flex_none()

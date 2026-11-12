@@ -356,9 +356,7 @@ impl PotsApp {
         let scope = SharedString::from(format!("msg-{}", item.0));
         match card {
             Card::GoalCreated { goal } => match self.store.goal(self.instance, *goal) {
-                Some(g) => self
-                    .render_goal_card(&scope, g, cx)
-                    .into_any_element(),
+                Some(g) => self.render_goal_card(&scope, g, cx).into_any_element(),
                 None => muted("Goal 已不存在").into_any_element(),
             },
             // listener 依外部事件開的 Goal：上面註明是哪個事件觸發的。
@@ -537,22 +535,19 @@ impl PotsApp {
                 title,
                 rows,
                 footer,
-            } => card_frame(560.)
-                .gap(px(10.))
-                .px(px(16.))
-                .py(px(14.))
-                .child(
-                    div()
-                        .text_size(px(16.))
-                        .font_weight(FontWeight::BOLD)
-                        .child(title.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .children(rows.iter().enumerate().map(|(i, (k, v))| {
+            } => {
+                card_frame(560.)
+                    .gap(px(10.))
+                    .px(px(16.))
+                    .py(px(14.))
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(title.clone()),
+                    )
+                    .child(div().flex().flex_col().gap(px(6.)).children(
+                        rows.iter().enumerate().map(|(i, (k, v))| {
                             div()
                                 .flex()
                                 .gap(px(12.))
@@ -568,13 +563,14 @@ impl PotsApp {
                                     SharedString::from(format!("digest-row-{}-{i}", item.0)),
                                     v.clone(),
                                 ))
-                        })),
-                )
-                .child(agent_text_muted(
-                    SharedString::from(format!("digest-footer-{}", item.0)),
-                    footer.clone(),
-                ))
-                .into_any_element(),
+                        }),
+                    ))
+                    .child(agent_text_muted(
+                        SharedString::from(format!("digest-footer-{}", item.0)),
+                        footer.clone(),
+                    ))
+                    .into_any_element()
+            }
             Card::Notice {
                 title,
                 body,
@@ -717,11 +713,11 @@ impl PotsApp {
                     .text_size(px(13.))
                     .text_color(theme::text_muted())
                     .child(agent_text_prefixed(
-                            prefix,
-                            agent_text(
-                                SharedString::from(format!("goal-card-note-{scope}-{}", gid.0)),
-                                body.to_string(),
-                            )
+                        prefix,
+                        agent_text(
+                            SharedString::from(format!("goal-card-note-{scope}-{}", gid.0)),
+                            body.to_string(),
+                        )
                         .text_size(px(13.))
                         .text_color(theme::text_muted()),
                     ))
@@ -915,30 +911,23 @@ impl PotsApp {
                             a.detail.clone(),
                         ))
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .children(a.facts.iter().enumerate().map(|(i, f)| {
-                                // facts 是平台組的字（PR、sha、動作）：只有拒絕／回答時
-                                // 附上的「你的理由：」後面那段才是使用者寫的原文。
-                                match fact_note(f) {
-                                    Some((prefix, note)) => agent_text_prefixed(
-                                        prefix,
-                                        agent_text_muted(
-                                            SharedString::from(format!(
-                                                "approval-fact-{}-{i}",
-                                                id.0
-                                            )),
-                                            note,
-                                        ),
-                                    )
-                                    .into_any_element(),
-                                    None => muted(f.clone()).into_any_element(),
-                                }
-                            })),
-                    )
+                    .child(div().flex().flex_col().gap(px(4.)).children(
+                        a.facts.iter().enumerate().map(|(i, f)| {
+                            // facts 是平台組的字（PR、sha、動作）：只有拒絕／回答時
+                            // 附上的「你的理由：」後面那段才是使用者寫的原文。
+                            match fact_note(f) {
+                                Some((prefix, note)) => agent_text_prefixed(
+                                    prefix,
+                                    agent_text_muted(
+                                        SharedString::from(format!("approval-fact-{}-{i}", id.0)),
+                                        note,
+                                    ),
+                                )
+                                .into_any_element(),
+                                None => muted(f.clone()).into_any_element(),
+                            }
+                        }),
+                    ))
                     .when_some(super::preferences::approval_diff(a), |d, diff| {
                         d.child(super::preferences::diff_block(
                             diff,

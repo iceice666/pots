@@ -418,7 +418,10 @@ mod tests {
     #[test]
     fn short_markdown_is_left_alone_by_the_clamp() {
         assert_eq!(clamp_markdown("第一行\n第二行", 3), "第一行\n第二行");
-        assert_eq!(clamp_markdown("第一行\n第二行\n第三行", 3), "第一行\n第二行\n第三行");
+        assert_eq!(
+            clamp_markdown("第一行\n第二行\n第三行", 3),
+            "第一行\n第二行\n第三行"
+        );
     }
 
     #[test]
@@ -464,7 +467,10 @@ mod tests {
 
     #[test]
     fn the_needs_you_prefix_is_kept_out_of_the_markdown() {
-        assert_eq!(status_note("需要你：選按鈕樣式"), Some(("需要你：", "選按鈕樣式")));
+        assert_eq!(
+            status_note("需要你：選按鈕樣式"),
+            Some(("需要你：", "選按鈕樣式"))
+        );
         assert_eq!(status_note("等待 CI"), None);
     }
 
