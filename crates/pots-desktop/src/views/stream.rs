@@ -293,6 +293,7 @@ impl PotsApp {
                         line.clone(),
                     )
                     .text_size(px(density.body() - 1.))
+                    .line_height(relative(1.5))
                 }))
         });
 
@@ -453,31 +454,16 @@ impl PotsApp {
                             .child(muted(format!("Planner · {title}")))
                             .child({
                                 // 「Goal 完成：」是伺服器加的前綴，summary 才是 Planner 寫的
-                                // Markdown；其他里程碑整段都是它的原文。
+                                // Markdown；其他里程碑整段都是它的原文。卡片原本吃 14px。
                                 let (prefix, body) = milestone_parts(text);
-                                if prefix.is_empty() {
-                                    div()
-                                        .child(agent_text(
-                                            SharedString::from(format!(
-                                                "milestone-text-{}",
-                                                item.0
-                                            )),
-                                            body.to_string(),
-                                        ))
-                                        .into_any_element()
-                                } else {
-                                    agent_text_prefixed(
-                                        prefix,
-                                        agent_text(
-                                            SharedString::from(format!(
-                                                "milestone-text-{}",
-                                                item.0
-                                            )),
-                                            body.to_string(),
-                                        ),
-                                    )
-                                    .into_any_element()
-                                }
+                                let body = agent_text(
+                                    SharedString::from(format!("milestone-text-{}", item.0)),
+                                    body.to_string(),
+                                )
+                                .text_size(px(14.));
+                                div()
+                                    .text_size(px(14.))
+                                    .child(agent_text_prefixed(prefix, body))
                             }),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -526,10 +512,15 @@ impl PotsApp {
                         .child(icon(IconName::Clock, 15., theme::text_muted()))
                         .child("你不在期間"),
                 )
-                .child(agent_text(
-                    SharedString::from(format!("catchup-summary-{}", item.0)),
-                    summary.clone(),
-                ))
+                // 原本是 14px／1.5 行高的摘要內文。
+                .child(
+                    agent_text(
+                        SharedString::from(format!("catchup-summary-{}", item.0)),
+                        summary.clone(),
+                    )
+                    .text_size(px(14.))
+                    .line_height(relative(1.5)),
+                )
                 .into_any_element(),
             Card::Digest {
                 title,
@@ -906,10 +897,15 @@ impl PotsApp {
                     })
                     // ask_user 的問題與核准的理由都是 agent 寫的 Markdown。
                     .when(!a.detail.is_empty() && a.approval.is_some(), |d| {
-                        d.child(agent_text(
-                            SharedString::from(format!("approval-detail-{}", id.0)),
-                            a.detail.clone(),
-                        ))
+                        // 原本是 14px／1.5 行高的理由內文。
+                        d.child(
+                            agent_text(
+                                SharedString::from(format!("approval-detail-{}", id.0)),
+                                a.detail.clone(),
+                            )
+                            .text_size(px(14.))
+                            .line_height(relative(1.5)),
+                        )
                     })
                     .child(div().flex().flex_col().gap(px(4.)).children(
                         a.facts.iter().enumerate().map(|(i, f)| {
@@ -923,6 +919,7 @@ impl PotsApp {
                                         note,
                                     ),
                                 )
+                                .text_size(px(13.))
                                 .into_any_element(),
                                 None => muted(f.clone()).into_any_element(),
                             }

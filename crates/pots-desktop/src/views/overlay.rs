@@ -146,10 +146,14 @@ impl PotsApp {
                     )
                     .child(if step.kind == "text" {
                         // 模型在工具呼叫之間說的話：照一般內文顯示成 Markdown，不是 JSON。
-                        div().child(agent_text(
-                            SharedString::from(format!("why-step-text-{i}")),
-                            step.detail.clone(),
-                        ))
+                        div().child(
+                            agent_text(
+                                SharedString::from(format!("why-step-text-{i}")),
+                                step.detail.clone(),
+                            )
+                            .text_size(px(13.))
+                            .line_height(relative(1.5)),
+                        )
                     } else {
                         div()
                             .text_size(px(12.))

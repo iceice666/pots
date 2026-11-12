@@ -4,7 +4,7 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 
 use super::channel::empty_state;
@@ -205,6 +205,7 @@ impl PotsApp {
                             note,
                         ),
                     )
+                    .text_size(px(13.))
                     .into_any_element(),
                     None => div()
                         .flex()
@@ -295,7 +296,8 @@ impl PotsApp {
                         gpui_kit::SharedString::from(format!("inbox-detail-{}", item.id.0)),
                         item.detail.clone(),
                     )
-                    .text_size(px(14.)),
+                    .text_size(px(14.))
+                    .line_height(relative(1.5)),
                 )
                 .into_any_element()
         };

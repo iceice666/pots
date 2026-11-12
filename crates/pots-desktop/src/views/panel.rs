@@ -124,14 +124,16 @@ fn task_detail_line(
     if body.is_empty() {
         return div().child(prefix);
     }
+    // 字級與行高直接下在 `TextView` 上：它自己會 refine 內部 div 的 text style，外層
+    // `div().text_size(...)` 蓋不掉（內層比較晚套用）。任務列原來是 13px／1.4 行高。
     let body = agent_text(id, body)
-        // 任務列原本是 1.4 的行高（比對話內文緊），`max_lines` 的計高度也用同一個值。
+        .text_size(px(13.))
         .line_height(relative(1.4))
         .when_some(max_lines, |t, lines| t.max_lines(lines));
     if prefix.is_empty() {
-        div().child(body)
+        div().text_size(px(13.)).child(body)
     } else {
-        agent_text_prefixed(prefix, body)
+        agent_text_prefixed(prefix, body).text_size(px(13.))
     }
 }
 
@@ -173,7 +175,8 @@ fn team_post(post: &TeamPost, id: SharedString) -> Div {
                         .child(format!("{} · {}", team_route(post), post.at.hh_mm())),
                 ),
         )
-        .child(agent_text(id, post.body.clone()))
+        // 貼文本文原本繼承 app 根節點的 14px（不是右欄較小的 13px）。
+        .child(agent_text(id, post.body.clone()).text_size(px(14.)))
 }
 
 pub(super) fn white_box() -> Div {
@@ -633,10 +636,15 @@ impl PotsApp {
                         .child("Planner 交接用的 Goal brief"),
                 )
                 // Brief 本身就是 Markdown（Planner 寫的交接文件）：整份交給 TextView。
-                .child(agent_text(
-                    SharedString::from(format!("goal-brief-{}", gid.0)),
-                    g.brief.clone(),
-                ))
+                // 原本吃外層的預設 14px（不是對話流的 15px），這裡明確指定。
+                .child(
+                    agent_text(
+                        SharedString::from(format!("goal-brief-{}", gid.0)),
+                        g.brief.clone(),
+                    )
+                    .text_size(px(14.))
+                    .line_height(relative(1.6)),
+                )
                 .children(
                     self.goal_artifact(gid, ArtifactKind::Brief)
                         .map(|a| self.open_artifact_button("goal-open-brief", "在編輯器開啟", a, cx)),
@@ -862,6 +870,7 @@ impl PotsApp {
                                         SharedString::from(format!("task-step-{}-{i}", tid.0)),
                                         s.text.clone(),
                                     )
+                                    .text_size(px(14.))
                                     .line_height(relative(1.4)),
                                 ),
                             )

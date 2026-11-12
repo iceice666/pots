@@ -51,10 +51,16 @@ impl PotsApp {
                     .text_color(theme::warn_text())
                     .text_size(px(13.))
                     .child(icon(IconName::CircleAlert, 16., theme::warn_text()))
-                    .child(div().flex_1().min_w_0().child(agent_text_prefixed(
-                        "上次整理記憶失敗：",
-                        agent_text(SharedString::from("memory-error"), error.clone()),
-                    )))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            agent_text_prefixed(
+                                "上次整理記憶失敗：",
+                                agent_text(SharedString::from("memory-error"), error.clone())
+                                    .text_size(px(13.)),
+                            )
+                            .text_size(px(13.)),
+                        ),
+                    )
                     .child(link_button("memory-open-settings", "記憶設定").on_click(
                         cx.listener(|this, _, _, cx| this.open_settings(SettingsTab::Memory, cx)),
                     )),
@@ -84,44 +90,46 @@ impl PotsApp {
         if memory.generation > 0 {
             stats.push_str(&format!(" · 已重新整理 {} 次", memory.generation));
         }
-        body =
-            body.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .px(px(16.))
-                    .py(px(12.))
-                    .rounded(px(10.))
-                    .bg(theme::subtle_bg())
-                    .when(!memory.current_task.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .gap(px(8.))
-                                .text_size(px(14.))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("目前在做什麼"),
-                                )
-                                // 「目前在做什麼」是 Observer 寫的摘要，可能帶行內 Markdown。
-                                .child(div().flex_1().min_w_0().text_size(px(14.)).child(
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .px(px(16.))
+                .py(px(12.))
+                .rounded(px(10.))
+                .bg(theme::subtle_bg())
+                .when(!memory.current_task.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .text_size(px(14.))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("目前在做什麼"),
+                            )
+                            // 「目前在做什麼」是 Observer 寫的摘要，可能帶行內 Markdown。
+                            .child(
+                                div().flex_1().min_w_0().child(
                                     agent_text(
                                         SharedString::from("memory-current-task"),
                                         memory.current_task.clone(),
-                                    ),
-                                )),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme::text_muted())
-                            .child(stats),
-                    ),
-            );
+                                    )
+                                    .text_size(px(14.)),
+                                ),
+                            ),
+                    )
+                })
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::text_muted())
+                        .child(stats),
+                ),
+        );
 
         let mut list = div()
             .flex()
@@ -187,10 +195,16 @@ impl PotsApp {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(div().line_height(relative(1.5)).child(agent_text(
-                        SharedString::from(format!("observation-text-{id}")),
-                        o.text.clone(),
-                    )))
+                    .child(
+                        div().child(
+                            agent_text(
+                                SharedString::from(format!("observation-text-{id}")),
+                                o.text.clone(),
+                            )
+                            .text_size(px(14.))
+                            .line_height(relative(1.5)),
+                        ),
+                    )
                     .when(o.edited, |d| {
                         d.child(
                             div()

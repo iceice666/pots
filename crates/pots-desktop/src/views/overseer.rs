@@ -216,10 +216,13 @@ impl PotsApp {
                             .text_size(px(13.))
                             .line_height(relative(1.5))
                             .text_color(theme::text_muted())
-                            .child(agent_text(
-                                SharedString::from(format!("overview-note-{name}")),
-                                o.note.clone(),
-                            )),
+                            .child(
+                                agent_text(
+                                    SharedString::from(format!("overview-note-{name}")),
+                                    o.note.clone(),
+                                )
+                                .text_size(px(13.)),
+                            ),
                     )
                     .when_some(project, |d, pid| {
                         d.on_click(cx.listener(move |this, _, window, cx| {
@@ -259,10 +262,15 @@ impl PotsApp {
                     .line_height(relative(1.5))
                     .child(tag(m.priority.label(), theme::chip_text(), theme::chip_bg()).mt(px(2.)))
                     // 記憶的內容是總管自己寫的 Markdown；右欄 340px，維持 13px。
-                    .child(div().flex_1().min_w_0().child(agent_text(
-                        SharedString::from(format!("overseer-memory-{i}")),
-                        m.text.clone(),
-                    )))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            agent_text(
+                                SharedString::from(format!("overseer-memory-{i}")),
+                                m.text.clone(),
+                            )
+                            .text_size(px(13.)),
+                        ),
+                    )
             }))
     }
 }
