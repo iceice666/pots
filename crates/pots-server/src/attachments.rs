@@ -154,10 +154,17 @@ pub async fn resolve(
     Ok(out)
 }
 
-/// 本體的路徑（給之後組 provider 請求時讀檔用；`pots-llm` 的圖片 input 是下一個任務）。
-#[allow(dead_code)]
+/// 本體的路徑：`<data_dir>/attachments/<sha256>`。給組 provider 請求與 `GET` 取回本體用。
 pub fn body_path(data_dir: &Path, sha256: &str) -> PathBuf {
     dir(data_dir).join(sha256)
+}
+
+/// 讀回本體（`GET /attachments/{id}` 與組 provider 請求時用）。檔案不在時回
+/// [`std::io::ErrorKind::NotFound`]，呼叫端據此回 404。
+///
+/// 用 `tokio::fs` 而不是 `std::fs`：上限 10 MiB 的讀檔仍不該卡住 async worker。
+pub async fn read_body(data_dir: &Path, sha256: &str) -> std::io::Result<Vec<u8>> {
+    tokio::fs::read(body_path(data_dir, sha256)).await
 }
 
 fn view(row: &AttachmentRow) -> AttachmentView {
