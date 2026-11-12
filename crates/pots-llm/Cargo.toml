@@ -1,39 +1,15 @@
 [package]
 name = "pots-llm"
-version = "0.1.0"
-description = "Pots 的模型推論層：ChatGPT Plan（SIWC）授權、Responses 串流與 agent loop"
+description = "Provider-neutral streaming client for Anthropic- and OpenAI-compatible chat APIs, and model pricing."
+version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-[features]
-# 給其他 crate 的測試用：`testing::ScriptedProvider` 等假的 provider／工具。
-test-util = []
-
 [dependencies]
-async-trait = "0.1"
-# loopback callback listener；只綁 127.0.0.1。
-axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "query"] }
-base64 = "0.22"
-bytes = "1"
-futures = "0.3"
-getrandom = "0.3"
-# ID token 驗證（RS256 + JWKS）。只開 aws_lc_rs，與 reqwest 的 rustls 用同一個密碼學後端。
-jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "form", "stream"] }
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
-thiserror = "2"
-tokio = { version = "1", features = ["sync", "time", "macros", "rt", "net", "fs"] }
-tokio-util = "0.7"
-tracing = "0.1"
-url = { version = "2", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
+ureq.workspace = true
 
 [dev-dependencies]
-# 讓整合測試也能用 `testing` 模組。
-pots-llm = { path = ".", features = ["test-util"] }
-aws-lc-rs = "1"
-axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "query", "form", "json"] }
-tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+pots-mock.workspace = true
