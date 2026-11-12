@@ -124,7 +124,10 @@ fn task_detail_line(
     if body.is_empty() {
         return div().child(prefix);
     }
-    let body = agent_text(id, body).when_some(max_lines, |t, lines| t.max_lines(lines));
+    let body = agent_text(id, body)
+        // 任務列原本是 1.4 的行高（比對話內文緊），`max_lines` 的計高度也用同一個值。
+        .line_height(relative(1.4))
+        .when_some(max_lines, |t, lines| t.max_lines(lines));
     if prefix.is_empty() {
         div().child(body)
     } else {
