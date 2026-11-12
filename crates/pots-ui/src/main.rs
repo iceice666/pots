@@ -15,11 +15,13 @@ macro_rules! secondary {
     }};
 }
 
+mod artifact;
 mod chat;
 mod composer;
 mod render_md;
 mod selection;
 mod settings;
+mod table_editor;
 mod theme;
 
 use gpui::{
@@ -58,8 +60,8 @@ fn main() {
         theme::install_component_theme(cx);
         composer::bind_keys(cx);
         chat::bind_keys(cx);
+        table_editor::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| cx.quit()).detach();
 
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
@@ -89,6 +91,13 @@ fn main() {
             .unwrap();
 
         let chat = chat.expect("open_window builds the root view");
+        // Save the artifact being edited before asking the platform to
+        // quit, while the window and its views are certainly still there.
+        let weak = chat.downgrade();
+        cx.on_action(move |_: &Quit, cx| {
+            weak.update(cx, |chat, cx| chat.save_open_artifact(None, cx)).ok();
+            cx.quit();
+        });
         window
             .update(cx, |_, window, cx| {
                 window.focus(&chat.read(cx).composer().focus_handle(cx), cx);
