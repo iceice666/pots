@@ -4,9 +4,9 @@
 //! 那一刻才由這裡從 `<data_dir>/attachments/<sha256>` 讀出來（見 [`pots_llm::image`]）：
 //! 歷史每一輪整份重送，base64 放進資料庫、事件日誌或 `stream_items` 都會爆量。
 //!
-//! 讀不到附件（id 不存在、檔案被刪、資料庫出錯）時回看得懂的中文 [`LlmError`]，讓整個
-//! 請求失敗而不是默默送出一份少了圖的歷史；這裡也**不 panic**，provider 的錯誤處理路徑
-//! 照舊運作。
+//! 讀不到附件（id 不存在、檔案被刪、資料庫出錯）時回看得懂的中文 [`LlmError::Other`]：整個
+//! 請求失敗，不會默默送出一份少了圖的歷史；這裡也**不 panic**，provider 的錯誤處理路徑照舊
+//! 運作（[`LlmError::UnsupportedImage`] 只留給「模型不支援圖片」）。
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -83,7 +83,7 @@ impl StoreImages {
 impl ImageLoader for StoreImages {
     async fn base64(&self, attachment_id: &str) -> Result<String, LlmError> {
         let id: AttachmentId = attachment_id.parse().map_err(|_| {
-            LlmError::Unsupported(format!("圖片附件的 ID 格式不對：「{attachment_id}」"))
+            LlmError::Other(format!("圖片附件的 ID 格式不對：「{attachment_id}」"))
         })?;
         let row = {
             let mut conn = self.store.acquire().await.map_err(|e| {
@@ -96,7 +96,7 @@ impl ImageLoader for StoreImages {
             })?
         };
         let Some(row) = row else {
-            return Err(LlmError::Unsupported(format!(
+            return Err(LlmError::Other(format!(
                 "找不到圖片附件「{attachment_id}」，請重新上傳"
             )));
         };
@@ -108,7 +108,7 @@ impl ImageLoader for StoreImages {
                 attachment = %attachment_id,
                 "讀不到圖片附件的內容"
             );
-            LlmError::Unsupported(format!(
+            LlmError::Other(format!(
                 "讀不到圖片附件的內容（附件「{attachment_id}」），請重新上傳"
             ))
         })?;
@@ -185,6 +185,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slot_without_a_loader_says_so_without_panicking() {
+        let slot = ImageSlot::new();
+        assert!(slot.get().is_none());
+        let error = slot.base64("anything").await.unwrap_err();
+        assert!(
+            matches!(&error, LlmError::Unsupported(m) if m.contains("沒有設定圖片來源")),
+            "{error:?}"
+        );
+
+        // 填上來源之後走真正的讀檔，而且重複填不會換掉已經在用的。
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store(tmp.path()).await;
+        let id = attachment(&store, tmp.path(), b"png").await;
+        slot.fill(Arc::new(StoreImages::new(store, tmp.path())));
+        assert_eq!(slot.base64(&id.to_string()).await.unwrap(), base64_bytes(b"png"));
+        slot.fill(Arc::new(pots_llm::image::FnImages::new(|_: String| async move {
+            Ok("之後填的不會生效".into())
+        })));
+        assert_eq!(slot.base64(&id.to_string()).await.unwrap(), base64_bytes(b"png"));
+    }
+
+    #[tokio::test]
     async fn unknown_id_and_missing_file_are_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = store(tmp.path()).await;
@@ -193,7 +215,7 @@ mod tests {
         // 不是合法的 ID：看得懂的訊息，不是 panic。
         let error = images.base64("not-an-id").await.unwrap_err();
         assert!(
-            matches!(&error, LlmError::Unsupported(m) if m.contains("ID 格式不對")),
+            matches!(&error, LlmError::Other(m) if m.contains("ID 格式不對")),
             "{error:?}"
         );
 
@@ -203,7 +225,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, LlmError::Unsupported(m) if m.contains("找不到圖片附件")),
+            matches!(&error, LlmError::Other(m) if m.contains("找不到圖片附件")),
             "{error:?}"
         );
 
@@ -212,7 +234,7 @@ mod tests {
         std::fs::remove_dir_all(attachments::dir(tmp.path())).unwrap();
         let error = images.base64(&id.to_string()).await.unwrap_err();
         assert!(
-            matches!(&error, LlmError::Unsupported(m) if m.contains("讀不到圖片附件的內容")),
+            matches!(&error, LlmError::Other(m) if m.contains("讀不到圖片附件的內容")),
             "{error:?}"
         );
     }

@@ -64,8 +64,7 @@ pub async fn chatgpt_deps(data_dir: &Path, model: Option<String>) -> Result<Deps
         model: model.unwrap_or_else(|| AUTO_MODEL.into()),
         model_auth: Arc::new(control),
         api_providers: Arc::new(
-            HttpApiProviders::new(http, Some(auto))
-                .with_images(Arc::new(images.clone())),
+            HttpApiProviders::new(http, Some(auto)).with_images(Arc::new(images.clone())),
         ),
         images,
     })
