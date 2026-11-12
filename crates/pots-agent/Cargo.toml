@@ -17,3 +17,9 @@ toml_edit.workspace = true
 
 [dev-dependencies]
 pots-mock.workspace = true
+
+# Asks the configured agent about decisions buried in a long chat; see
+# examples/memory_eval/main.rs. Its own tests run with `cargo test`.
+[[example]]
+name = "memory_eval"
+test = true

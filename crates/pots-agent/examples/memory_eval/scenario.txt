@@ -1,0 +1,346 @@
+# A team chat that has run for three weeks: the owner talks to PM in short
+# sessions in #general (4–5 rounds each), and PM's task threads in #app stay
+# under 6 rounds. Decisions are planted at different distances from the end;
+# the probes at the bottom ask about them.
+#
+# Format:
+#   == channel NAME                       following messages go to #NAME
+#   == thread CHANNEL "NAME" by AUTHOR    AUTHOR opens a new thread in #CHANNEL;
+#                                         following messages go into it
+#   -- day -N HH:MM                       clock for the next messages (days
+#                                         before today; +2 min per message)
+#   Author: text                          a message; "Owner" is you
+#     continuation                        (indented) another line of it
+#   {date:+N}                             today + N days, as M/D
+#   !! decision ID key=W[|W] [replaces ID]: text   (~ is a space in W)
+#                                         the message above settles something:
+#                                         it should end up in the log, in an
+#                                         entry with one of the words W; `text`
+#                                         is the oracle log's wording
+#   !! status ID                          the message above settles nothing:
+#                                         capture expects no record
+#
+#   ?? ID @CHANNEL TAG                    a probe asked at the end of #CHANNEL,
+#   ?? ID @thread:CHANNEL TAG             or in a new thread there
+#   F: text                               the message that holds the answer
+#   Q: question
+#   A: alt|alt                            all A lines must match (any alt each)
+#
+# TAG is how far back the fact is when the probe is asked in #CHANNEL: near
+# (< 40 messages, inside the default window), mid (40–99: read_channel can
+# still reach it), far (100+: nothing reaches it). Probes in a new thread
+# are "cross". The example's tests check the tags against the real distances.
+
+== channel general
+-- day -21 09:10
+Owner: @PM 新專案 Shelf 開工了：一個記錄自己讀過哪些書的小 app。先幫我把第一週要決定的事情列一下
+PM: 好，第一週先定這幾件：
+  1. 資料存哪裡
+  2. API 格式和命名
+  3. 第一版範圍
+  4. 誰做什麼
+  你想從哪個開始？
+Owner: 先講資料存哪。我原本想用 Postgres
+PM: 可以，不過 Shelf 是你一個人在自己電腦上用，Postgres 要多養一個 server。要不要考慮 SQLite？
+Owner: 有道理，就用 SQLite。理由記一下：整個資料庫就是一個 .db 檔，可以直接放在 iCloud Drive 裡，在我的筆電和桌機之間同步
+!! decision sqlite key=iCloud: 資料庫用 SQLite：整個資料庫是單一 .db 檔，可以放在 iCloud Drive 裡在筆電和桌機之間同步。
+PM: 記下了：資料庫用 SQLite，理由是單一檔案可以靠 iCloud 同步。下一個是 API 格式？
+Owner: API 一律回 JSON，路徑前綴統一用 /shelf/v2/，跟我舊專案的 client 對齊
+!! decision api-prefix key=shelf/v2: API 一律回 JSON，路徑前綴統一 /shelf/v2/（對齊舊專案的 client）。
+PM: 好，所有 API 都掛在那個前綴下，我會寫進給 Engineer 的 brief。
+Owner: 今天先到這
+PM: 👍
+
+-- day -20 10:00
+Owner: @PM 同步 API 要有 rate limit，先訂每個 token 每分鐘 100 次
+!! decision rate-100 key=100: 同步 API rate limit：每個 token 每分鐘 100 次，超過回 429 加 Retry-After。
+PM: 收到，同步 API：每個 token 每分鐘 100 次。超過回 429？
+Owner: 對，回 429 加 Retry-After
+PM: 好。還有別的嗎？
+Owner: 另外 auth 模組我自己在寫，v0.5 之前凍結，誰都不要動它
+!! decision auth key=v0.5: auth 模組由 owner 自己寫，v0.5 之前凍結，不開任何會碰到 auth 的任務。
+PM: 了解，在那之前不開任何會碰到 auth 的任務。
+Owner: 嗯
+PM: 那第一個任務我先開 Goodreads 匯入？
+Owner: 好，開吧
+PM: 已開 thread「Goodreads 匯入」在 #app，交給 Engineer。
+
+== thread app "Goodreads 匯入" by PM
+-- day -20 11:00
+PM: @Engineer 任務：實作 Goodreads CSV 匯入。讀 Goodreads 匯出的 CSV，建立書和閱讀紀錄。完成標準：有測試、能匯入範例檔。
+Engineer: 收到。要判斷是不是同一本書的話，Goodreads 的 ISBN 欄位很亂：很多是空的，有些包在 `="..."` 裡。
+PM: 你的建議？
+Engineer: 每一列都有 Goodreads 自己的書籍編號，比 ISBN 可靠。建議比對重複時用它，ISBN 只存起來顯示。
+!! decision dedupe key=Book~Id|BookId|書籍編號: Goodreads 匯入判斷重複書用 Goodreads 的 Book Id，ISBN 只存起來顯示。
+PM: 好，重複的書就用 Book Id 判斷。
+Engineer: 完成了，@Reviewer 麻煩看一下：新增 importer 模組，附 12 個測試。
+Reviewer: 看過了，測試都過。approve。
+
+== channel general
+-- day -19 09:30
+Owner: @PM v0.3 定在 {date:+8} 發布，就是要給讀書會的人試用那天
+!! decision release key={date:+8}: v0.3 在 {date:+8} 發布（給讀書會的人試用）。
+PM: 記下了，我會照這個日期倒推排任務。
+Owner: 範圍就是匯入、書單、匯出三個
+!! decision scope key=書單: v0.3 範圍：匯入、書單、匯出。
+PM: 好，v0.3 範圍：匯入、書單、匯出。dark mode 呢？之前有人提過
+Owner: 還沒想好，之後再說
+PM: OK，先不排。
+Owner: 每次回報幫我用條列，越短越好
+!! decision reports key=條列: 給 owner 的回報一律用短條列。
+PM: 好，之後回報都用短條列。
+
+-- day -18 14:00
+PM: Goodreads 匯入完成，Reviewer 已 approve，等你 merge。
+Owner: @PM merge 了。下一步做書單？
+PM: 對，書單頁：列表、排序、標記讀完。我開 thread 給 Engineer？
+Owner: 好
+PM: 已開「書單頁」在 #app。
+
+== thread app "書單頁" by PM
+-- day -18 14:20
+PM: @Engineer 任務：書單頁。列表、排序、標記讀完。完成標準：有測試。
+Engineer: 收到，今天先做列表和排序。
+PM: 補充：排序要能用評分排。
+Engineer: 好，已加評分排序。@Reviewer 請看。
+Reviewer: approve。
+
+== channel general
+-- day -17 10:15
+Owner: @PM 書單頁進度？
+!! status progress
+PM: Engineer 做完列表和排序，標記讀完還在寫，預計明天。
+Owner: 排序要能用評分排
+PM: 好，我補進 thread 裡。
+Owner: 謝
+PM: 👌
+
+-- day -16 16:40
+Owner: @PM 部署平台的免費方案限制比較緊，同步 API 的 rate limit 從原本的 100 改成每分鐘 60 次
+!! decision rate-60 key=60~次|60次|每分鐘~60|60/min replaces rate-100: 同步 API rate limit：每個 token 每分鐘 60 次（部署平台免費方案限制），超過回 429 加 Retry-After。
+PM: 收到，以新的數字為準，原本的作廢。我請 Engineer 改設定。
+Owner: Retry-After 照舊
+PM: 好。
+
+-- day -15 11:00
+Owner: @PM dark mode 我想好了，不放 v0.3，延到 v0.6
+!! decision dark-mode key=v0.6: dark mode 不放 v0.3，延到 v0.6；可以先整理 CSS 變數。
+PM: 了解，v0.3 不做 dark mode。
+Owner: 但 CSS 變數可以先整理，之後比較好加
+PM: 好，我開一個小任務整理 CSS 變數，不做 dark mode 本身。
+Owner: 好
+PM: 已開「CSS 變數整理」在 #app。
+
+== thread app "CSS 變數整理" by PM
+-- day -15 11:20
+PM: @Engineer 任務：把散在各處的顏色整理成 CSS 變數，畫面不要變。完成標準：截圖前後一樣。
+Engineer: 完成，@Reviewer 請看，前後截圖附在 PR。
+Reviewer: approve。
+
+== channel general
+-- day -14 09:45
+Owner: @PM 開始做匯出吧，先做 export API
+PM: 好。export API 要支援大量書單，分頁方式交給 Engineer 評估？
+Owner: 可以
+PM: 已開「export API」在 #app。
+
+== thread app "export API" by PM
+-- day -14 10:00
+PM: @Engineer 任務：做 export API，回傳使用者全部閱讀紀錄，要能分頁。完成標準：有測試、文件。
+Engineer: 評估了一下分頁：用 offset 的話資料多時會慢，邊匯出邊新增還會重複或漏資料。我建議以 id 當游標往下翻。
+PM: 同意，就這樣做。
+Engineer: 做完了，@Reviewer 請看：每頁預設 75 筆。
+Reviewer: 有一個 edge case：最後一頁的下一頁游標應該是 null。
+Engineer: 已修，@Reviewer 再看一次。
+Reviewer: approve。
+
+== channel general
+-- day -13 15:00
+Owner: @PM Reviewer 上次漏看了一個授權有問題的依賴。之後審的時候一定要跑 cargo deny check，有錯就不能 approve
+!! decision deny key=cargo~deny|cargo-deny: Reviewer 審查時一定要跑 cargo deny check，有錯不能 approve。
+PM: 收到，審查規則加一條，那個檢查沒過就不 approve。我也會寫進之後的 brief。
+Owner: 測試也要全跑
+PM: 好，兩個都要。
+Owner: 嗯
+
+-- day -12 10:30
+PM: 書單頁和 CSS 變數整理都 merge 了。目前 v0.3 剩匯出功能。
+Owner: @PM export API 好了嗎
+PM: Reviewer 已 approve，等你 merge。
+Owner: merge 了
+PM: 👍 接下來是匯出成 CSV 的前端按鈕。
+Owner: 先不急，我這幾天比較忙
+PM: 好，有需要再叫我。
+
+-- day -11 13:00
+Owner: @PM 有個 bug：Goodreads 的日期是 2024/03/05 這種格式，匯入後變成空的
+PM: 我請 Engineer 看一下，開「日期解析 bug」thread？
+Owner: 好
+PM: 已開。Engineer 說是只支援 dash 格式，會補斜線格式和測試。
+Owner: 順便檢查一下其他欄位
+PM: 好，我請他把 Goodreads 的每個欄位都過一遍。
+Owner: 修好跟我說
+PM: 修好了，Reviewer 已 approve，等你 merge。
+Owner: merge
+PM: 👍
+
+-- day -10 20:00
+Owner: @PM README 太簡陋，幫我想要補哪些
+PM: - 安裝方式
+  - 怎麼從 Goodreads 匯出 CSV
+  - 怎麼備份資料
+  - 常見問題
+Owner: 備份那段很重要，讀書會的人不懂技術
+PM: 那我請 Engineer 寫成一步一步的。
+Owner: 好
+PM: 已開「README 補強」在 #app。
+Owner: 截圖我自己補
+PM: OK，brief 裡寫了截圖留空給你。
+
+-- day -9 09:20
+Owner: @PM 回來了，現在狀況？
+PM: - 匯入：完成
+  - 書單：完成
+  - export API：完成
+  - CSV 匯出按鈕：還沒開始
+Owner: 開 CSV 匯出的任務
+PM: 已開「CSV 匯出」在 #app。
+Owner: 讀書會有人用 Excel 開，要注意亂碼
+PM: 好，我把這點補進 brief。
+
+-- day -8 18:10
+Owner: @PM 讀書會有人想要幫書加標籤
+PM: v0.3 範圍是匯入、書單、匯出，標籤要排進來，還是之後？
+Owner: 之後，先記在待辦
+PM: 好，記在待辦。
+Owner: 還有人想要年度閱讀統計
+PM: 也記待辦。要我整理一份待辦清單貼在這嗎？
+Owner: 貼吧
+PM: 待辦：
+  - 書籍標籤
+  - 年度閱讀統計
+Owner: 好
+PM: 👌
+
+-- day -7 11:00
+Owner: @PM Excel 亂碼的問題，CSV 匯出就加 UTF-8 BOM，第一列放欄位名稱
+!! decision bom key=BOM: CSV 匯出加 UTF-8 BOM（Excel 才不會亂碼），第一列放欄位名稱。
+PM: 收到，已轉給 Engineer。
+Owner: 好
+PM: Engineer 說今天可以做完。
+
+-- day -6 14:30
+Owner: @PM CI 跑好慢，十幾分鐘
+PM: 我請 Engineer 看哪一步最慢？
+Owner: 好
+PM: Engineer 說是每次都重新編譯依賴，加 cache 可以降到三分鐘左右。
+Owner: 加
+PM: 已開「CI cache」在 #app。
+Owner: 嗯
+PM: CI cache merge 了，現在大約三分半。
+
+-- day -5 10:00
+PM: CSV 匯出 merge 了。v0.3 的三個功能都完成。
+Owner: @PM 讚。發布前還要做什麼？
+PM: - 寫 release notes
+  - 在乾淨的電腦上試裝一次
+  - 確認 migration 從空資料庫能跑
+Owner: release notes 你先起草
+PM: 好，草稿放在 #app 的「release notes」thread。
+Owner: 謝
+
+-- day -4 16:00
+Owner: @PM release notes 我看了，太長
+PM: 我縮成五點以內？
+Owner: 對，然後用讀書會的人看得懂的話
+PM: 改好了：
+  - 可以匯入 Goodreads 書單
+  - 書單可以排序、標記讀完
+  - 可以匯出 CSV，Excel 打得開
+  - 資料可以備份
+  - 已知問題：封面載入稍慢
+Owner: 好多了
+PM: 那就用這版。
+
+-- day -3 21:00
+Owner: @PM 試裝結果怎樣
+!! status install
+PM: 乾淨環境裝起來正常，匯入範例檔也 OK。有一個小問題：封面圖載入有點慢。
+Owner: 封面先快取起來
+PM: 好，開小任務做封面快取。
+Owner: 嗯
+PM: 已開「封面快取」在 #app。
+
+-- day -1 17:30
+Owner: @PM 明天要做什麼
+PM: - 封面快取 review
+  - release notes 定稿
+Owner: 好
+PM: 我明天早上再跟你回報。
+
+
+# Probes ------------------------------------------------------------------
+
+# Every answer is something nobody would guess: a PM with no history at all
+# (`--memory none`) should get them wrong. If it doesn't, the probe measures
+# the model's priors, not its memory.
+
+?? sqlite-why @general far
+F: 理由記一下
+Q: @PM 提醒我一下，當初資料庫為什麼選 SQLite？
+A: iCloud
+
+?? api-prefix @general far
+F: 路徑前綴統一用 /shelf/v2/
+Q: @PM 新的 API 路徑前綴要用什麼？
+A: shelf/v2
+
+?? auth-freeze @general far
+F: v0.5 之前凍結
+Q: @PM 我想讓 Engineer 趁現在把 auth 模組重構一下，可以直接開任務嗎？
+A: v0.5|0.5
+
+?? release-date @general far
+F: v0.3 定在
+Q: @PM v0.3 是哪一天發布？
+A: {date:+8}
+
+?? rate-limit @general mid
+F: 改成每分鐘 60 次
+Q: @PM 同步 API 的 rate limit 現在是多少？
+A: 60 次|60次|60/min|60 requests|60 req|每分鐘 60
+
+?? dark-mode @general mid
+F: 延到 v0.6
+Q: @PM dark mode 排在哪一版？
+A: v0.6|0.6
+
+?? review-check @general mid
+F: 一定要跑 cargo deny check
+Q: @PM Reviewer 審查的時候有哪些必跑的檢查？
+A: cargo deny|cargo-deny
+
+?? csv-bom @general near
+F: 就加 UTF-8 BOM
+Q: @PM CSV 匯出用 Excel 開會亂碼的事，我們最後怎麼處理？
+A: BOM
+
+?? dedupe @thread:app cross
+F: 重複的書就用 Book Id 判斷
+Q: @PM 匯入的時候，我們用什麼判斷兩筆是不是同一本書？
+A: Book Id|BookId|book_id|書籍編號
+
+?? page-size @thread:app cross
+F: 每頁預設 75 筆
+Q: @PM export API 每頁預設回幾筆？
+A: 75
+
+?? rate-limit-thread @thread:app cross
+F: 改成每分鐘 60 次
+Q: @PM 同步 API 的 rate limit 現在是多少？
+A: 60 次|60次|60/min|60 requests|60 req|每分鐘 60
+
+?? auth-freeze-thread @thread:app cross
+F: v0.5 之前凍結
+Q: @PM 我想讓 Engineer 趁現在把 auth 模組重構一下，可以直接開任務嗎？
+A: v0.5|0.5
