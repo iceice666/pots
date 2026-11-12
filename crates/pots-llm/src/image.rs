@@ -132,7 +132,9 @@ pub fn payload<'a>(images: &'a ImagePayloads, attachment_id: &str) -> Result<&'a
         .get(attachment_id)
         .map(String::as_str)
         .ok_or_else(|| {
-            LlmError::Unsupported(format!("缺少圖片附件「{attachment_id}」的內容，無法送出請求"))
+            LlmError::Unsupported(format!(
+                "缺少圖片附件「{attachment_id}」的內容，無法送出請求"
+            ))
         })
 }
 

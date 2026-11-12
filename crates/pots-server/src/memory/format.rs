@@ -375,6 +375,41 @@ mod tests {
     }
 
     #[test]
+    fn images_become_placeholder_in_the_transcript() {
+        let rows = [
+            RawRow {
+                seq: 1,
+                item: Item::User {
+                    text: "看這張".into(),
+                },
+                tokens: 5,
+                created_at: Timestamp(1_793_968_496),
+            },
+            RawRow {
+                seq: 2,
+                item: Item::Image {
+                    attachment_id: "att-1".into(),
+                    mime: "image/png".into(),
+                },
+                tokens: 5,
+                created_at: Timestamp(1_793_968_496),
+            },
+        ];
+        let t = transcript(&rows);
+        assert!(
+            t.contains(&format!("使用者：{}", pots_llm::image::IMAGE_PLACEHOLDER)),
+            "{t}"
+        );
+        assert!(
+            !t.contains("att-1"),
+            "附件 id 不該出現在 Observer 的輸入：{t}"
+        );
+        // Observer 的輸入整份也看得到佔位符，其他兩條路徑一致。
+        let input = observer_input(&[], "", &rows);
+        assert!(input.contains("[圖片]"), "{input}");
+    }
+
+    #[test]
     fn block_and_inputs() {
         assert_eq!(memory_block(&[], ""), None);
         let block = memory_block(&[obs("用 SQLite", true)], "寫測試").unwrap();

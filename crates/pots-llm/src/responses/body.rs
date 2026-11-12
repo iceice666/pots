@@ -69,7 +69,10 @@ pub fn build_request_body(
     if let Some(instructions) = request.instructions.as_deref().filter(|s| !s.is_empty()) {
         body.insert("instructions".into(), json!(instructions));
     }
-    body.insert("input".into(), Value::Array(input_items(request, options, images)?));
+    body.insert(
+        "input".into(),
+        Value::Array(input_items(request, options, images)?),
+    );
     if !request.tools.is_empty() {
         body.insert("tools".into(), tools_field(&request.tools, options));
     }
@@ -110,9 +113,7 @@ fn input_items(
             "image_url": crate::image::data_url(mime, payload(images, attachment_id)?),
         });
         match input.last_mut() {
-            Some(message)
-                if message["type"] == "message" && message["role"] == "user" =>
-            {
+            Some(message) if message["type"] == "message" && message["role"] == "user" => {
                 if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
                     content.push(image);
                 }
@@ -399,12 +400,7 @@ mod tests {
             }],
             ..ModelRequest::default()
         };
-        let body = build_request_body(
-            &request,
-            &ResponsesOptions::default(),
-            &images(),
-        )
-        .unwrap();
+        let body = build_request_body(&request, &ResponsesOptions::default(), &images()).unwrap();
         assert_eq!(
             body["input"],
             json!([{"type": "message", "role": "user", "content": [

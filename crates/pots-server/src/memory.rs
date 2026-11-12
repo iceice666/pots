@@ -1078,6 +1078,17 @@ mod tests {
         )
     }
 
+    fn image(seq: i64) -> RawRow {
+        row(
+            seq,
+            Item::Image {
+                attachment_id: format!("att-{seq}"),
+                mime: "image/png".into(),
+            },
+            10,
+        )
+    }
+
     fn opaque(seq: i64) -> RawRow {
         row(
             seq,
@@ -1137,6 +1148,18 @@ mod tests {
         let rows = [user(1), call(2, "x"), user(3), assistant(4)];
         assert_eq!(cut_point(&rows, 1, 1000), Some(2));
         assert_eq!(cut_point(&rows, 0, 1000), Some(2));
+    }
+
+    #[test]
+    fn cut_treats_images_as_part_of_the_turn() {
+        // u img a u a：圖片不是邊界，切點仍在人類訊息之前／之後的邊界。
+        let rows = [user(1), image(2), assistant(3), user(4), assistant(5)];
+        assert_eq!(cut_point(&rows, 2, 1000), Some(3));
+        assert_eq!(cut_point(&rows, 0, 1000), Some(3));
+        assert_eq!(cut_point(&rows, 0, 15), Some(3));
+        // 只有圖片、沒有文字的使用者訊息不會開著等待結果。
+        let rows = [user(1), image(2), user(3), assistant(4)];
+        assert_eq!(cut_point(&rows, 1, 1000), Some(2));
     }
 }
 

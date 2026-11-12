@@ -203,7 +203,10 @@ mod tests {
         assert_eq!(serde_json::from_value::<Item>(json).unwrap(), item);
         // 歷史是持久化格式：裡面不該出現 base64 或 data URL。
         let text = serde_json::to_string(&item).unwrap();
-        assert!(!text.contains("base64") && !text.contains("data:"), "{text}");
+        assert!(
+            !text.contains("base64") && !text.contains("data:"),
+            "{text}"
+        );
     }
 
     #[test]

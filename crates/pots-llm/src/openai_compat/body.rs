@@ -31,11 +31,9 @@ pub fn build_request_body(
     images: &ImagePayloads,
 ) -> Result<Value, LlmError> {
     match request.reasoning {
-        Some(reasoning) => build_request_body_with_effort(
-            request,
-            reasoning.openai_effort(),
-            images,
-        ),
+        Some(reasoning) => {
+            build_request_body_with_effort(request, reasoning.openai_effort(), images)
+        }
         None => base_body(request, images),
     }
 }
@@ -390,8 +388,7 @@ mod tests {
             );
             // 明確指定的 effort（降級重送）優先。
             assert_eq!(
-                build_request_body_with_effort(&request, "none", &ImagePayloads::new()).unwrap()
-                    ["reasoning_effort"],
+                build_request_body_with_effort(&request, "none", &ImagePayloads::new()).unwrap()["reasoning_effort"],
                 "none"
             );
         }

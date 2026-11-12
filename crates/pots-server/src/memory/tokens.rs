@@ -59,6 +59,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn image_counts_as_the_placeholder() {
+        let image = Item::Image {
+            attachment_id: "att-1".into(),
+            mime: "image/png".into(),
+        };
+        assert_eq!(
+            item(&image),
+            ITEM_OVERHEAD + estimate(pots_llm::image::IMAGE_PLACEHOLDER)
+        );
+    }
+
+    #[test]
     fn mixed_text() {
         assert_eq!(estimate(""), 0);
         assert_eq!(estimate("abcd"), 1);

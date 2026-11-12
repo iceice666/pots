@@ -75,10 +75,7 @@ impl OpenAiCompatProvider {
 
     /// 圖片附件的內容來源：歷史裡的 [`Item::Image`](crate::Item::Image) 只有附件參照，
     /// 送出前由它讀出 base64（見 [`crate::image`]）。
-    pub fn with_images(
-        mut self,
-        loader: std::sync::Arc<dyn crate::image::ImageLoader>,
-    ) -> Self {
+    pub fn with_images(mut self, loader: std::sync::Arc<dyn crate::image::ImageLoader>) -> Self {
         self.images = Some(loader);
         self
     }
