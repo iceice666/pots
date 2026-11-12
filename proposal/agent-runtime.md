@@ -290,9 +290,34 @@ M4 依上面的設計實作在 `crates/pots-server/src/worker/`（加上 `0006_w
 - **快速通道。** 對話 agent 的 `quick_fix`（與 listener 的「快速修正」）開一個 `quick` 種類的 Goal（Brief 是描述）加一個任務，直接派給 worker、不排 Planner。任務完成或失敗時 Goal 跟著結束，結果以里程碑卡片貼回對話；你取消它的任務時 Goal 一起取消。worker 用 `escalate` 時升級成一般 Goal（Brief 補上「升級原因」——以引用區塊標明是 worker 的說法——與分支）並叫醒 Planner。快速修改沒有 Planner：對話 agent 不能 steer 它（要改就取消再開），你改 Brief、外部事件都不排 Planner，也不訂閱資源，worker 也不能發問題給 Planner。
 - **Subagent。** 對話 agent、Planner 與內建 worker 有 `run_subagent`：一次最多 4 個並行的 explorer 或 reviewer，只有唯讀工具，不能再開 subagent。worker 開的讀自己的工作目錄，其他的讀 repo 預設分支的鏡像；每個是一筆 `agent_runs`（`parent_run_id`），用量算進 Goal。
 - **Team 貼文。** `post_to_team`／`read_team`（`team_posts`、`team_reads`）：worker 發 finding、question、blocker、handoff，Planner 發 decision、finding、handoff。沒有指定對象的 question 與 blocker 叫醒 Planner；handoff 與 Planner 指定任務的 decision 叫醒那個任務（等待中的回到佇列，worker 會被告知原本在等什麼；Planner 的回答也能叫醒用 escalate 交回、在等它決定的任務，但重新登入、重試用完這類要你處理的不會）。worker 遇到要決定的事就發 question 並 `escalate`，Planner 以 decision 回答時被叫醒接著做；每次 run 開始時觸發訊息帶上上次之後的新貼文；同一個 Goal 每小時最多 30 則。桌面版在 Goal 面板的 Team 分頁。
-- **延後與已知限制。** CI 失敗自動修（最多 3 次）與「可以 merge」的核准卡片（M5 已實作）、桌面版的任務 thread（直接對 worker 說話、完整串流）、每個 project 各自選 worker 後端（目前是整個實例一份設定）、容器的對外網路白名單、訂閱額度的預算與 Claude Code 用量的記帳（M6）、清掉結束很久的工作目錄。同一個實例的 Claude Code worker 共用一個 Claude Code 設定目錄（登入與官方 session 檔），任務與 project 之間讀得到、也改得到彼此的 session 紀錄；改成每個 project 一份（並驗證登入與 refresh）要對真的 Claude Code 做原型。`--setting-sources=`（空值）的行為與 `CLAUDE_CONFIG_DIR` 下的登入檔位置也要對真的 CLI 確認。本機執行沒有沙箱，listener 觸發的快速修改也會在本機跑。team 貼文在 run 開始時就記成已讀（run 沒能開始時不會重送）。
+- **延後與已知限制。** CI 失敗自動修（最多 3 次）與「可以 merge」的核准卡片（M5 已實作）、桌面版的任務 thread（直接對 worker 說話、完整串流）、每個 project 各自選 worker 後端（目前是整個實例一份設定）、容器的對外網路白名單、訂閱額度的預算與 Claude Code 用量的記帳（M6）、清掉結束很久的工作目錄。同一個實例的 Claude Code worker 共用一個 Claude Code 設定目錄（登入與官方 session 檔），任務與 project 之間讀得到、也改得到彼此的 session 紀錄；改成每個 project 一份（並驗證登入與 refresh）要對真的 Claude Code 做原型。`--setting-sources=`（空值）的行為與 `CLAUDE_CONFIG_DIR` 下的登入檔位置也要對真的 CLI 確認。本機執行沒有沙箱，listener 觸發的快速修改也會在本機跑（之後拿掉了本機執行，見[Project 環境](#project-環境由環境-worker-建立)）。team 貼文在 run 開始時就記成已讀（run 沒能開始時不會重送）。
 
 以假的 GitHub API、本機 bare repo 當 remote、假的模型與假的 Claude Code CLI（`pots-fake-claude`：重播劇本、經 MCP 呼叫平台工具、寫官方格式的 session 檔）驗證（`tests/worker.rs`：一句話到 Goal、Planner 派工、內建 worker 改檔、在 team 發問、開 PR、等 CI、被喚醒完成、Planner 結束 Goal；Claude Code 的快速修改經 MCP 開 PR 與等待、push 被擋、喚醒後 `--resume` 同一個 session；取消時中斷 CLI、快速修改跟著取消；需要重新登入、登入後重試；服務重啟後續接；Planner 的決定叫醒 worker、改到 `.github` 的 PR 不推；快速修改升級；explorer 讀鏡像），加上 adapter 對假 CLI 的單元測試（中斷、提醒、不肯結束的行程、錯誤分類、過長的行）、MCP server 的授權測試、repo 的 bundle 取回（符號連結的 bundle 不讀）與本機執行環境的測試。對真的 Claude Code（登入、容器內的 session 續接與事件格式）、真的 GitHub 與 Docker 容器模式待使用者手動驗證。
+
+### Project 環境：由環境 worker 建立
+
+worker 的容器原本是整個實例一份 image，每次 run 都是新的容器：工具鏈（例如 Rust、系統函式庫）要每次重裝，`target/` 也從零編譯，裝環境的時間又算在執行時間上限裡，大一點的任務很容易撞到上限。改成每個 project 一份「環境」，由一個專門的**環境 worker** 分析 repo、自己試到能用為止再套用；你不用自己寫 Dockerfile。
+
+- **只用容器。** worker 一律在 Docker／Podman 容器裡跑，設定的「Worker」類別拿掉「本機（沒有沙箱）」；資料庫裡舊的本機設定讀出時當成容器。環境 worker 寫的安裝腳本會在 build 裡以 root 執行，只有容器能把它關在裡面。（本機執行只留給伺服器的整合測試，`WorkerConfig` 指定，不開放給使用者。）
+- **環境規格（`EnvSpec`）。** 存在 Pots 的資料庫（`project_envs`，每次套用一個版本，`projects.env_rev` 指向使用中的版本），不 commit 進 repo（repo 的內容可能被 worker 自己改過，不拿來決定環境）：
+
+  ```rust
+  pub struct EnvSpec {
+      pub base_image: String,         // 空字串：用「Worker」設定的 image
+      pub install: String,            // docker build 時以 root 執行（apt、rustup…），看不到 repo
+      pub prepare: String,            // 每次 run 在工作目錄裡執行（依 rust-toolchain 裝版本、cargo fetch）
+      pub verify: String,             // 證明環境能用（例如 cargo check）；只在 try_env 執行
+      pub env: Vec<(String, String)>, // 非機密的環境變數，例如 CARGO_TARGET_DIR、PATH
+      pub caches: Vec<String>,        // 跨 run 保留的容器路徑（絕對路徑），例如 /opt/cargo/registry
+  }
+  ```
+
+  衍生 image 由 `base_image` 與 `install` 的 hash 命名（`pots-env-<project 前 8 碼>:<hash 前 16 碼>`），平台在資料目錄的 `env-builds/<hash>/` 寫 Dockerfile（`FROM base`、`COPY install.sh`、`RUN sh -eu install.sh`）後 `docker build`；hash 一樣就沿用已建好的。快取目錄是資料目錄的 `worker-caches/<project>/<路徑的 hash>`，以 bind mount 掛進去（容器以你的 uid 執行，named volume 屬於 root 寫不進去），同一個 project 的任務共用、不跨 project。秘密不放進環境規格。
+- **環境 worker。** project 設定的「環境」區塊按「分析並建立環境」（可以附一句說明）：平台開一個 `env` 種類的 Goal 加一個任務，直接派給 worker（像快速修改，不經 Planner；同一個 project 同時最多一個）。這個任務用 `profiles/env.toml`：唯讀的程式碼工具、`run`、`try_env`、`apply_env`、`report_progress`、`ask_user`、`fail_task`，沒有 `edit_file`、`open_pr`——它不改 repo。執行時間上限是 120 分鐘（一般 worker 仍是 60 分鐘）。它自己跑在目前的環境裡（還沒有時是「Worker」設定的 image）。
+  - `try_env(spec)`：檢查規格、建衍生 image，用它開一個新的容器（掛這個任務的工作目錄與快取、帶 env），以你的 uid 依序跑 `prepare` 與 `verify`，回傳每一步的結果、耗時與輸出的最後一段。同一個 project 一次只建一個。
+  - `apply_env(spec, summary)`：只接受這次 run 裡 `try_env` 通過的同一份規格（比對 hash），寫成新版本並設為使用中，在對話貼一張卡片，任務完成、Goal 結束。**不需要核准**：規格已經實際驗證過，套用錯了可以在設定裡還原成之前的版本（或不用環境）。
+- **一般 worker 怎麼用。** project 有使用中的環境時，run 用它的 image（不在了就先重建）、帶 env 與快取，容器啟動後先在工作目錄跑 `prepare`（上限 20 分鐘）再交給 worker。**執行時間上限從 `prepare` 結束後才開始算**，準備工作目錄、建 image 與 `prepare` 都不算。`prepare` 失敗時任務轉 `NeedsHuman`，說明可以到 project 設定重新分析環境；worker 與 Planner 不會自己觸發重新分析。
+- **限制。** 安裝腳本在 `docker build` 裡以 root 執行、可以連外網，權限比 worker 的容器大（後者拿掉了所有 capability），但仍在容器裡。Claude Code 後端會把任務的 home 掛在 `/home/pots`，所以安裝腳本要裝到 `/opt` 之類的位置（env.toml 有說明）。舊的衍生 image 不會自動清掉。
 
 ### 為什麼不用 rig
 
