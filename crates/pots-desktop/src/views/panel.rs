@@ -16,6 +16,7 @@ use gpui_kit::{
 
 use super::channel::empty_state;
 use super::stream::Density;
+use super::text::{agent_text, agent_text_prefixed, clamp_markdown};
 use super::widgets::*;
 use crate::app::{GoalTab, Panel, PotsApp};
 use crate::model::*;
@@ -72,8 +73,9 @@ fn task_state_pill(state: &TaskStateView) -> Div {
     }
 }
 
-/// 任務現在怎樣了：進行中是 worker 最後一句進度，其他狀態是等什麼、為什麼停、結果是什麼。
-pub(super) fn task_detail(t: &TaskView) -> (String, Hsla) {
+/// 任務現在怎樣了：`prefix` 是平台自己加的字（「需要你：」「失敗 N 次：」「等待 CI」），
+/// 只有 `body` 是 worker／使用者的原文，交給 Markdown 渲染；`color` 決定整段顏色。
+pub(super) fn task_detail(t: &TaskView) -> (String, String, Hsla) {
     let or = |text: &str, fallback: &str| {
         if text.trim().is_empty() {
             fallback.to_string()
@@ -83,21 +85,55 @@ pub(super) fn task_detail(t: &TaskView) -> (String, Hsla) {
     };
     match &t.state {
         TaskStateView::Running => (
+            String::new(),
             or(&t.progress, &or(&t.summary, "worker 開始處理")),
             theme::text(),
         ),
-        TaskStateView::Planned => (or(&t.summary, "還沒開始"), theme::text_muted()),
-        TaskStateView::Waiting { on } => (format!("等待 {on}"), theme::warn()),
+        TaskStateView::Planned => (
+            String::new(),
+            or(&t.summary, "還沒開始"),
+            theme::text_muted(),
+        ),
+        TaskStateView::Waiting { on } => (format!("等待 {on}"), String::new(), theme::warn()),
         TaskStateView::NeedsHuman { reason } => (
-            format!("需要你：{}", or(reason, "worker 停下來了")),
+            "需要你：".to_string(),
+            or(reason, "worker 停下來了"),
             theme::warn_text(),
         ),
-        TaskStateView::Done { outcome } => (or(outcome, "完成"), theme::ok()),
+        TaskStateView::Done { outcome } => (String::new(), or(outcome, "完成"), theme::ok()),
         TaskStateView::Failed { attempts, error } => (
-            format!("失敗 {attempts} 次：{}", or(error, "沒有說明")),
+            format!("失敗 {attempts} 次："),
+            or(error, "沒有說明"),
             theme::danger(),
         ),
-        TaskStateView::Cancelled => ("已取消".into(), theme::text_muted()),
+        TaskStateView::Cancelled => ("已取消".to_string(), String::new(), theme::text_muted()),
+    }
+}
+
+/// 任務狀態那一行：[`task_detail`] 的兩段——前綴留純文字，原文走 Markdown。
+///
+/// 「等待 CI」「已取消」這種沒有原文的狀態整行都是平台的字；原文是空的就只畫前綴，
+/// 免得空白的 Markdown 佔一行。`max_lines` 給 `Some` 時把渲染後的高度夾在 N 行內
+/// （`TextView::max_lines` 只夾高度、不畫省略號，原文那層另外先截斷）。
+fn task_detail_line(
+    id: SharedString,
+    prefix: String,
+    body: String,
+    max_lines: Option<usize>,
+) -> Div {
+    if body.is_empty() {
+        return div().child(prefix);
+    }
+    // 字級與行高直接下在 `TextView` 上：它自己會 refine 內部 div 的 text style，外層
+    // `div().text_size(...)` 蓋不掉（內層比較晚套用）。任務列原來是 13px／1.4 行高。
+    let body = agent_text(id, body)
+        .text_size(px(13.))
+        .line_height(relative(1.4))
+        .when_some(max_lines, |t, lines| t.max_lines(lines));
+    if prefix.is_empty() {
+        div().text_size(px(13.)).child(body)
+    } else {
+        agent_text_prefixed(prefix, body).text_size(px(13.))
     }
 }
 
@@ -112,7 +148,9 @@ fn team_route(post: &TeamPost) -> String {
     }
 }
 
-fn team_post(post: &TeamPost) -> Div {
+/// 一則 Team 貼文。`scope`／index 組成內文的元素 id：同一個 Goal 的貼文會同時出現在
+/// 任務分頁（最新三則）與 Team 分頁，id 不能只靠貼文本身。
+fn team_post(post: &TeamPost, id: SharedString) -> Div {
     let (fg, bg) = match post.kind {
         TeamPostKind::Decision => (theme::accent_text(), theme::accent_soft()),
         TeamPostKind::Question | TeamPostKind::Blocker => (theme::warn(), theme::warn_soft()),
@@ -137,7 +175,12 @@ fn team_post(post: &TeamPost) -> Div {
                         .child(format!("{} · {}", team_route(post), post.at.hh_mm())),
                 ),
         )
-        .child(div().line_height(relative(1.5)).child(post.body.clone()))
+        // 貼文本文原本繼承 app 根節點的 14px（不是右欄較小的 13px）、行高 1.5。
+        .child(
+            agent_text(id, post.body.clone())
+                .text_size(px(14.))
+                .line_height(relative(1.5)),
+        )
 }
 
 pub(super) fn white_box() -> Div {
@@ -438,7 +481,7 @@ impl PotsApp {
                                 .text_color(theme::text_muted())
                                 .child("這是草稿：看一下 Brief，可以直接改，或在對話裡和 agent 再討論。按「開始」才交給 Planner。"),
                         )
-                        .child(self.render_draft_actions("panel", gid, cx)),
+                        .child(self.render_draft_actions("panel", "panel", gid, cx)),
                 )
             })
             .child(
@@ -546,13 +589,22 @@ impl PotsApp {
                                                 .child(t.title.clone()),
                                         )
                                         .child({
-                                            let (detail, color) = task_detail(t);
-                                            div()
-                                                .text_size(px(13.))
-                                                .text_color(color)
-                                                .line_height(relative(1.4))
-                                                .line_clamp(3)
-                                                .child(detail)
+                                            let (prefix, body, color) = task_detail(t);
+                                            // 三行以內：先按原行數截斷補「…」，再用
+                                            // `max_lines` 夾住渲染後的高度（渲染會重排，
+                                            // 這裡的 max_lines 才是真正的上限）。
+                                            task_detail_line(
+                                                SharedString::from(format!(
+                                                    "task-row-detail-{}",
+                                                    tid.0
+                                                )),
+                                                prefix,
+                                                clamp_markdown(&body, 3),
+                                                Some(3),
+                                            )
+                                            .text_size(px(13.))
+                                            .text_color(color)
+                                            .line_height(relative(1.4))
                                         })
                                         .child(self.task_meta("row", t, cx)),
                                 )
@@ -568,7 +620,14 @@ impl PotsApp {
                 if !g.team.is_empty() {
                     col = col
                         .child(section_label("最新 Team 貼文").pt(px(20.)))
-                        .child(white_box().children(g.team.iter().rev().take(3).map(team_post)));
+                        .child(white_box().children(g.team.iter().rev().take(3).enumerate().map(
+                            |(i, post)| {
+                                team_post(
+                                    post,
+                                    SharedString::from(format!("team-latest-note-{i}")),
+                                )
+                            },
+                        )));
                 }
                 col.into_any_element()
             }
@@ -580,7 +639,16 @@ impl PotsApp {
                         .text_color(theme::text_muted())
                         .child("Planner 交接用的 Goal brief"),
                 )
-                .child(div().line_height(relative(1.6)).child(g.brief.clone()))
+                // Brief 本身就是 Markdown（Planner 寫的交接文件）：整份交給 TextView。
+                // 原本吃外層的預設 14px（不是對話流的 15px），這裡明確指定。
+                .child(
+                    agent_text(
+                        SharedString::from(format!("goal-brief-{}", gid.0)),
+                        g.brief.clone(),
+                    )
+                    .text_size(px(14.))
+                    .line_height(relative(1.6)),
+                )
                 .children(
                     self.goal_artifact(gid, ArtifactKind::Brief)
                         .map(|a| self.open_artifact_button("goal-open-brief", "在編輯器開啟", a, cx)),
@@ -611,7 +679,9 @@ impl PotsApp {
                 } else {
                     white_box()
                         .gap(px(14.))
-                        .children(g.team.iter().rev().map(team_post))
+                        .children(g.team.iter().rev().enumerate().map(|(i, post)| {
+                            team_post(post, SharedString::from(format!("team-note-{i}")))
+                        }))
                         .into_any_element()
                 }
             }
@@ -653,7 +723,7 @@ impl PotsApp {
         );
 
         // 第一行：狀態與耗時、花費；第二行：現在怎樣了；第三行：執行者、分支與 PR。
-        let (detail, detail_color) = task_detail(t);
+        let (detail_prefix, detail_body, detail_color) = task_detail(t);
         let meta = div()
             .flex()
             .flex_col()
@@ -674,10 +744,14 @@ impl PotsApp {
                     )),
             )
             .child(
-                div()
-                    .text_color(detail_color)
-                    .line_height(relative(1.4))
-                    .child(detail),
+                task_detail_line(
+                    SharedString::from(format!("task-thread-detail-{}", tid.0)),
+                    detail_prefix,
+                    detail_body,
+                    None,
+                )
+                .text_color(detail_color)
+                .line_height(relative(1.4)),
             )
             .child(self.task_meta("thread", t, cx));
 
@@ -795,10 +869,14 @@ impl PotsApp {
                             .gap(px(8.))
                             .pb(px(12.))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .line_height(relative(1.4))
-                                    .child(s.text.clone()),
+                                div().flex_1().min_w_0().child(
+                                    agent_text(
+                                        SharedString::from(format!("task-step-{}-{i}", tid.0)),
+                                        s.text.clone(),
+                                    )
+                                    .text_size(px(14.))
+                                    .line_height(relative(1.4)),
+                                ),
                             )
                             .child(
                                 div()

@@ -17,6 +17,7 @@ use gpui_kit::{
 
 use super::channel::empty_state;
 use super::panel::{panel_frame, white_box};
+use super::text::agent_text;
 use super::widgets::*;
 use crate::app::{AutomationSection, Panel, PotsApp};
 use crate::model::*;
@@ -123,7 +124,7 @@ fn box_title(text: &'static str) -> Div {
         .child(text)
 }
 
-fn history(records: &[TriggerRecord], empty: &'static str) -> Div {
+fn history(scope: &'static str, records: &[TriggerRecord], empty: &'static str) -> Div {
     let col = div().flex().flex_col().gap(px(8.));
     if records.is_empty() {
         return col.child(
@@ -133,7 +134,7 @@ fn history(records: &[TriggerRecord], empty: &'static str) -> Div {
                 .child(empty),
         );
     }
-    col.children(records.iter().map(|r| {
+    col.children(records.iter().enumerate().map(|(i, r)| {
         white_box()
             .gap(px(4.))
             .child(
@@ -145,8 +146,17 @@ fn history(records: &[TriggerRecord], empty: &'static str) -> Div {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(r.title.clone()),
+                            // 觸發紀錄的標題是事件摘要（「#118 → 支援 refresh token」），
+                            // 由平台從事件內容截出，可能含行內 Markdown（issue 標題是別人寫
+                            // 的）。原本吃 14px 的 SEMIBOLD，字級與字重都明確給。
+                            .child(
+                                agent_text(
+                                    SharedString::from(format!("trigger-{scope}-title-{i}")),
+                                    r.title.clone(),
+                                )
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD),
+                            ),
                     )
                     .child(
                         div()
@@ -246,7 +256,12 @@ impl PotsApp {
                 .flex()
                 .flex_col()
                 .gap(px(24.))
-                .children(self.render_automation_sections(self.automation_filter, true, cx))
+                .children(self.render_automation_sections(
+                    "automations-page",
+                    self.automation_filter,
+                    true,
+                    cx,
+                ))
                 .into_any_element()
         };
 
@@ -277,7 +292,7 @@ impl PotsApp {
                 .into_any_element(),
             ]
         } else {
-            self.render_automation_sections(Some(p.id), false, cx)
+            self.render_automation_sections("project-automations-panel", Some(p.id), false, cx)
         };
         div()
             .id("project-automations")
@@ -295,8 +310,11 @@ impl PotsApp {
     }
 
     /// 暫停橫幅（若有）、排程、listener 三塊，自動化頁的捲動定位依賴這個順序。
+    /// `scope` 區分同一個畫面裡的兩個容器（實例層級的自動化頁、project 右欄的自動化
+    /// 面板）：兩者會同時顯示同一批排程與 listener，元素 id 不能只靠 id 本身。
     fn render_automation_sections(
         &self,
+        scope: &'static str,
         project: Option<ProjectId>,
         show_project: bool,
         cx: &mut Context<Self>,
@@ -342,7 +360,7 @@ impl PotsApp {
             );
         }
         out.push(
-            self.render_schedule_table(project, show_project, cx)
+            self.render_schedule_table(scope, project, show_project, cx)
                 .into_any_element(),
         );
         out.push(
@@ -417,6 +435,7 @@ impl PotsApp {
 
     fn render_schedule_table(
         &self,
+        scope: &'static str,
         project: Option<ProjectId>,
         show_project: bool,
         cx: &mut Context<Self>,
@@ -476,9 +495,15 @@ impl PotsApp {
                         .flex_col()
                         .gap(px(2.))
                         .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(s.prompt.clone()),
+                            // 排程的 prompt 是使用者或 agent 寫的 Markdown，醒來時原文交給
+                            // agent；表格列原本就會隨內容換行，這裡不截斷（截了會少字）。
+                            // 原本吃這一列外層的 14px SEMIBOLD。
+                            agent_text(
+                                SharedString::from(format!("{scope}-prompt-{}", id.0)),
+                                s.prompt.clone(),
+                            )
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD),
                         )
                         .child(
                             div()
@@ -589,6 +614,7 @@ impl PotsApp {
         }
     }
 
+    // listener 表格裡沒有 agent 原文（標題與 meta 都是平台組的字），不需要 `scope`。
     fn render_listener_table(
         &self,
         project: Option<ProjectId>,
@@ -800,6 +826,8 @@ impl PotsApp {
         let action = white_box()
             .gap(px(6.))
             .child(box_title("動作"))
+            // action_detail 是伺服器依動作種類產生的固定說明（「開一個 Goal，Brief 用下面
+            // 的模板加上事件內容」……），是平台的字，維持純文字。
             .child(
                 div()
                     .text_size(px(13.))
@@ -813,9 +841,20 @@ impl PotsApp {
                         .py(px(10.))
                         .rounded(px(6.))
                         .bg(theme::subtle_bg())
-                        .text_size(px(13.))
-                        .line_height(relative(1.6))
-                        .child(t),
+                        // 模板會原文接上事件內容變成 Goal brief，本身就是 Markdown。
+                        // 原本擔心 `{{…}}`、底線識別字之類的非常規語法會整段消失；實測
+                        // （`markdown 1.0.0` 的 `to_mdast`，與 gpui-base 用的是同一套解析器）
+                        // `{{"kind": …}}`、`legacy_login`、`a_b_c` 都解析成純文字節點，
+                        // 不會丟字。殘餘風險只有行內 raw HTML（`<span>` 這類未支援的標籤
+                        // 在行內層會被丟掉），使用者自己寫模板時少見，已在 PR 說明。
+                        .child(
+                            agent_text(
+                                SharedString::from(format!("listener-template-{}", id.0)),
+                                t,
+                            )
+                            .text_size(px(13.))
+                            .line_height(relative(1.6)),
+                        ),
                 )
             })
             .child(kv(
@@ -939,6 +978,7 @@ impl PotsApp {
                     .child(action)
                     .child(section_label("觸發紀錄").pt(px(8.)).pb(px(0.)))
                     .child(history(
+                        "listener",
                         &l.history,
                         if pending.is_some() {
                             "還沒有觸發紀錄。核准後才會開始監看。"
@@ -1004,7 +1044,7 @@ impl PotsApp {
                     .child(settings)
                     .child(prompt)
                     .child(section_label("觸發紀錄").pt(px(8.)).pb(px(0.)))
-                    .child(history(&s.history, "還沒有觸發過。")),
+                    .child(history("schedule", &s.history, "還沒有觸發過。")),
             )
             .child(
                 Self::detail_footer()

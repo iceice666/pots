@@ -9,6 +9,7 @@ use gpui_kit::{
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 
+use super::text::agent_text;
 use super::widgets::icon;
 use crate::app::{PotsApp, WorkdirKind};
 use crate::theme;
@@ -111,7 +112,7 @@ impl PotsApp {
                     .child("這次 run 沒有留下 trace。"),
             );
         }
-        for step in &why.steps {
+        for (i, step) in why.steps.iter().enumerate() {
             body = body.child(
                 div()
                     .flex()
@@ -144,11 +145,15 @@ impl PotsApp {
                             ),
                     )
                     .child(if step.kind == "text" {
-                        // 模型在工具呼叫之間說的話：照一般內文顯示，不是 JSON。
-                        div()
+                        // 模型在工具呼叫之間說的話：照一般內文顯示成 Markdown，不是 JSON。
+                        div().child(
+                            agent_text(
+                                SharedString::from(format!("why-step-text-{i}")),
+                                step.detail.clone(),
+                            )
                             .text_size(px(13.))
-                            .line_height(relative(1.5))
-                            .child(step.detail.clone())
+                            .line_height(relative(1.5)),
+                        )
                     } else {
                         div()
                             .text_size(px(12.))

@@ -6,11 +6,12 @@ use gpui_kit::component::input::Textarea;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px, relative,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 
 use super::channel::empty_state;
 use super::stream::Density;
+use super::text::agent_text;
 use super::widgets::*;
 use crate::app::PotsApp;
 use crate::theme;
@@ -213,8 +214,16 @@ impl PotsApp {
                     .child(
                         div()
                             .text_size(px(13.))
+                            .line_height(relative(1.5))
                             .text_color(theme::text_muted())
-                            .child(o.note.clone()),
+                            .child(
+                                agent_text(
+                                    SharedString::from(format!("overview-note-{name}")),
+                                    o.note.clone(),
+                                )
+                                .text_size(px(13.))
+                                .line_height(relative(1.5)),
+                            ),
                     )
                     .when_some(project, |d, pid| {
                         d.on_click(cx.listener(move |this, _, window, cx| {
@@ -246,14 +255,24 @@ impl PotsApp {
                         .child("還沒有觀察紀錄。"),
                 )
             })
-            .children(ov.memory.iter().map(|m| {
+            .children(ov.memory.iter().enumerate().map(|(i, m)| {
                 div()
                     .flex()
                     .gap(px(8.))
                     .text_size(px(13.))
                     .line_height(relative(1.5))
                     .child(tag(m.priority.label(), theme::chip_text(), theme::chip_bg()).mt(px(2.)))
-                    .child(div().flex_1().min_w_0().child(m.text.clone()))
+                    // 記憶的內容是總管自己寫的 Markdown；右欄 340px，維持 13px。
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            agent_text(
+                                SharedString::from(format!("overseer-memory-{i}")),
+                                m.text.clone(),
+                            )
+                            .text_size(px(13.))
+                            .line_height(relative(1.5)),
+                        ),
+                    )
             }))
     }
 }

@@ -12,6 +12,7 @@ use gpui_kit::{
 };
 
 use super::panel::panel_frame;
+use super::text::{agent_text, agent_text_prefixed, clamp_markdown, status_note};
 use super::widgets::*;
 use crate::app::{GoalTab, Panel, PotsApp, SettingsTab};
 use crate::members::{Member, MemberGroup, MemberKind, MemberTarget, members};
@@ -126,14 +127,35 @@ impl PotsApp {
             .flex_col()
             .gap(px(1.))
             .child(name)
-            .child(
+            .child({
+                // 成員狀態：進行中是 worker 最後一句進度、需要你是原因，都是 agent 原文；
+                // 「需要你：」是平台的前綴，留純文字。欄位很窄（約 290px、兩行），所以先按
+                // 原行數截斷補「…」，再用 `max_lines` 夾住渲染後的高度。顏色直接下在
+                // `TextView` 上，不依賴繼承。
+                let mut status = m.status.clone();
+                let prefix = match status_note(&status) {
+                    Some((prefix, rest)) => {
+                        status = rest.to_string();
+                        Some(prefix)
+                    }
+                    None => None,
+                };
+                let body = agent_text(
+                    SharedString::from(format!("member-status-{index}")),
+                    clamp_markdown(&status, 2),
+                )
+                .text_size(px(13.))
+                .line_height(relative(1.4))
+                .text_color(status_text)
+                .max_lines(2);
                 div()
-                    .text_size(px(13.))
-                    .text_color(status_text)
                     .line_height(relative(1.4))
-                    .line_clamp(2)
-                    .child(m.status.clone()),
-            )
+                    .text_color(status_text)
+                    .child(match prefix {
+                        Some(prefix) => agent_text_prefixed(prefix, body),
+                        None => div().child(body),
+                    })
+            })
             .children(m.model.clone().map(|model| {
                 div()
                     .text_size(px(12.))

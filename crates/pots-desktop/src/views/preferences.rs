@@ -369,6 +369,11 @@ impl PotsApp {
                 let body: AnyElement = if u.body.trim().is_empty() {
                     muted_text("還沒有內容。").into_any_element()
                 } else {
+                    // 刻意維持純文字：這裡是 USER.md 檔案的唯讀預覽（等寬字、逐行照原樣
+                    // 顯示，和上面的編輯器一致），不是「該渲染卻輸出原樣」的地方。
+                    // `TextView` 的內文排版走 `window.text_style()`，外層的
+                    // `.font_family(...)` 對它不保證生效，改成渲染反而會失去等寬字，
+                    // 使用者就沒辦法照原樣檢查自己的檔案。
                     div()
                         .px(px(12.))
                         .py(px(10.))
