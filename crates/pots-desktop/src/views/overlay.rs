@@ -2,13 +2,15 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
+    AnyElement, Context, FontWeight, ImageSource, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, div, img, px, relative,
 };
 
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 
+use super::images::ImageState;
 use super::text::agent_text;
 use super::widgets::icon;
 use crate::app::{PotsApp, WorkdirKind};
@@ -328,6 +330,125 @@ impl PotsApp {
                 .occlude()
                 .child(dialog)
                 .on_click(cx.listener(|this, _, _, cx| this.close_workdir_dialog(cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// 大圖 viewer 內文的一句話（載入中、取不到時）。
+    fn viewer_placeholder(text: impl Into<SharedString>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(24.))
+            .text_size(px(13.))
+            .text_color(theme::text_muted())
+            .child(text.into())
+            .into_any_element()
+    }
+
+    /// 訊息附圖的大圖：暗色 backdrop 上一張置中的卡片，點 backdrop 或右上角的 ✕ 關閉。
+    ///
+    /// 尺寸照 `task_inspect` 的對話框（`max_w(relative(0.92))`、`h(relative(0.86))`），
+    /// 圖片用 `Contain` 撐進卡片內，不放大失真。
+    pub fn render_image_viewer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let viewer = self.image_viewer.as_ref()?;
+        let state = self.attachment_images.state(&viewer.image.id);
+        let size = viewer
+            .image
+            .width
+            .zip(viewer.image.height)
+            .map(|(w, h)| format!(" · {w}×{h}"))
+            .unwrap_or_default();
+        let caption = format!(
+            "{}{size}",
+            viewer
+                .image
+                .filename
+                .clone()
+                .unwrap_or_else(|| "圖片".into()),
+        );
+        let body = match state {
+            Some(ImageState::Ready(image)) => div()
+                .flex_1()
+                .min_h_0()
+                .p(px(12.))
+                .flex()
+                .child(
+                    img(ImageSource::Image(image.clone()))
+                        .flex_1()
+                        .h_full()
+                        .object_fit(ObjectFit::Contain),
+                )
+                .into_any_element(),
+            None | Some(ImageState::Loading) => Self::viewer_placeholder("正在取得圖片…"),
+            // 真的失敗（404「找不到這個附件」、500「讀不到這張圖片的內容」）就把服務回的
+            // 中文原因照顯示；快取被淘汰掉的話下一次 render 會重新排隊抓。
+            Some(ImageState::Failed(reason)) => Self::viewer_placeholder(reason.clone()),
+        };
+        let dialog = div()
+            .id("image-viewer-dialog")
+            .w(px(960.))
+            .max_w(relative(0.92))
+            .h(relative(0.86))
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(theme::white())
+            .shadow_lg()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(16.))
+                    .py(px(10.))
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .text_color(theme::text_muted())
+                            .child(caption),
+                    )
+                    .child(
+                        div()
+                            .id("image-viewer-close")
+                            .flex_none()
+                            .size(px(26.))
+                            .rounded(px(6.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::subtle_bg()))
+                            .child(icon(IconName::X, 15., theme::text_muted()))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_image_viewer(cx))),
+                    ),
+            )
+            .child(body)
+            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation()
+            })
+            .on_click(|_, _, cx| cx.stop_propagation());
+        Some(
+            div()
+                .id("image-viewer-backdrop")
+                .absolute()
+                .inset_0()
+                // 蓋住整個畫面：開著大圖時底下的對話流不該繼續接到滾輪與滑鼠事件。
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_kit::hsla(0., 0., 0., 0.55))
+                .on_click(cx.listener(|this, _, _, cx| this.close_image_viewer(cx)))
+                .child(dialog)
                 .into_any_element(),
         )
     }

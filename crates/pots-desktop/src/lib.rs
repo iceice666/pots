@@ -12,3 +12,6 @@ pub mod notify;
 pub mod sync;
 mod theme;
 mod views;
+
+/// 訊息附圖的取圖快取（`GET /attachments/{id}`）；整合測試也會直接用它打真的服務。
+pub use views::images;

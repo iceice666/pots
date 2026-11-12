@@ -5,10 +5,12 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div, px, relative,
+    AnyElement, Context, Div, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
+    img, px, relative,
 };
 
+use super::images::{ImageState, message_images, thumb_box, thumb_element_id};
 use super::text::{
     agent_stream, agent_text, agent_text_muted, agent_text_prefixed, fact_note, milestone_parts,
 };
@@ -330,6 +332,9 @@ impl PotsApp {
                     .children(narration)
                     .children(body)
                     .children(
+                        message_images(msg).map(|images| self.render_msg_images(id, images, cx)),
+                    )
+                    .children(
                         msg.cards
                             .iter()
                             .enumerate()
@@ -355,6 +360,79 @@ impl PotsApp {
         } else {
             row.into_any_element()
         }
+    }
+
+    /// 一則訊息附的圖片縮圖列：畫在內文之後、卡片之前。
+    ///
+    /// 三種狀態：載入中畫灰塊、取不到畫「無法載入」並可點重試、拿到了就畫縮圖（點開大圖）。
+    /// 還沒有連線目標（假資料模式、連線還沒好）時只畫佔位，不送請求。
+    fn render_msg_images(
+        &self,
+        item: ItemId,
+        images: &[AttachmentView],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.))
+            .children(images.iter().enumerate().map(|(index, image)| {
+                let (w, h) = thumb_box(image);
+                let element = SharedString::from(thumb_element_id(item.0, index));
+                let state = self.attachment_images.state(&image.id);
+                let clicking = state.and_then(|s| match s {
+                    ImageState::Ready(_) => Some(image.clone()),
+                    _ => None,
+                });
+                // 失敗的縮圖點一下重抓；載入中／佔位沒有動作。
+                let retrying = matches!(state, Some(ImageState::Failed(_))).then(|| image.id);
+                let thumb = div()
+                    .id(element)
+                    .flex_none()
+                    .w(px(w))
+                    .h(px(h))
+                    .rounded(px(8.))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::subtle_bg())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when_some(clicking, |d, image| {
+                        d.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_image_viewer(image.clone(), cx)
+                            }))
+                    })
+                    .when_some(retrying, |d, id| {
+                        d.cursor_pointer().on_click(
+                            cx.listener(move |this, _, _, cx| this.retry_attachment_image(id, cx)),
+                        )
+                    })
+                    .child(match state {
+                        Some(ImageState::Ready(image)) => img(ImageSource::Image(image.clone()))
+                            .size_full()
+                            .into_any_element(),
+                        Some(ImageState::Failed(_)) => muted("無法載入").into_any_element(),
+                        // `Loading` 與還沒排到（沒有連線目標）都是灰塊。
+                        Some(ImageState::Loading) | None => {
+                            div().size_full().bg(theme::track()).into_any_element()
+                        }
+                    });
+                let hint = match (state, &image.filename) {
+                    (Some(ImageState::Failed(reason)), _) => reason.clone(),
+                    (_, Some(name)) => name.clone(),
+                    _ => format!(
+                        "{}×{} · {} KiB",
+                        image.width.map_or("?".into(), |w| w.to_string()),
+                        image.height.map_or("?".into(), |h| h.to_string()),
+                        image.bytes.div_ceil(1024),
+                    ),
+                };
+                thumb.tip(hint).into_any_element()
+            }))
+            .into_any_element()
     }
 
     /// 收成一行的卡片：右箭頭加上一行摘要，點一下展開。`content` 是橫向排開的摘要。
