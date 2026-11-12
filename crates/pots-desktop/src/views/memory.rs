@@ -10,6 +10,7 @@ use gpui_kit::{
 };
 
 use super::channel::empty_state;
+use super::text::{agent_text, agent_text_prefixed};
 use super::widgets::{icon, link_button, primary_button, tag};
 use crate::app::{PotsApp, SettingsTab};
 use crate::model::*;
@@ -51,10 +52,13 @@ impl PotsApp {
                     .text_size(px(13.))
                     .child(icon(IconName::CircleAlert, 16., theme::warn_text()))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(format!("上次整理記憶失敗：{error}")),
+                        div().flex_1().min_w_0().child(agent_text_prefixed(
+                            "上次整理記憶失敗：",
+                            agent_text(
+                                SharedString::from("memory-error"),
+                                error.clone(),
+                            ),
+                        )),
                     )
                     .child(link_button("memory-open-settings", "記憶設定").on_click(
                         cx.listener(|this, _, _, cx| this.open_settings(SettingsTab::Memory, cx)),
@@ -106,7 +110,17 @@ impl PotsApp {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("目前在做什麼"),
                             )
-                            .child(div().flex_1().min_w_0().child(memory.current_task.clone())),
+                            // 「目前在做什麼」是 Observer 寫的摘要，可能帶行內 Markdown。
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .child(agent_text(
+                                        SharedString::from("memory-current-task"),
+                                        memory.current_task.clone(),
+                                    )),
+                            ),
                     )
                 })
                 .child(
@@ -182,10 +196,10 @@ impl PotsApp {
                     .flex_col()
                     .gap(px(2.))
                     .child(
-                        div()
-                            .text_size(px(14.))
-                            .line_height(relative(1.5))
-                            .child(o.text.clone()),
+                        div().line_height(relative(1.5)).child(agent_text(
+                            SharedString::from(format!("observation-text-{id}")),
+                            o.text.clone(),
+                        )),
                     )
                     .when(o.edited, |d| {
                         d.child(
