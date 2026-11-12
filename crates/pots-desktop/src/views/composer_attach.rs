@@ -509,6 +509,60 @@ mod tests {
     }
 
     #[test]
+    fn read_dropped_reports_folders_and_missing_files_in_chinese() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, tiny_png()).expect("寫檔");
+        let read = read_dropped(&png);
+        assert_eq!(read.name, "shot.png");
+        assert!(read.bytes.is_ok(), "讀得到的檔案要回位元組");
+
+        let folder = dir.path().join("截圖");
+        std::fs::create_dir(&folder).expect("建資料夾");
+        let read = read_dropped(&folder);
+        assert!(read.bytes.is_err());
+        assert!(
+            read.bytes.unwrap_err().contains("是資料夾"),
+            "資料夾要說清楚"
+        );
+
+        let read = read_dropped(&dir.path().join("不存在.png"));
+        assert!(read.bytes.unwrap_err().contains("讀不到"), "讀不到要說清楚");
+    }
+
+    #[test]
+    fn accept_read_keeps_every_reason_not_just_the_last() {
+        let mut pending = PendingAttachments::new();
+        let took = pending.accept_read(vec![
+            DroppedFile {
+                name: "ok.png".into(),
+                bytes: Ok(tiny_png()),
+            },
+            DroppedFile {
+                name: "notes.txt".into(),
+                bytes: Err("讀不到 notes.txt：沒有這個檔案".into()),
+            },
+            DroppedFile {
+                name: "bad.txt".into(),
+                bytes: Ok(b"not an image".to_vec()),
+            },
+        ]);
+        assert!(took, "有一張收下就算有接受");
+        assert_eq!(pending.len(), 1);
+        let error = pending.error.as_deref().unwrap_or_default();
+        assert!(error.contains("讀不到 notes.txt"), "{error}");
+        assert!(error.contains("不是看得懂的圖片"), "{error}");
+
+        // 全部都成功時把先前的錯誤清掉。
+        let took = pending.accept_read(vec![DroppedFile {
+            name: "second.png".into(),
+            bytes: Ok(tiny_png()),
+        }]);
+        assert!(took);
+        assert!(pending.error.is_none());
+    }
+
+    #[test]
     fn removed_keys_are_ignored_when_the_upload_finishes() {
         let mut pending = PendingAttachments::new();
         let key = pending.accept_bytes(tiny_png(), None).expect("收下");

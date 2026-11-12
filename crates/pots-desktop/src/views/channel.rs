@@ -436,6 +436,8 @@ impl PotsApp {
         let this = cx.entity().downgrade();
         div()
             .id(DROP_TARGET_ID)
+            // 測試要拖到「真的在輸入框上面」的位置才能命中 hitbox。
+            .debug_selector(|| DROP_TARGET_ID.to_string())
             .mx(px(24.))
             .mb(px(20.))
             .rounded(px(10.))
