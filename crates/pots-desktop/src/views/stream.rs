@@ -10,7 +10,7 @@ use gpui_kit::{
 };
 
 use super::text::{
-    agent_stream, agent_text, agent_text_muted, agent_text_prefixed, fact_note,
+    agent_stream, agent_text, agent_text_muted, agent_text_prefixed, fact_note, milestone_parts,
 };
 use super::widgets::*;
 use crate::app::{AutomationSection, GoalTab, Panel, PotsApp};
@@ -453,10 +453,34 @@ impl PotsApp {
                             .flex_col()
                             .gap(px(2.))
                             .child(muted(format!("Planner · {title}")))
-                            .child(agent_text(
-                                SharedString::from(format!("milestone-text-{}", item.0)),
-                                text.clone(),
-                            )),
+                            .child({
+                                // 「Goal 完成：」是伺服器加的前綴，summary 才是 Planner 寫的
+                                // Markdown；其他里程碑整段都是它的原文。
+                                let (prefix, body) = milestone_parts(text);
+                                if prefix.is_empty() {
+                                    div()
+                                        .child(agent_text(
+                                            SharedString::from(format!(
+                                                "milestone-text-{}",
+                                                item.0
+                                            )),
+                                            body.to_string(),
+                                        ))
+                                        .into_any_element()
+                                } else {
+                                    agent_text_prefixed(
+                                        prefix,
+                                        agent_text(
+                                            SharedString::from(format!(
+                                                "milestone-text-{}",
+                                                item.0
+                                            )),
+                                            body.to_string(),
+                                        ),
+                                    )
+                                    .into_any_element()
+                                }
+                            }),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.store.goal(this.instance, gid).is_some() {

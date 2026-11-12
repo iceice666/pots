@@ -88,6 +88,15 @@ pub fn status_note(status: &str) -> Option<(&'static str, &str)> {
         .map(|rest| ("需要你：", rest))
 }
 
+/// 里程碑卡片的平台前綴：「Goal 完成：」是伺服器加的字（`tools.rs::complete_goal`），
+/// 後面才是 Planner 寫的 summary。
+pub fn milestone_parts(text: &str) -> (&'static str, &str) {
+    match text.strip_prefix("Goal 完成：") {
+        Some(rest) => ("Goal 完成：", rest),
+        None => ("", text),
+    }
+}
+
 /// 把 Markdown 原文截到最多 `max_lines` 行，被截掉時在最後補「…」。
 ///
 /// `TextView` 的 `max_lines` 只把版面高度夾住、不會畫省略號，所以截斷在原文這一層
@@ -457,5 +466,14 @@ mod tests {
     fn the_needs_you_prefix_is_kept_out_of_the_markdown() {
         assert_eq!(status_note("需要你：選按鈕樣式"), Some(("需要你：", "選按鈕樣式")));
         assert_eq!(status_note("等待 CI"), None);
+    }
+
+    #[test]
+    fn only_the_summary_of_a_completion_milestone_is_markdown() {
+        assert_eq!(
+            milestone_parts("Goal 完成：**全部**通過"),
+            ("Goal 完成：", "**全部**通過")
+        );
+        assert_eq!(milestone_parts("拆好 3 個任務"), ("", "拆好 3 個任務"));
     }
 }
