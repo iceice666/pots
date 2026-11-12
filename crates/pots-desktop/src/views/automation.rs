@@ -91,6 +91,42 @@ fn empty_row(text: &'static str) -> Div {
         .child(text)
 }
 
+/// 排程表列出的順序：還會觸發的在前，其次是停用的，已結束的沉到最後。
+/// `sort_by_key` 是穩定排序，同組內維持 server 的 `created_at` 順序。
+fn sort_schedules(schedules: &mut [&ScheduleView]) {
+    schedules.sort_by_key(|s| (s.finished, !s.enabled));
+}
+
+/// 排程表表頭的小字。已結束的排程不算進「N 個」，另外標出有幾筆已結束。
+fn schedules_note(schedules: &[&ScheduleView]) -> String {
+    let finished = schedules.iter().filter(|s| s.finished).count();
+    let note = format!(
+        "{} 個 · 每個專案最多 10 個，最短間隔 10 分鐘",
+        schedules.len() - finished
+    );
+    if finished == 0 {
+        note
+    } else {
+        format!("{note}（另有 {finished} 個已結束）")
+    }
+}
+
+/// 排程表「下一次」欄的文字與顏色。
+///
+/// 已結束優先於已停用：單次排程觸發完後 server 只標 `finished`，`enabled` 仍是 true，
+/// 只看 `enabled` 會把已結束的顯示成還會觸發的時間。
+fn schedule_row_next(s: &ScheduleView, paused: bool) -> (String, Hsla) {
+    if s.finished {
+        ("已結束".to_string(), theme::text_muted())
+    } else if !s.enabled {
+        ("已停用".to_string(), theme::text_muted())
+    } else if let (true, Some(after)) = (paused, &s.next_after_pause) {
+        (format!("{after} 後恢復"), theme::warn())
+    } else {
+        (s.next.clone(), theme::text())
+    }
+}
+
 fn trigger_color(status: TriggerStatus) -> Hsla {
     match status {
         TriggerStatus::Done => theme::ok(),
@@ -284,7 +320,11 @@ impl PotsApp {
     ) -> AnyElement {
         let watch = self.render_project_watch(p, cx);
         let env = self.render_project_env(p, cx);
-        let body: Vec<AnyElement> = if self.current_instance().automation_count(p.id) == 0 {
+        let inst = self.current_instance();
+        // 空狀態看有沒有資料，不看計數：只剩已結束的排程時表格還是要看得到。
+        let nothing = inst.schedules_for(Some(p.id)).count() == 0
+            && inst.listeners_for(Some(p.id)).count() == 0;
+        let body: Vec<AnyElement> = if nothing {
             vec![
                 empty_state(
                     "這個 project 沒有自動化",
@@ -444,11 +484,9 @@ impl PotsApp {
     ) -> impl IntoElement {
         let inst = self.current_instance();
         let paused = inst.automation_pause.is_some();
-        let schedules: Vec<&ScheduleView> = inst.schedules_for(project).collect();
-        let note = format!(
-            "{} 個 · 每個專案最多 10 個，最短間隔 10 分鐘",
-            schedules.len()
-        );
+        let mut schedules: Vec<&ScheduleView> = inst.schedules_for(project).collect();
+        sort_schedules(&mut schedules);
+        let note = schedules_note(&schedules);
         let app = cx.entity().downgrade();
 
         let head = table_head()
@@ -465,13 +503,7 @@ impl PotsApp {
         let rows = schedules.iter().map(|s| {
             let id = s.id;
             let selected = self.panel == Some(Panel::Schedule(id));
-            let (next, next_color) = if !s.enabled {
-                ("已停用".to_string(), theme::text_muted())
-            } else if let (true, Some(after)) = (paused, &s.next_after_pause) {
-                (format!("{after} 後恢復"), theme::warn())
-            } else {
-                (s.next.clone(), theme::text())
-            };
+            let (next, next_color) = schedule_row_next(s, paused);
             let app = app.clone();
             div()
                 .id(SharedString::from(format!("schedule-{}", id.0)))
@@ -1011,7 +1043,16 @@ impl PotsApp {
             .gap(px(6.))
             .child(box_title("設定"))
             .child(kv("頻率", s.cadence.clone()))
-            .child(kv("下一次", if enabled { next } else { "已停用".into() }))
+            .child(kv(
+                "下一次",
+                if s.finished {
+                    "已結束".into()
+                } else if enabled {
+                    next
+                } else {
+                    "已停用".into()
+                },
+            ))
             .child(kv("建立者", s.creator.label()))
             // 單次排程的小字就是「單次」，不另列期限。
             .when(s.note != s.cadence, |d| d.child(kv("期限", s.note.clone())));
@@ -1099,7 +1140,8 @@ impl PotsApp {
             return "已暫停".into();
         }
         let n = match section {
-            AutomationSection::Schedules => inst.schedules.iter().filter(|s| s.enabled).count(),
+            // 已結束的單次排程 `enabled` 仍是 true，要另外排除，否則數字只增不減。
+            AutomationSection::Schedules => inst.schedules.iter().filter(|s| s.active()).count(),
             AutomationSection::Listeners => inst
                 .listeners
                 .iter()
@@ -1107,5 +1149,83 @@ impl PotsApp {
                 .count(),
         };
         n.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{schedule_row_next, schedules_note, sort_schedules};
+    use crate::model::*;
+    use crate::theme;
+
+    fn schedule(id: u64, enabled: bool, finished: bool) -> ScheduleView {
+        ScheduleView {
+            id: ScheduleId::from_u64(id),
+            project: None,
+            prompt: format!("排程 {id}"),
+            note: String::new(),
+            creator: ScheduleCreator::Planner,
+            cadence: "單次".into(),
+            next: "—".into(),
+            next_after_pause: None,
+            enabled,
+            history: Vec::new(),
+            next_at: None,
+            expires_at: None,
+            goal: None,
+            finished,
+        }
+    }
+
+    #[test]
+    fn finished_schedules_sort_last() {
+        let schedules = [
+            schedule(1, false, false),
+            schedule(2, true, true),
+            schedule(3, true, false),
+            schedule(4, true, true),
+        ];
+        let mut refs: Vec<&ScheduleView> = schedules.iter().collect();
+        sort_schedules(&mut refs);
+        // 啟用中的在前，接著停用的，已結束的沉到最後；同組內維持原本順序。
+        let order: Vec<_> = refs.iter().map(|s| s.id).collect();
+        assert_eq!(order, [3, 1, 2, 4].map(ScheduleId::from_u64));
+    }
+
+    #[test]
+    fn header_counts_live_schedules_only() {
+        let all = [schedule(1, true, false), schedule(2, true, true)];
+        let refs: Vec<&ScheduleView> = all.iter().collect();
+        assert_eq!(
+            schedules_note(&refs),
+            "1 個 · 每個專案最多 10 個，最短間隔 10 分鐘（另有 1 個已結束）"
+        );
+    }
+
+    #[test]
+    fn next_column_prefers_finished_over_enabled() {
+        // 已結束的單次排程 `enabled` 仍是 true，不能顯示成還會觸發的時間。
+        let mut s = schedule(1, true, true);
+        assert_eq!(
+            schedule_row_next(&s, false),
+            ("已結束".to_string(), theme::text_muted())
+        );
+        s.finished = false;
+        s.enabled = false;
+        assert_eq!(
+            schedule_row_next(&s, false),
+            ("已停用".to_string(), theme::text_muted())
+        );
+        // 暫停期間還沒結束的排程照舊顯示恢復後的時間。
+        s.enabled = true;
+        s.next_after_pause = Some("週一 08:00".into());
+        assert_eq!(
+            schedule_row_next(&s, true),
+            ("週一 08:00 後恢復".to_string(), theme::warn())
+        );
+        assert_eq!(
+            schedule_row_next(&s, false),
+            ("—".to_string(), theme::text())
+        );
     }
 }
