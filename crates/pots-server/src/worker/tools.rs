@@ -349,9 +349,16 @@ impl Tool for WorkerTool {
             ),
             Kind::RunSubagent => (
                 "run_subagent",
-                "開唯讀的 subagent 並等它回來：explorer 查程式碼、讀 log；reviewer 審查 diff（worker 才有自己的 diff）。\
-                 每個 task 是一個獨立的 subagent（最多 4 個並行），只看得到你給的 prompt，所以要寫清楚要查什麼、要回答什麼。\
-                 回傳各自的結論。",
+                if self.ctx.background.is_some() {
+                    "開唯讀的 subagent 在背景查：explorer 查程式碼、讀 log；reviewer 審查 diff。\
+                     每個 task 是一個獨立的 subagent（最多 4 個並行），只看得到你給的 prompt，所以要寫清楚要查什麼、要回答什麼。\
+                     工具馬上回傳、不等結論：先告訴使用者你派人查什麼，然後結束這次回覆，使用者可以繼續和你說話。\
+                     結論回來時你會收到一則「系統通知」開頭的訊息。"
+                } else {
+                    "開唯讀的 subagent 並等它回來：explorer 查程式碼、讀 log；reviewer 審查 diff（worker 才有自己的 diff）。\
+                     每個 task 是一個獨立的 subagent（最多 4 個並行），只看得到你給的 prompt，所以要寫清楚要查什麼、要回答什麼。\
+                     回傳各自的結論。"
+                },
                 object(
                     json!({
                         "profile": {"type": "string", "enum": ["explorer", "reviewer"]},

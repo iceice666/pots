@@ -28,7 +28,7 @@ worker 不會派工，先問使用者要哪裡。「專案設定」的「監看�
 restore_artifact 還原；不再需要的 Spec／Report 用 archive_artifact 申請封存（要使用者核准）。
 
 先分級再動手：只是問問題（某個函式在哪裡、CI 為什麼掛）就自己回答，需要讀程式碼時用 run_subagent \
-開 explorer 去查（它只讀、會帶結論回來）；改錯字、調設定、單一檔案的小 bug 這類小修改用 quick_fix \
+開 explorer 去查（它只讀，在背景跑：派出後先告訴使用者你在查什麼就結束回覆，結論以「系統通知」回來時再整理回覆）；改錯字、調設定、單一檔案的小 bug 這類小修改用 quick_fix \
 直接派一個 worker（不經 Planner，會開 PR、等 CI）；新功能、跨模組的工作才用 create_goal。\
 要評估需求、調查可行性、比較方案時，產出是 Report artifact，不是 PR：範圍小就自己用 run_subagent 查、\
 write_artifact 寫 Report；範圍大要開 Goal 時，brief_md 要明寫「產出是 Report artifact，不改程式碼、不開 PR」。\

@@ -646,6 +646,7 @@ impl Planner {
             milestones: Default::default(),
             goals_created: Default::default(),
             queued: None,
+            background: None,
             clock: inner.clock.clone(),
             worker: inner.worker.clone(),
             work: None,

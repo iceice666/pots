@@ -16,6 +16,9 @@
 //!
 //! 模型在工具呼叫之間說的話（「我先查一下……」）是旁白：串流中放在 [`Msg::narration`] 讓人知道
 //! 它在做什麼，結束後訊息只留最後的回答，旁白在「為什麼」面板的 trace 裡。
+//!
+//! 對話 agent 的 `run_subagent` 在背景跑（[`Background`]）：派出後 run 照常結束，使用者可以
+//! 繼續說話；結論回來時以系統觸發排進同一個佇列，叫醒對話 agent 整理回覆。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -75,6 +78,10 @@ struct Lane {
     stop_reason: Option<StopReason>,
     /// 這個 project 有沒有 driver task 在跑。
     driver: bool,
+    /// 背景 subagent 的取消；`Stop` 取消後換新的。
+    background: Option<CancellationToken>,
+    /// 背景執行中的 subagent 數。
+    background_jobs: usize,
 }
 
 struct Inner {
@@ -157,6 +164,10 @@ impl Runs {
         };
         let queued = std::mem::take(&mut lane.queued);
         lane.discarded.extend(queued);
+        // 背景的 subagent 也停下，結論不會再叫醒對話 agent。
+        if let Some(bg) = lane.background.take() {
+            bg.cancel();
+        }
         if let Some(cancel) = &lane.current {
             lane.stop_reason = Some(StopReason::User);
             cancel.cancel();
@@ -173,6 +184,83 @@ impl Runs {
         {
             tracing::warn!("agent run 沒有在時限內結束");
         }
+    }
+}
+
+/// 對話 agent 在背景開的 subagent（見模組說明）。放在 [`ToolCtx::background`]。
+#[derive(Clone)]
+pub struct Background {
+    runs: Runs,
+    project: ProjectId,
+}
+
+/// 背景 subagent 佔的名額；drop 時歸還（包括 panic）。
+pub struct BackgroundLease {
+    background: Background,
+    jobs: usize,
+}
+
+impl Drop for BackgroundLease {
+    fn drop(&mut self) {
+        let mut lanes = self.background.runs.inner.lanes.lock().unwrap();
+        if let Some(lane) = lanes.get_mut(&self.background.project) {
+            lane.background_jobs = lane.background_jobs.saturating_sub(self.jobs);
+        }
+    }
+}
+
+impl Background {
+    /// 同一個 project 背景最多同時跑幾個 subagent。
+    pub const MAX_JOBS: usize = 4;
+
+    /// 佔 `jobs` 個名額。回傳名額與這批 subagent 的取消（`Stop` 或服務關閉時取消）。
+    pub fn reserve(&self, jobs: usize) -> Result<(BackgroundLease, CancellationToken), String> {
+        let inner = &self.runs.inner;
+        if inner.shutdown.is_cancelled() {
+            return Err("服務正在關閉".into());
+        }
+        let mut lanes = inner.lanes.lock().unwrap();
+        let lane = lanes.entry(self.project).or_default();
+        if lane.background_jobs + jobs > Self::MAX_JOBS {
+            return Err(format!(
+                "背景已有 {} 個 subagent 在跑（同時最多 {} 個）；等它們的結論回來再派",
+                lane.background_jobs,
+                Self::MAX_JOBS
+            ));
+        }
+        lane.background_jobs += jobs;
+        let token = lane
+            .background
+            .get_or_insert_with(|| inner.shutdown.child_token())
+            .child_token();
+        Ok((
+            BackgroundLease {
+                background: self.clone(),
+                jobs,
+            },
+            token,
+        ))
+    }
+
+    /// 在 `Runs` 的 tracker 裡跑，服務關閉時會等它收尾。
+    pub fn spawn(&self, fut: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.runs.inner.tracker.spawn(fut);
+    }
+
+    /// 結論回來：貼一則系統觸發（`display` 給人看，`text` 給 agent），排進佇列叫醒對話 agent。
+    pub async fn deliver(&self, display: &str, text: &str) -> Result<(), Error> {
+        let mut txn = self.runs.inner.hub.begin().await?;
+        let item = post_system_trigger(&mut txn, self.project, display, text).await?;
+        txn.commit().await?;
+        self.runs.enqueue(
+            self.project,
+            Trigger {
+                item,
+                text: text.to_string(),
+            },
+            false,
+        );
+        Ok(())
     }
 }
 
@@ -829,6 +917,12 @@ async fn drive_loop(
         milestones: Default::default(),
         goals_created: Default::default(),
         queued: Some(queued),
+        background: Some(Background {
+            runs: Runs {
+                inner: inner.clone(),
+            },
+            project: project.id,
+        }),
         clock: inner.clock.clone(),
         worker: inner.planner.worker().clone(),
         work: None,

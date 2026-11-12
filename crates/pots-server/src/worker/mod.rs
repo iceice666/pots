@@ -1624,6 +1624,7 @@ impl Worker {
             run_id: job.run,
             cards: Default::default(),
             queued: None,
+            background: None,
             finished: Arc::new(AtomicBool::new(false)),
             budget,
             milestones: Default::default(),

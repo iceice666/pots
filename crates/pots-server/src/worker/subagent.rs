@@ -1,11 +1,14 @@
 //! 唯讀的 subagent（`proposal/agent-collaboration.md#主-agentsubagent-與-team`）。
 //!
 //! - 主 agent（對話 agent、Planner、內建 worker）在一輪內用 `run_subagent` 開出 explorer 或
-//!   reviewer，等它們回來；一次最多 [`MAX_SUBAGENTS`] 個並行，只看得到主 agent 給的 prompt。
+//!   reviewer；一次最多 [`MAX_SUBAGENTS`] 個並行，只看得到主 agent 給的 prompt。
+//! - Planner 與 worker 等它們回來，結論是工具結果。對話 agent 與總管（[`ToolCtx::background`]）
+//!   不等：工具馬上回傳，run 照常結束、使用者可以繼續說話；結論回來時以系統觸發叫醒對話 agent。
+//!   `Stop` 或服務關閉時一起停，被停下的不送結論。
 //! - subagent 只有唯讀工具：平台狀態（同一個範圍）與程式碼。worker 開的讀自己的工作目錄，
 //!   其他的讀 repo 預設分支的鏡像。subagent 不能再開 subagent（深度 1）。
 //! - 每個 subagent 是一筆 `agent_runs`（`parent_run_id` 指向主 agent 的 run），不建任務；
-//!   主 agent 被取消時一起停。用量算進 Goal。
+//!   等結論的主 agent 被取消時一起停。用量算進 Goal。
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -68,6 +71,18 @@ pub async fn run(
         views.push(view);
     }
 
+    // 背景跑的先佔名額；這批 subagent 跟著背景的取消，不跟著已經結束的主 agent run。
+    let background = match &ctx.background {
+        Some(bg) => Some((bg.clone(), bg.reserve(jobs.len()).map_err(bad)?)),
+        None => None,
+    };
+    let parent_cancel = match &background {
+        Some((_, (_, token))) => token.clone(),
+        None => ctx.cancel.clone(),
+    };
+    let prompts: Vec<String> = jobs.iter().map(|j| j.prompt.clone()).collect();
+    let profile_name = profile.name.clone();
+
     let futures =
         jobs.into_iter()
             .zip(views)
@@ -79,6 +94,7 @@ pub async fn run(
                 let reasoning = route.reasoning;
                 let meta = route.meta("builtin");
                 let model_name = meta.model.clone();
+                let cancel = parent_cancel.child_token();
                 async move {
                     let run_id = Uuid::now_v7();
                     let budget = match crate::budget::for_run(
@@ -114,6 +130,7 @@ pub async fn run(
                         run_id,
                         cards: Default::default(),
                         queued: None,
+                        background: None,
                         finished: Arc::new(AtomicBool::new(false)),
                         budget,
                         milestones: Default::default(),
@@ -123,7 +140,7 @@ pub async fn run(
                         work: ctx.work.clone(),
                         code: code.clone(),
                         stop: Arc::new(Notify::new()),
-                        cancel: ctx.cancel.child_token(),
+                        cancel,
                     });
                     let mut instructions = profile.role_prompt().to_string();
                     match &code {
@@ -197,17 +214,68 @@ pub async fn run(
                     }
                     (i, text)
                 }
-            });
-    let mut results = futures::future::join_all(futures).await;
-    results.sort_by_key(|(i, _)| *i);
-    if ctx.cancel.is_cancelled() {
-        return Err(bad("已取消"));
-    }
-    let mut out = String::new();
+            })
+            .collect::<Vec<_>>();
+    let collect = async move {
+        let mut results = futures::future::join_all(futures).await;
+        results.sort_by_key(|(i, _)| *i);
+        results
+    };
+    let Some((bg, (lease, token))) = background else {
+        let results = collect.await;
+        if ctx.cancel.is_cancelled() {
+            return Err(bad("已取消"));
+        }
+        let mut out = String::new();
+        for (i, text) in results {
+            out.push_str(&format!("## subagent {}\n\n{}\n\n", i + 1, text.trim()));
+        }
+        return Ok(out);
+    };
+
+    let n = prompts.len();
+    let runner = bg.clone();
+    let name = profile_name.clone();
+    bg.spawn(
+        async move {
+            let results = collect.await;
+            drop(lease);
+            // 被 Stop 或服務關閉停下：不送結論。
+            if token.is_cancelled() {
+                return;
+            }
+            let text = background_report(&name, &prompts, &results);
+            let display = format!("{n} 個 {name} 回報了結論");
+            if let Err(e) = runner.deliver(&display, &text).await {
+                tracing::error!(error = %e, "無法送回背景 subagent 的結論");
+            }
+        }
+        .in_current_span(),
+    );
+    Ok(format!(
+        "已在背景派出 {n} 個 {profile_name}。它們回來時你會收到一則「系統通知」開頭的訊息，裡面有各自的結論。\
+         現在不要等：先用一兩句話告訴使用者你派人查什麼、結論回來後會整理給使用者，然後結束這次回覆；\
+         不要重派同樣的調查，也不要編造結論。"
+    ))
+}
+
+/// 背景 subagent 的結論，以系統觸發送回對話 agent。
+fn background_report(profile: &str, prompts: &[String], results: &[(usize, String)]) -> String {
+    let mut out = format!(
+        "（系統通知，不是使用者說的話）你先前用 run_subagent 在背景派出的 {} 個 {profile} 回來了。\
+         依下面的結論回覆使用者；原本的工作需要這些結論才能繼續的話，接著做。",
+        results.len()
+    );
     for (i, text) in results {
-        out.push_str(&format!("## subagent {}\n\n{}\n\n", i + 1, text.trim()));
+        let prompt = prompts.get(*i).map(String::as_str).unwrap_or_default();
+        out.push_str(&format!(
+            "\n\n## subagent {}\n\n問題：{}\n\n{}",
+            i + 1,
+            tasks::one_line(prompt, 200),
+            text.trim()
+        ));
     }
-    Ok(out)
+    out
 }
 
 /// repo 預設分支的鏡像；沒有 repo 時是 `None`。

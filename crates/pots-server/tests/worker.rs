@@ -1132,12 +1132,14 @@ async fn quick_fix_escalates_to_planner() {
     srv.stop().await;
 }
 
-/// 對話 agent 開 explorer subagent 讀 repo 的預設分支（平台的鏡像），結論回到對話 agent。
+/// 對話 agent 開 explorer subagent 讀 repo 的預設分支（平台的鏡像）。explorer 在背景跑：
+/// 工具馬上回傳，結論以系統觸發回到對話 agent。
 #[tokio::test]
 async fn chat_runs_explorer_subagent_on_mirror() {
     let env = env().await;
-    let answers = Arc::new(Mutex::new(Vec::<String>::new()));
-    let seen = answers.clone();
+    let outputs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let notices = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (seen, heard) = (outputs.clone(), notices.clone());
     let model = FnProvider::new("m", move |req| {
         let instr = instructions(req);
         let outputs = tool_outputs(req);
@@ -1161,8 +1163,12 @@ async fn chat_runs_explorer_subagent_on_mirror() {
                 )),
             };
         }
-        if let Some(Item::ToolResult { output, .. }) = req.input.last() {
-            seen.lock().unwrap().push(output.clone());
+        match req.input.last() {
+            Some(Item::ToolResult { output, .. }) => seen.lock().unwrap().push(output.clone()),
+            Some(Item::User { text }) if text.contains("系統通知") => {
+                heard.lock().unwrap().push(text.clone());
+            }
+            _ => {}
         }
         chat_turn(req)
     });
@@ -1179,11 +1185,94 @@ async fn chat_runs_explorer_subagent_on_mirror() {
     )
     .await;
     c.until_idle(project).await;
-    let answers = answers.lock().unwrap().clone();
-    let out = answers.last().expect("subagent 的結果");
-    assert!(out.contains("## subagent 1"), "{out}");
-    assert!(out.contains("README 寫著：hello pots"), "{out}");
-    assert!(out.contains("README.md:1:hello pots"), "{out}");
+    let out = outputs.lock().unwrap().last().cloned().expect("工具結果");
+    assert!(out.contains("已在背景派出 1 個 explorer"), "{out}");
+    // 結論回來：系統觸發叫醒對話 agent。
+    c.until(|e| {
+        matches!(e, ServerEvent::Item { item, .. }
+        if matches!(&item.kind, StreamItemKind::Event { text } if text.contains("回報了結論")))
+    })
+    .await;
+    c.until_idle(project).await;
+    let notice = notices.lock().unwrap().last().cloned().expect("系統通知");
+    assert!(notice.contains("## subagent 1"), "{notice}");
+    assert!(notice.contains("問題：README 寫什麼？"), "{notice}");
+    assert!(notice.contains("README 寫著：hello pots"), "{notice}");
+    assert!(notice.contains("README.md:1:hello pots"), "{notice}");
+    srv.stop().await;
+}
+
+/// explorer 還在查的時候，對話 agent 照樣回覆新訊息（不卡在「排隊中」）；Stop 連背景的
+/// explorer 一起停，之後不會再送結論。
+#[tokio::test]
+async fn chat_keeps_talking_while_explorer_runs() {
+    let env = env().await;
+    let explorer_started = Arc::new(tokio::sync::Notify::new());
+    let notices = Arc::new(Mutex::new(Vec::<String>::new()));
+    let outputs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (started, heard, seen) = (explorer_started.clone(), notices.clone(), outputs.clone());
+    let model = FnProvider::new("m", move |req| {
+        if instructions(req).starts_with(EXPLORER) {
+            started.notify_one();
+            return ScriptedTurn::new().hang();
+        }
+        if let Some(Item::ToolResult { output, .. }) = req.input.last() {
+            seen.lock().unwrap().push(output.clone());
+        }
+        if let Some(Item::User { text }) = req.input.last()
+            && text.contains("系統通知")
+        {
+            heard.lock().unwrap().push(text.clone());
+        }
+        chat_turn(req)
+    });
+    let srv = launch(config(&env, WorkerBackendKind::Builtin, None), model).await;
+    let mut c = srv.client().await;
+    let project = setup(&mut c).await;
+    c.say(
+        project,
+        &call(
+            "run_subagent",
+            json!({"profile": "explorer", "tasks": [{"prompt": "查很久的問題"}]}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    c.until_idle(project).await;
+    tokio::time::timeout(Duration::from_secs(10), explorer_started.notified())
+        .await
+        .expect("explorer 開始了");
+
+    // explorer 還卡著，新訊息照樣有回覆。
+    c.say(project, "然後幫我確認 roadmap 的進度", SendMode::Queue)
+        .await;
+    let evs = c.until_idle(project).await;
+    assert!(
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::ItemDone { item, .. }
+            if matches!(&item.kind, StreamItemKind::Agent(m) if m.text == "完成"))),
+        "{evs:?}"
+    );
+
+    // 背景最多 4 個：再派 4 個會被拒絕，不會排隊卡住。
+    c.say(
+        project,
+        &call(
+            "run_subagent",
+            json!({"profile": "explorer", "tasks": [
+                {"prompt": "a"}, {"prompt": "b"}, {"prompt": "c"}, {"prompt": "d"}
+            ]}),
+        ),
+        SendMode::Queue,
+    )
+    .await;
+    c.until_idle(project).await;
+    let out = outputs.lock().unwrap().last().cloned().expect("工具結果");
+    assert!(out.contains("背景已有 1 個 subagent 在跑"), "{out}");
+
+    c.send(&ClientCommand::Stop { project }).await;
+    c.assert_quiet(Duration::from_millis(500)).await;
+    assert!(notices.lock().unwrap().is_empty());
     srv.stop().await;
 }
 

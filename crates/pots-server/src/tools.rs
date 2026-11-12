@@ -101,6 +101,8 @@ pub struct ToolCtx {
     pub cards: Arc<Mutex<Vec<Card>>>,
     /// 有沒有使用者訊息在排隊（對話 agent 的 `get_status` 用）。
     pub queued: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// `run_subagent` 在背景跑、結論以系統觸發送回（對話 agent 與總管）。`None` 時等它們回來。
+    pub background: Option<crate::runs::Background>,
     /// 這個 run 該結束了（例如 `complete_goal` 成功）；[`Gate`] 在下一輪開始前停下。
     pub finished: Arc<AtomicBool>,
     /// 這個 run 的預算、用量與 trace。
