@@ -1,6 +1,11 @@
 //! On-disk state: the workspace (JSON), the user's config (TOML) and the
 //! API keys the app saved (TOML, readable only by the user), all in the data
 //! directory — `$POTS_HOME`, or `~/.pots`.
+//!
+//! Artifacts are listed in `workspace.json`, but each one's content is its
+//! own file, `artifacts/<id>.json`. Editing a table then rewrites only that
+//! table, not every message of the workspace; and saving the workspace (on
+//! every message) doesn't rewrite every table, document and whiteboard.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -8,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, Config};
-use crate::data::Workspace;
+use crate::data::{ArtifactContent, Workspace};
 
 const KEYS_HEADER: &str = "\
 # API keys for the providers in config.toml, by provider name. Pots writes
@@ -28,6 +33,10 @@ fn workspace_path() -> PathBuf {
     home().join("workspace.json")
 }
 
+fn artifact_path(home: &Path, id: usize) -> PathBuf {
+    home.join("artifacts").join(format!("{id}.json"))
+}
+
 pub fn config_path() -> PathBuf {
     home().join("config.toml")
 }
@@ -35,17 +44,46 @@ pub fn config_path() -> PathBuf {
 /// The saved workspace, or `None` if there is none yet. A file that exists
 /// but can't be read is an error, so it is never silently replaced.
 pub fn load_workspace() -> io::Result<Option<Workspace>> {
-    let text = match fs::read_to_string(workspace_path()) {
+    load_workspace_from(&home())
+}
+
+fn load_workspace_from(home: &Path) -> io::Result<Option<Workspace>> {
+    let text = match fs::read_to_string(home.join("workspace.json")) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
     let mut ws: Workspace = serde_json::from_str(&text).map_err(io::Error::other)?;
     ws.restore();
+    for artifact in &mut ws.artifacts {
+        match load_artifact(home, artifact.id) {
+            // Listed but never written (the app quit in between): blank.
+            Ok(None) => artifact.content = Some(ArtifactContent::new(artifact.kind)),
+            Ok(Some(content)) if content.kind() == artifact.kind => artifact.content = Some(content),
+            Ok(Some(content)) => {
+                artifact.load_error = Some(format!(
+                    "{} holds a {}, not a {}.",
+                    artifact_path(home, artifact.id).display(),
+                    content.kind().label().to_lowercase(),
+                    artifact.kind.label().to_lowercase()
+                ))
+            }
+            Err(e) => artifact.load_error = Some(format!("{}: {e}", artifact_path(home, artifact.id).display())),
+        }
+    }
     Ok(Some(ws))
 }
 
-/// Write the workspace atomically (temp file + rename).
+fn load_artifact(home: &Path, id: usize) -> io::Result<Option<ArtifactContent>> {
+    match fs::read_to_string(artifact_path(home, id)) {
+        Ok(text) => serde_json::from_str(&text).map(Some).map_err(io::Error::other),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write the workspace atomically (temp file + rename). Artifact content is
+/// saved apart, with `save_artifact`.
 pub fn save_workspace(ws: &Workspace) -> io::Result<()> {
     let path = workspace_path();
     if let Some(dir) = path.parent() {
@@ -54,6 +92,28 @@ pub fn save_workspace(ws: &Workspace) -> io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(ws).map_err(io::Error::other)?)?;
     fs::rename(tmp, path)
+}
+
+/// Write artifact `id`'s content to its own file, atomically.
+pub fn save_artifact(id: usize, content: &ArtifactContent) -> io::Result<()> {
+    save_artifact_in(&home(), id, content)
+}
+
+fn save_artifact_in(home: &Path, id: usize, content: &ArtifactContent) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(content).map_err(io::Error::other)?;
+    write_atomic(&artifact_path(home, id), &json, false)
+}
+
+/// Delete artifact `id`'s file (there may be none).
+pub fn delete_artifact(id: usize) -> io::Result<()> {
+    delete_artifact_in(&home(), id)
+}
+
+fn delete_artifact_in(home: &Path, id: usize) -> io::Result<()> {
+    match fs::remove_file(artifact_path(home, id)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// The config file's text, writing `default` there first if it's missing.
@@ -120,7 +180,9 @@ fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("toml.tmp");
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
     let _ = fs::remove_file(&tmp); // a leftover would keep its old mode
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -141,7 +203,7 @@ fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::data::{self, Conv};
+    use crate::data::{self, ArtifactContent, ArtifactKind, Conv};
 
     #[test]
     fn keys_round_trip_and_stay_private() {
@@ -163,6 +225,82 @@ mod tests {
         std::fs::write(&path, "not = [valid").unwrap();
         assert!(super::read_keys_from(&path).is_err(), "a broken file is an error, never read as empty");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn temp_home(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pots-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn workspaces_saved_before_artifacts_still_load() {
+        let home = temp_home("old-workspace");
+        // As written before artifacts existed: no `artifacts`, no `next_artifact_id`.
+        let old = r#"{
+          "name": "Pots", "me": 0,
+          "users": [{"name": "you", "color": 2845872, "online": true, "kind": "human"}],
+          "channels": [{"name": "general", "topic": "", "dm": null, "unread": false,
+                        "messages": [{"id": 0, "author": 0, "ts": 1700000000, "source": "hi"}]}],
+          "threads": [],
+          "next_id": 1
+        }"#;
+        std::fs::write(home.join("workspace.json"), old).unwrap();
+        let mut ws = super::load_workspace_from(&home).unwrap().unwrap();
+        assert!(ws.artifacts.is_empty());
+        assert_eq!(ws.channels[0].messages[0].snippet(10), "hi");
+        assert_eq!(ws.add_artifact(0, ArtifactKind::Table), 0);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn artifacts_round_trip_through_their_own_files() {
+        let home = temp_home("artifacts");
+        let mut ws = data::seed();
+        let general = ws.find_channel("general").unwrap();
+        let id = ws.add_artifact(general, ArtifactKind::Table);
+        ws.rename_artifact(id, "Lunch spots");
+        let Some(ArtifactContent::Table(table)) = &mut ws.artifact_mut(id).unwrap().content else { unreachable!() };
+        table.set_cell(0, 0, "Zqx noodles 🍜");
+        table.insert_column(1, "Price");
+        table.set_cell(0, 1, "$$");
+        table.remove_row(4);
+        let content = ws.artifact(id).unwrap().content.clone().unwrap();
+
+        std::fs::write(home.join("workspace.json"), serde_json::to_vec(&ws).unwrap()).unwrap();
+        super::save_artifact_in(&home, id, &content).unwrap();
+        assert!(!String::from_utf8(std::fs::read(home.join("workspace.json")).unwrap()).unwrap().contains("Zqx noodles"),
+            "content stays out of workspace.json");
+
+        let back = super::load_workspace_from(&home).unwrap().unwrap();
+        let a = back.artifact(id).unwrap();
+        assert_eq!((a.title.as_str(), a.kind, a.channel), ("Lunch spots", ArtifactKind::Table, general));
+        assert_eq!(a.content.as_ref(), Some(&content));
+        assert!(a.load_error.is_none());
+
+        // Deleting removes the file; deleting again is fine.
+        super::delete_artifact_in(&home, id).unwrap();
+        super::delete_artifact_in(&home, id).unwrap();
+        // Listed but without a file: it opens blank.
+        let back = super::load_workspace_from(&home).unwrap().unwrap();
+        assert_eq!(back.artifact(id).unwrap().content, Some(ArtifactContent::new(ArtifactKind::Table)));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_artifact_is_reported_not_replaced() {
+        let home = temp_home("broken-artifact");
+        let mut ws = data::empty();
+        let id = ws.add_artifact(0, ArtifactKind::Table);
+        std::fs::write(home.join("workspace.json"), serde_json::to_vec(&ws).unwrap()).unwrap();
+        std::fs::create_dir_all(home.join("artifacts")).unwrap();
+        std::fs::write(home.join("artifacts").join(format!("{id}.json")), "{not json").unwrap();
+        let back = super::load_workspace_from(&home).unwrap().unwrap();
+        let a = back.artifact(id).unwrap();
+        assert!(a.content.is_none());
+        assert!(a.load_error.as_deref().is_some_and(|e| e.contains(&format!("{id}.json"))), "{:?}", a.load_error);
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

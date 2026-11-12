@@ -238,6 +238,186 @@ pub struct Channel {
     pub messages: Vec<Message>,
 }
 
+/// The kinds of artifact. Each has its own content type in
+/// [`ArtifactContent`] and its own editor in the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactKind {
+    Table,
+}
+
+impl ArtifactKind {
+    /// Every kind, in the order the app offers them.
+    pub const ALL: &[ArtifactKind] = &[ArtifactKind::Table];
+
+    /// The kind's name, as shown in the app ("Table").
+    pub fn label(self) -> &'static str {
+        match self {
+            ArtifactKind::Table => "Table",
+        }
+    }
+}
+
+/// What an artifact holds. Saved apart from `workspace.json`, one file
+/// per artifact (see `store`), tagged with its kind:
+/// `{"kind": "table", "columns": [...], "rows": [[...], ...]}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ArtifactContent {
+    Table(Table),
+}
+
+impl ArtifactContent {
+    /// A new, blank artifact of `kind`.
+    pub fn new(kind: ArtifactKind) -> Self {
+        match kind {
+            ArtifactKind::Table => ArtifactContent::Table(Table::blank(DEFAULT_TABLE_COLUMNS, DEFAULT_TABLE_ROWS)),
+        }
+    }
+
+    pub fn kind(&self) -> ArtifactKind {
+        match self {
+            ArtifactContent::Table(_) => ArtifactKind::Table,
+        }
+    }
+}
+
+/// Size of a new table.
+pub const DEFAULT_TABLE_COLUMNS: usize = 3;
+pub const DEFAULT_TABLE_ROWS: usize = 5;
+
+/// A table of plain-text cells under named columns. Every row has exactly
+/// one cell per column (a file that doesn't is padded or cut on load).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "TableFile")]
+pub struct Table {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+/// A table as written in its file, before its rows are made to fit the columns.
+#[derive(Deserialize)]
+struct TableFile {
+    #[serde(default)]
+    columns: Vec<String>,
+    #[serde(default)]
+    rows: Vec<Vec<String>>,
+}
+
+impl From<TableFile> for Table {
+    fn from(file: TableFile) -> Self {
+        let mut table = Table { columns: file.columns, rows: file.rows };
+        let width = table.columns.len();
+        for row in &mut table.rows {
+            row.resize(width, String::new());
+        }
+        table
+    }
+}
+
+impl Table {
+    /// `columns` × `rows` empty cells, the columns named "Column 1", "Column 2"…
+    pub fn blank(columns: usize, rows: usize) -> Self {
+        Table {
+            columns: (1..=columns).map(|i| format!("Column {i}")).collect(),
+            rows: vec![vec![String::new(); columns]; rows],
+        }
+    }
+
+    pub fn cell(&self, row: usize, col: usize) -> &str {
+        self.rows.get(row).and_then(|r| r.get(col)).map_or("", String::as_str)
+    }
+
+    /// Set a cell's text; false if there is no such cell or it already says that.
+    pub fn set_cell(&mut self, row: usize, col: usize, text: &str) -> bool {
+        match self.rows.get_mut(row).and_then(|r| r.get_mut(col)) {
+            Some(cell) if cell != text => {
+                *cell = text.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Insert an empty row before row `at` (at the end if past it); returns its index.
+    pub fn insert_row(&mut self, at: usize) -> usize {
+        let at = at.min(self.rows.len());
+        self.rows.insert(at, vec![String::new(); self.columns.len()]);
+        at
+    }
+
+    pub fn remove_row(&mut self, row: usize) -> bool {
+        if row < self.rows.len() {
+            self.rows.remove(row);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Insert an empty column named `name` before column `at` (at the end
+    /// if past it); returns its index.
+    pub fn insert_column(&mut self, at: usize, name: &str) -> usize {
+        let at = at.min(self.columns.len());
+        self.columns.insert(at, name.to_string());
+        for row in &mut self.rows {
+            row.insert(at, String::new());
+        }
+        at
+    }
+
+    /// Remove column `col` and its cells. The last column stays: a table
+    /// without columns would have rows with nothing in them.
+    pub fn remove_column(&mut self, col: usize) -> bool {
+        if col >= self.columns.len() || self.columns.len() == 1 {
+            return false;
+        }
+        self.columns.remove(col);
+        for row in &mut self.rows {
+            row.remove(col);
+        }
+        true
+    }
+
+    /// Rename column `col`; a blank name is refused (false).
+    pub fn rename_column(&mut self, col: usize, name: &str) -> bool {
+        let name = name.trim();
+        match self.columns.get_mut(col) {
+            Some(c) if !name.is_empty() && c != name => {
+                *c = name.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A name for a new column that no column has yet ("Column 4").
+    pub fn next_column_name(&self) -> String {
+        (self.columns.len() + 1..)
+            .map(|i| format!("Column {i}"))
+            .find(|n| !self.columns.contains(n))
+            .expect("some number is free")
+    }
+}
+
+/// Something made and kept in a channel: a table now, documents and
+/// whiteboards later. The metadata lives in `workspace.json`; the content
+/// is in its own file (see `store`), loaded with the workspace.
+#[derive(Serialize, Deserialize)]
+pub struct Artifact {
+    /// Stable for the artifact's life (it names its file); not an index.
+    pub id: usize,
+    pub title: String,
+    pub kind: ArtifactKind,
+    pub channel: usize,
+    /// `None` when its file couldn't be read (see `load_error`): the app
+    /// then won't open it, so the file is never overwritten.
+    #[serde(skip)]
+    pub content: Option<ArtifactContent>,
+    #[serde(skip)]
+    pub load_error: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Workspace {
     pub name: String,
@@ -246,6 +426,11 @@ pub struct Workspace {
     pub channels: Vec<Channel>,
     pub threads: Vec<Thread>,
     next_id: usize,
+    /// Workspaces saved before artifacts existed have none.
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
+    #[serde(default)]
+    next_artifact_id: usize,
 }
 
 impl Workspace {
@@ -464,6 +649,60 @@ impl Workspace {
         ts.retain(|&t| !self.threads[t].archived);
         ts
     }
+
+    // --- artifacts -------------------------------------------------------
+
+    pub fn artifact(&self, id: usize) -> Option<&Artifact> {
+        self.artifacts.iter().find(|a| a.id == id)
+    }
+
+    pub fn artifact_mut(&mut self, id: usize) -> Option<&mut Artifact> {
+        self.artifacts.iter_mut().find(|a| a.id == id)
+    }
+
+    /// Ids of `channel`'s artifacts, oldest first.
+    pub fn channel_artifacts(&self, channel: usize) -> Vec<usize> {
+        self.artifacts.iter().filter(|a| a.channel == channel).map(|a| a.id).collect()
+    }
+
+    /// A new, blank artifact of `kind` in `channel`, titled "Untitled
+    /// table" (numbered if the channel has one by that name). Returns its id.
+    pub fn add_artifact(&mut self, channel: usize, kind: ArtifactKind) -> usize {
+        // Never reuse an id, even with a counter from an older file.
+        let id = self.next_artifact_id.max(self.artifacts.iter().map(|a| a.id + 1).max().unwrap_or(0));
+        self.next_artifact_id = id + 1;
+        let base = format!("Untitled {}", kind.label().to_lowercase());
+        let taken = |title: &str| self.artifacts.iter().any(|a| a.channel == channel && a.title == title);
+        let title = std::iter::once(base.clone())
+            .chain((2..).map(|n| format!("{base} {n}")))
+            .find(|t| !taken(t))
+            .expect("some number is free");
+        self.artifacts.push(Artifact {
+            id,
+            title,
+            kind,
+            channel,
+            content: Some(ArtifactContent::new(kind)),
+            load_error: None,
+        });
+        id
+    }
+
+    /// Rename artifact `id`. Surrounding space is dropped; a blank title is
+    /// refused. Returns the title it has now, if it exists.
+    pub fn rename_artifact(&mut self, id: usize, title: &str) -> Option<String> {
+        let artifact = self.artifact_mut(id)?;
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !title.is_empty() {
+            artifact.title = title;
+        }
+        Some(artifact.title.clone())
+    }
+
+    pub fn remove_artifact(&mut self, id: usize) -> Option<Artifact> {
+        let ix = self.artifacts.iter().position(|a| a.id == id)?;
+        Some(self.artifacts.remove(ix))
+    }
 }
 
 /// Default thread name for a starter message, as Discord pre-fills it.
@@ -502,6 +741,8 @@ pub fn empty() -> Workspace {
         channels: Vec::new(),
         threads: Vec::new(),
         next_id: 0,
+        artifacts: Vec::new(),
+        next_artifact_id: 0,
     };
     ws.channels.push(Channel {
         name: "general".to_string(),
@@ -531,6 +772,8 @@ pub fn seed() -> Workspace {
         channels: Vec::new(),
         threads: Vec::new(),
         next_id: 0,
+        artifacts: Vec::new(),
+        next_artifact_id: 0,
     };
 
     let add = |ws: &mut Workspace, name: &str, topic: &str, dm: Option<usize>, unread: bool, msgs: &[(usize, u32, &str, &[(&str, u32, bool)])]| {
@@ -706,6 +949,78 @@ mod tests {
         assert_eq!(ws.channel_name("General", None), Err("#general already exists.".into()));
         let general = ws.find_channel("general");
         assert_eq!(ws.channel_name("General", general), Ok("general".into()), "renaming to itself");
+    }
+
+    #[test]
+    fn table_rows_and_columns_grow_and_shrink_together() {
+        let mut t = Table::blank(2, 2);
+        assert_eq!(t.columns, ["Column 1", "Column 2"]);
+        assert!(t.set_cell(0, 1, "b"));
+        assert!(!t.set_cell(0, 1, "b"), "unchanged");
+        assert!(!t.set_cell(5, 0, "x"), "no such cell");
+
+        assert_eq!(t.insert_row(0), 0);
+        assert_eq!(t.insert_row(99), 3, "past the end appends");
+        assert_eq!(t.rows.len(), 4);
+        assert_eq!(t.cell(1, 1), "b", "moved down by the row above");
+        assert!(t.remove_row(0));
+        assert!(!t.remove_row(10));
+        assert_eq!(t.cell(0, 1), "b");
+
+        let name = t.next_column_name();
+        assert_eq!(name, "Column 3");
+        assert_eq!(t.insert_column(1, &name), 1);
+        assert_eq!(t.columns, ["Column 1", "Column 3", "Column 2"]);
+        assert!(t.rows.iter().all(|r| r.len() == 3));
+        assert_eq!(t.cell(0, 2), "b", "shifted right with its column");
+        assert_eq!(t.next_column_name(), "Column 4");
+
+        assert!(t.rename_column(1, "  Owner "));
+        assert_eq!(t.columns[1], "Owner");
+        assert!(!t.rename_column(1, "   "), "blank names are refused");
+
+        assert!(t.remove_column(2));
+        assert_eq!(t.columns, ["Column 1", "Owner"]);
+        assert!(t.rows.iter().all(|r| r.len() == 2));
+        assert!(t.remove_column(0));
+        assert!(!t.remove_column(0), "the last column stays");
+        assert_eq!(t.columns, ["Owner"]);
+    }
+
+    #[test]
+    fn table_files_with_ragged_rows_are_made_to_fit() {
+        let json = r#"{"kind":"table","columns":["a","b"],"rows":[["1"],["1","2","3"]]}"#;
+        let ArtifactContent::Table(t) = serde_json::from_str(json).unwrap();
+        assert_eq!(t.rows, [vec!["1", ""], vec!["1", "2"]]);
+        // And it is written back as plain columns and rows.
+        let back = serde_json::to_value(ArtifactContent::Table(t)).unwrap();
+        assert_eq!(back, serde_json::json!({"kind": "table", "columns": ["a", "b"], "rows": [["1", ""], ["1", "2"]]}));
+    }
+
+    #[test]
+    fn artifacts_belong_to_a_channel_and_keep_their_ids() {
+        let mut ws = seed();
+        let (general, eng) = (ws.find_channel("general").unwrap(), ws.find_channel("engineering").unwrap());
+        let a = ws.add_artifact(general, ArtifactKind::Table);
+        let b = ws.add_artifact(general, ArtifactKind::Table);
+        let c = ws.add_artifact(eng, ArtifactKind::Table);
+        assert_eq!(ws.artifact(a).unwrap().title, "Untitled table");
+        assert_eq!(ws.artifact(b).unwrap().title, "Untitled table 2");
+        assert_eq!(ws.artifact(c).unwrap().title, "Untitled table", "titles are per channel");
+        assert_eq!(ws.channel_artifacts(general), [a, b]);
+        let Some(ArtifactContent::Table(t)) = &ws.artifact(a).unwrap().content else { panic!("a blank table") };
+        assert_eq!((t.columns.len(), t.rows.len()), (DEFAULT_TABLE_COLUMNS, DEFAULT_TABLE_ROWS));
+
+        assert_eq!(ws.rename_artifact(a, "  Q4   budget "), Some("Q4 budget".into()));
+        assert_eq!(ws.rename_artifact(a, "  "), Some("Q4 budget".into()), "blank keeps the title");
+        assert_eq!(ws.rename_artifact(99, "x"), None);
+
+        assert!(ws.remove_artifact(b).is_some());
+        assert!(ws.artifact(b).is_none());
+        assert_eq!(ws.channel_artifacts(general), [a]);
+        // A removed artifact's id (it names a file) is never given out again.
+        let d = ws.add_artifact(general, ArtifactKind::Table);
+        assert!(d > c);
     }
 
     #[test]
