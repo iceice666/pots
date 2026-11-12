@@ -750,10 +750,12 @@ impl PotsApp {
             )
     }
 
+    /// 面板標題列。`title` 由呼叫端決定要純文字還是 Markdown：listener 的標題是平台
+    /// 組的短字，排程的 prompt 是 agent／使用者寫的 Markdown（見 `render_schedule_panel`）。
     fn detail_header(
         &self,
         eyebrow: String,
-        title: String,
+        title: impl IntoElement,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
@@ -1024,10 +1026,21 @@ impl PotsApp {
                     },
                 ));
 
+        // 標題就是排程的 prompt：使用者或 agent 寫的 Markdown，醒來時原文交給 agent。
+        // 標題列原本的 17px／BOLD／1.35 行高來自 `detail_header` 的外層 div，但
+        // `TextView` 有自己的預設字級與行高會蓋掉，所以同一組值明確下在 `TextView` 上。
+        let heading = agent_text(
+            SharedString::from(format!("schedule-detail-prompt-{}", id.0)),
+            s.prompt.clone(),
+        )
+        .text_size(px(17.))
+        .font_weight(FontWeight::BOLD)
+        .line_height(relative(1.35));
+
         panel_frame()
             .child(self.detail_header(
                 format!("排程 · {}", self.project_label(s.project, "總管")),
-                s.prompt.clone(),
+                heading,
                 cx,
             ))
             .child(
