@@ -25,7 +25,7 @@ use crate::notify::{self, Notifier};
 use crate::sync::{self, Notice, Sync};
 use crate::theme;
 use crate::views::composer_attach::{
-    DroppedFile, PendingAttachments, prompt_failure, read_dropped,
+    DroppedFile, PendingAttachments, PickOutcome, pick_outcome, read_dropped,
 };
 use crate::views::images::{AttachmentImages, FetchEvent};
 
@@ -834,6 +834,8 @@ pub struct PotsApp {
     pub pending: Entity<PendingAttachments>,
     /// 有檔案正被拖到輸入框上方：只在這裡加高亮，不是整頁的 drop zone。
     pub drop_hot: bool,
+    /// 系統檔案對話框開著、等它回覆：避免連點開出好幾個。
+    pub pick_pending: bool,
     /// 訊息附圖的快取（`GET /attachments/{id}`）；假資料模式沒有 fetcher，只畫佔位。
     pub attachment_images: AttachmentImages,
     /// 點開的大圖；`None` 是關著。
@@ -976,6 +978,7 @@ impl PotsApp {
             composer,
             pending,
             drop_hot: false,
+            pick_pending: false,
             attachment_images: AttachmentImages::new(),
             image_viewer: None,
             goal_note,
@@ -3296,6 +3299,11 @@ impl PotsApp {
     /// （[`Self::accept_dropped`]，讀檔在背景）；取消 → 什麼都不動；對話框開不起來
     /// （Linux 缺 `xdg-desktop-portal`）→ 中文提示改用拖放或貼上。
     pub fn pick_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 系統對話框是 modal 的，但連點會排進第二個；已經有一個在等就不要再開。
+        if self.pick_pending {
+            return;
+        }
+        self.pick_pending = true;
         let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
             directories: false,
@@ -3303,24 +3311,23 @@ impl PotsApp {
             prompt: Some("選擇要送給模型的圖片".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            // 外面那層 `Result` 是「回覆管道還在不在」：視窗關了就被丟掉，當成取消。
-            // 裡面那層才是對話框的結果：`None` 取消、`Err` 開不起來。
-            let picked = match rx.await {
-                Ok(Ok(Some(paths))) if !paths.is_empty() => Some(paths),
-                Ok(Ok(_)) | Err(_) => None,
-                Ok(Err(reason)) => {
-                    let message = prompt_failure(reason);
-                    this.update_in(cx, |app, _window, cx| app.note_pick_failure(message, cx))
-                        .ok();
-                    return;
-                }
-            };
-            if let Some(paths) = picked {
-                this.update_in(cx, |app, window, cx| app.accept_dropped(paths, window, cx))
-                    .ok();
-            }
+            let outcome = pick_outcome(rx.await);
+            this.update_in(cx, |app, window, cx| app.on_picked(outcome, window, cx))
+                .ok();
         })
         .detach();
+    }
+
+    /// 對話框回來的結局（判讀在 [`pick_outcome`]）。`pick_pending` 在這裡清掉，
+    /// 所以三種結局都要走過這裡 —— 提早 return 會讓按鈕永遠開不了下一個對話框。
+    fn on_picked(&mut self, outcome: PickOutcome, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_pending = false;
+        match outcome {
+            PickOutcome::Cancelled => {}
+            PickOutcome::Failed(message) => self.note_pick_failure(message, cx),
+            // 選到的路徑跟拖進來的一模一樣：同一條讀檔 + 驗證管線。
+            PickOutcome::Paths(paths) => self.accept_dropped(paths, window, cx),
+        }
     }
 
     /// 檔案對話框開不起來：中文說明放進輸入框的錯誤列，已經在裡面的圖片不動。

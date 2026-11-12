@@ -11,7 +11,7 @@
 //! png/jpeg/webp/gif（`pots_proto::ATTACHMENT_MIMES`），所以轉檔在客戶端做。
 
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::{ClipboardEntry, ClipboardItem, Image as GpuiImage, ImageFormat as GpuiImageFormat};
@@ -285,10 +285,44 @@ impl PendingAttachments {
     }
 }
 
-/// 系統沒有檔案選擇對話框時給使用者的中文說明；`reason` 是平台回的原因，附在後面
-/// 方便回報問題，但前面那句一定要看得懂。
+/// 系統的檔案選擇對話框開不起來時給使用者的中文說明；`reason` 是平台回的原因，附在
+/// 後面方便回報問題，但前面那句一定要看得懂、而且要講出替代做法。
+///
+/// Linux 的對話框走 xdg-desktop-portal，缺 portal（或 portal 服務沒在跑）是那裡最常見
+/// 的原因，所以只在 Linux 指名它；macOS／Windows 的 `Err` 另有原因，不要亂猜。
 pub fn prompt_failure(reason: impl std::fmt::Display) -> String {
-    format!("系統沒有檔案選擇對話框（缺少 xdg-desktop-portal），請改用拖放或貼上：{reason}")
+    if cfg!(target_os = "linux") {
+        format!("系統沒有檔案選擇對話框（缺少 xdg-desktop-portal），請改用拖放或貼上：{reason}")
+    } else {
+        format!("系統的檔案選擇對話框開不起來，請改用拖放或貼上：{reason}")
+    }
+}
+
+/// `prompt_for_paths` 那條 oneshot 的結局，翻成呼叫端要做的三件事。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickOutcome {
+    /// 使用者選了這些路徑（保證非空）。
+    Paths(Vec<PathBuf>),
+    /// 使用者按取消、或回覆管道被丟掉（視窗關了）：不動輸入框、不吵人。
+    Cancelled,
+    /// 對話框開不起來；字串是給使用者看的中文說明。
+    Failed(String),
+}
+
+/// 判讀 `prompt_for_paths` 的回覆。抽成純函式是為了測到 headless 平台模擬不出來的
+/// 「對話框開不起來」那條分支（`TestPlatform` 只能回「選了」或「取消」）。
+///
+/// 外層 `Result` 是「回覆管道還在不在」、內層才是對話框的結果。
+pub fn pick_outcome<E, C>(result: Result<Result<Option<Vec<PathBuf>>, E>, C>) -> PickOutcome
+where
+    E: std::fmt::Display,
+    C: std::fmt::Display,
+{
+    match result {
+        Ok(Ok(Some(paths))) if !paths.is_empty() => PickOutcome::Paths(paths),
+        Ok(Ok(_)) | Err(_) => PickOutcome::Cancelled,
+        Ok(Err(reason)) => PickOutcome::Failed(prompt_failure(reason)),
+    }
 }
 
 /// 拖進來或選進來的一個路徑讀完了：`bytes` 成功是檔案的位元組，失敗是中文原因。
@@ -574,6 +608,44 @@ mod tests {
         }]);
         assert!(took);
         assert!(pending.error.is_none());
+    }
+
+    #[test]
+    fn pick_outcome_covers_every_ending() {
+        let paths = vec![PathBuf::from("/tmp/a.png")];
+        assert_eq!(
+            pick_outcome::<&str, &str>(Ok(Ok(Some(paths.clone())))),
+            PickOutcome::Paths(paths),
+            "選了路徑就照路徑走"
+        );
+        assert_eq!(
+            pick_outcome::<&str, &str>(Ok(Ok(None))),
+            PickOutcome::Cancelled,
+            "按取消不動輸入框"
+        );
+        assert_eq!(
+            pick_outcome::<&str, &str>(Ok(Ok(Some(Vec::new())))),
+            PickOutcome::Cancelled,
+            "空清單等於沒選"
+        );
+        assert_eq!(
+            pick_outcome::<&str, &str>(Err("receiver dropped")),
+            PickOutcome::Cancelled,
+            "回覆管道被丟掉（視窗關了）當成取消"
+        );
+        match pick_outcome::<&str, &str>(Ok(Err("no dbus session"))) {
+            PickOutcome::Failed(message) => {
+                assert!(message.contains("請改用拖放或貼上"), "{message}");
+                assert!(
+                    message.contains("no dbus session"),
+                    "要留平台原文：{message}"
+                );
+                if cfg!(target_os = "linux") {
+                    assert!(message.contains("xdg-desktop-portal"), "{message}");
+                }
+            }
+            other => panic!("對話框開不起來要回 Failed，得到 {other:?}"),
+        }
     }
 
     #[test]

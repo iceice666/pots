@@ -3,8 +3,9 @@
 //!
 //! 這是 headless 測試：對話框是 GPUI `TestPlatform` 的替身，用
 //! `simulate_path_prompt_response` 回覆，**沒有**開過真的 NSOpenPanel／IFileOpenDialog／
-//! xdg-desktop-portal（見 PR 的未驗證項目）。「對話框開不起來」（`Ok(Err(_))`）也模擬不出來，
-//! 那條分支直接餵 `PotsApp::on_picked`／`pick_outcome` 驗證。
+//! xdg-desktop-portal（見 PR 的未驗證項目）。「對話框開不起來」（`Ok(Err(_))`）這個替身
+//! 模擬不出來，判讀邏輯在 `views::composer_attach::pick_outcome` 的單元測試裡驗；
+//! 這裡只驗到「錯誤寫進輸入框、既有圖片不動」那一半。
 //!
 //! `cargo test -p pots-desktop --test composer_pick -j 1`；容器裡要 `-j 1`（並行連結多個
 //! gpui 測試 binary 會 OOM）。
@@ -90,6 +91,10 @@ fn picking_a_png_adds_it_to_the_composer(cx: &mut TestAppContext) {
     assert!(!cx.did_prompt_for_paths(), "按之前沒有對話框");
     click_pick(&mut cx);
     assert!(cx.did_prompt_for_paths(), "按下按鈕要開系統檔案對話框");
+    assert!(
+        cx.update(|_, cx| view.read(cx).pick_pending),
+        "對話框開著時要記住，避免連點再開一個"
+    );
 
     cx.simulate_path_prompt_response(move |options| {
         assert!(options.files, "要能選檔案");
@@ -120,6 +125,10 @@ fn picking_a_png_adds_it_to_the_composer(cx: &mut TestAppContext) {
         assert_eq!(app.composer.read(cx).value().as_ref(), "");
     });
     assert!(!cx.did_prompt_for_paths(), "回覆之後對話框就結束了");
+    assert!(
+        !cx.update(|_, cx| view.read(cx).pick_pending),
+        "回覆之後要放掉守衛，否則按鈕再也開不了對話框"
+    );
 }
 
 #[gpui::test]
@@ -187,6 +196,7 @@ fn the_fifth_pick_is_rejected_but_the_first_four_stay(cx: &mut TestAppContext) {
         assert_eq!(pending.len(), 4, "只收前 4 張");
         let error = pending.error.as_deref().unwrap_or_default();
         assert!(error.contains("最多 4 張"), "要說清楚為什麼沒收：{error}");
+        assert!(error.contains("4.png"), "要說出是哪個檔案沒收：{error}");
     });
 }
 
