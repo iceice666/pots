@@ -830,12 +830,20 @@ impl PotsApp {
                         .py(px(10.))
                         .rounded(px(6.))
                         .bg(theme::subtle_bg())
-                        .text_size(px(13.))
-                        .line_height(relative(1.6))
-                        // 刻意維持純文字：這是使用者在表單裡填的模板原文（會原樣接上事件
-                        // 內容變成 Goal brief），可能含 `{{…}}`、縮排與其他非常規語法；
-                        // 顯示「你填的原樣」比渲染重要，依「寧可少改不可丟字」保守處理。
-                        .child(t),
+                        // 模板會原文接上事件內容變成 Goal brief，本身就是 Markdown。
+                        // 原本擔心 `{{…}}`、底線識別字之類的非常規語法會整段消失；實測
+                        // （`markdown 1.0.0` 的 `to_mdast`，與 gpui-base 用的是同一套解析器）
+                        // `{{"kind": …}}`、`legacy_login`、`a_b_c` 都解析成純文字節點，
+                        // 不會丟字。殘餘風險只有行內 raw HTML（`<span>` 這類未支援的標籤
+                        // 在行內層會被丟掉），使用者自己寫模板時少見，已在 PR 說明。
+                        .child(
+                            agent_text(
+                                SharedString::from(format!("listener-template-{}", id.0)),
+                                t,
+                            )
+                            .text_size(px(13.))
+                            .line_height(relative(1.6)),
+                        ),
                 )
             })
             .child(kv(
