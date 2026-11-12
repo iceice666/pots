@@ -1,5 +1,6 @@
-//! The main workspace view: top bar, sidebar, channel header, message list,
-//! composer, and the Discord-style thread panel.
+//! The main workspace view: top bar, sidebar, channel header, the channel's
+//! tabs (its messages and its artifacts), message list, composer, and the
+//! Discord-style thread panel.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -14,14 +15,15 @@ use gpui::{
 };
 
 use pots_agent::agent::{self, Agents};
-use pots_agent::data::{self, Card, Conv, MergeOutcome, Message, UserKind, Workspace};
+use pots_agent::data::{self, ArtifactContent, ArtifactKind, Card, Conv, MergeOutcome, Message, UserKind, Workspace};
 use pots_agent::markdown::{self, Sep};
 use pots_agent::reply::{Host, Outcome, blocking};
 use pots_agent::search::{Hit, MessageHit};
 use pots_agent::{sandbox, store};
 use pots_llm::Usage;
-use pots_llm::cost::{self, Catalog};
+use pots_llm::cost;
 
+use crate::artifact::{self, ArtifactFrame, FrameEvent};
 use crate::composer::{self, Composer, ComposerEvent};
 use crate::selection::{Pos, Selection, SharedSelection};
 use crate::settings::{Settings, SettingsEvent};
@@ -102,6 +104,15 @@ struct Search {
     scroll: ScrollHandle,
 }
 
+/// What the main column shows under the channel header.
+enum MainView {
+    Messages,
+    /// An artifact of the channel, in its frame.
+    Artifact { frame: Entity<ArtifactFrame>, _subscription: Subscription },
+    /// An artifact whose file couldn't be read: its error, not an editor.
+    Unreadable(usize),
+}
+
 /// The channel dialog: creating a channel, or editing channel `editing`.
 struct ChannelDialog {
     editing: Option<usize>,
@@ -137,6 +148,13 @@ pub struct ChatApp {
     channel_repo: Entity<Composer>,
     /// The workspace menu (under the workspace name) is open.
     menu: bool,
+    view: MainView,
+    /// The menu of kinds under the tabs' "+" is open.
+    new_artifact_menu: bool,
+    /// The artifact whose deletion is waiting to be confirmed.
+    confirm_delete: Option<usize>,
+    /// Held by the delete confirmation, so Escape reaches it.
+    confirm_focus: FocusHandle,
     settings: Option<(Entity<Settings>, Subscription)>,
     /// Id of the channel message the mouse is over; it shows the action bar.
     hovered: Option<usize>,
@@ -242,6 +260,10 @@ impl ChatApp {
             channel_topic,
             channel_repo,
             menu: false,
+            view: MainView::Messages,
+            new_artifact_menu: false,
+            confirm_delete: None,
+            confirm_focus: cx.focus_handle(),
             settings: None,
             hovered: None,
             search_box,
@@ -250,11 +272,23 @@ impl ChatApp {
             highlight_seq: 0,
             _subscriptions: subscriptions,
         };
+        // An edit still waiting to be saved isn't lost by quitting.
+        this._subscriptions.push(cx.on_app_quit(|this, cx| {
+            if let MainView::Artifact { frame, .. } = &this.view {
+                let frame = frame.clone();
+                if let Some(content) = frame.update(cx, |f, cx| f.unsaved(cx)) {
+                    this.save_artifact(frame.read(cx).id, content);
+                }
+            }
+            async {}
+        }));
         this.select_channel(active, window, cx);
         this.save();
-        // Model prices, for showing what replies cost.
+        // Model prices, for showing what replies cost. Not in tests: it runs
+        // on a thread of its own, which gpui's test scheduler won't allow.
+        #[cfg(not(test))]
         cx.spawn(async move |this, cx| {
-            match blocking(|| Catalog::load(&store::home())).await.and_then(|r| r) {
+            match blocking(|| cost::Catalog::load(&store::home())).await.and_then(|r| r) {
                 Ok(catalog) => this.update(cx, |app, _| app.agents.catalog = Some(std::sync::Arc::new(catalog))).ok(),
                 Err(e) => Some(eprintln!("pots: no model prices: {e}")),
             };
@@ -346,6 +380,8 @@ impl ChatApp {
     }
 
     fn select_channel(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // Going to a channel (again) shows its messages.
+        self.show_messages(window, cx);
         self.active = ix;
         self.hovered = None;
         self.highlight = None;
@@ -591,6 +627,130 @@ impl ChatApp {
         self.dialog = None;
         self.save();
         self.select_channel(c, window, cx);
+    }
+
+    // --- artifacts -------------------------------------------------------
+
+    /// Keep an artifact's content, and write it to its file.
+    fn save_artifact(&mut self, id: usize, content: ArtifactContent) {
+        if self.persist {
+            if let Err(e) = store::save_artifact(id, &content) {
+                eprintln!("pots: couldn't save artifact {id}: {e}");
+            }
+        }
+        if let Some(a) = self.ws.artifact_mut(id) {
+            a.content = Some(content);
+        }
+    }
+
+    /// Back to the channel's messages, saving the artifact that was open.
+    fn show_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_artifact_menu = false;
+        if let MainView::Artifact { frame, .. } = std::mem::replace(&mut self.view, MainView::Messages) {
+            if let Some(content) = frame.update(cx, |f, cx| f.flush(window, cx)) {
+                self.save_artifact(frame.read(cx).id, content);
+            }
+            window.focus(&self.composer.read(cx).focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+
+    fn open_artifact(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_artifact_menu = false;
+        if matches!(&self.view, MainView::Artifact { frame: f, .. } if f.read(cx).id == id) {
+            return;
+        }
+        self.show_messages(window, cx);
+        let Some(a) = self.ws.artifact(id) else { return };
+        let Some(content) = a.content.clone() else {
+            self.view = MainView::Unreadable(id);
+            return cx.notify();
+        };
+        let title = a.title.clone();
+        let frame = cx.new(|cx| ArtifactFrame::new(id, title, content, window, cx));
+        let sub = cx.subscribe_in(&frame, window, |this, frame, event: &FrameEvent, window, cx| {
+            let id = frame.read(cx).id;
+            match event {
+                FrameEvent::Save(content) => this.save_artifact(id, content.clone()),
+                FrameEvent::Rename(title) => {
+                    if let Some(title) = this.ws.rename_artifact(id, title) {
+                        frame.update(cx, |f, cx| f.set_title(title, cx));
+                        this.save();
+                        cx.notify();
+                    }
+                }
+                FrameEvent::Delete => this.ask_delete_artifact(id, window, cx),
+                FrameEvent::Close => this.show_messages(window, cx),
+            }
+        });
+        frame.update(cx, |f, cx| f.focus_editor(window, cx));
+        self.view = MainView::Artifact { frame, _subscription: sub };
+        cx.notify();
+    }
+
+    fn open_artifact_id(&self, cx: &gpui::App) -> Option<usize> {
+        match &self.view {
+            MainView::Messages => None,
+            MainView::Artifact { frame, .. } => Some(frame.read(cx).id),
+            MainView::Unreadable(id) => Some(*id),
+        }
+    }
+
+    /// Open artifact `id` with its title ready to be renamed.
+    fn rename_artifact(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_artifact(id, window, cx);
+        if let MainView::Artifact { frame, .. } = &self.view {
+            frame.update(cx, |f, cx| f.start_rename(window, cx));
+        }
+    }
+
+    /// A new artifact of `kind` in the channel, opened to be named.
+    fn create_artifact(&mut self, kind: ArtifactKind, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.ws.add_artifact(self.active, kind);
+        // Its file first: a workspace listing it is never saved without it.
+        if let Some(content) = self.ws.artifact(id).and_then(|a| a.content.clone()) {
+            self.save_artifact(id, content);
+        }
+        self.save();
+        self.rename_artifact(id, window, cx);
+    }
+
+    fn toggle_new_artifact_menu(&mut self, cx: &mut Context<Self>) {
+        self.new_artifact_menu = !self.new_artifact_menu;
+        cx.notify();
+    }
+
+    fn ask_delete_artifact(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_delete = Some(id);
+        window.focus(&self.confirm_focus, cx);
+        cx.notify();
+    }
+
+    fn cancel_delete_artifact(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_delete = None;
+        match &self.view {
+            MainView::Artifact { frame, .. } => frame.update(cx, |f, cx| f.focus_editor(window, cx)),
+            _ => window.focus(&self.composer.read(cx).focus_handle(cx), cx),
+        }
+        cx.notify();
+    }
+
+    fn delete_artifact(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.confirm_delete.take() else { return };
+        if self.open_artifact_id(cx) == Some(id) {
+            // Nothing left to save: drop the frame without flushing it.
+            self.view = MainView::Messages;
+            window.focus(&self.composer.read(cx).focus_handle(cx), cx);
+        }
+        if self.ws.remove_artifact(id).is_some() {
+            if self.persist {
+                if let Err(e) = store::delete_artifact(id) {
+                    eprintln!("pots: couldn't delete artifact {id}'s file: {e}");
+                }
+            }
+            self.save();
+        }
+        cx.notify();
     }
 
     // --- settings --------------------------------------------------------
@@ -1900,6 +2060,241 @@ impl ChatApp {
             )
     }
 
+    /// The channel's tabs, under its header: its messages, then each of its
+    /// artifacts, then "+" to make one.
+    fn render_tabs(&self, cx: &Context<Self>) -> impl IntoElement {
+        let open = self.open_artifact_id(cx);
+        let tab = |id: gpui::ElementId, selected: bool| {
+            div()
+                .id(id)
+                .flex_none()
+                .max_w(px(220.))
+                .h_full()
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .border_b_2()
+                .map(|d| match selected {
+                    true => d.border_color(theme::link()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD),
+                    false => d.border_color(gpui::transparent_black()).text_color(theme::muted()).hover(|s| s.text_color(theme::text())),
+                })
+        };
+        let artifacts = self.ws.channel_artifacts(self.active).into_iter().filter_map(|id| {
+            let a = self.ws.artifact(id)?;
+            let broken = a.load_error.is_some();
+            Some(
+                tab(("artifact-tab", id).into(), open == Some(id))
+                    .child(div().flex_none().child(if broken { "⚠" } else { artifact::icon(a.kind) }))
+                    .child(div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(a.title.clone()))
+                    .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
+                        if e.click_count() == 2 {
+                            this.rename_artifact(id, window, cx);
+                        } else {
+                            this.open_artifact(id, window, cx);
+                        }
+                    })),
+            )
+        });
+        div()
+            .h(px(34.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                tab("messages-tab".into(), open.is_none())
+                    .child("Messages")
+                    .on_click(cx.listener(|this, _, window, cx| this.show_messages(window, cx))),
+            )
+            .children(artifacts)
+            .child(
+                div()
+                    .id("new-artifact")
+                    .relative()
+                    .flex_none()
+                    .size(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(16.))
+                    .text_color(theme::muted())
+                    .hover(|s| s.bg(theme::reaction_bg()).text_color(theme::text()))
+                    .when(self.new_artifact_menu, |d| d.bg(theme::reaction_bg()))
+                    .tooltip(|_, cx| Tooltip::view("New artifact", cx))
+                    .child("+")
+                    // While the menu is open, a press anywhere outside it
+                    // (this button too) closes it; a click here would reopen it.
+                    .when(!self.new_artifact_menu, |d| {
+                        d.on_click(cx.listener(|this, _, _, cx| this.toggle_new_artifact_menu(cx)))
+                    })
+                    .when(self.new_artifact_menu, |d| d.child(self.render_new_artifact_menu(cx))),
+            )
+    }
+
+    /// The kinds of artifact the tabs' "+" can make.
+    fn render_new_artifact_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .id("new-artifact-menu")
+            .absolute()
+            .top(px(28.))
+            .left_0()
+            .w(px(200.))
+            .py_1()
+            .flex()
+            .flex_col()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::bg())
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.new_artifact_menu = false;
+                cx.notify();
+            }))
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .children(ArtifactKind::ALL.iter().map(|&kind| {
+                div()
+                    .id(("new-artifact-kind", kind as usize))
+                    .mx_1()
+                    .px_2()
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(14.))
+                    .text_color(theme::text())
+                    .hover(|s| s.bg(theme::sidebar_selected()).text_color(gpui::white()))
+                    .child(artifact::icon(kind))
+                    .child(kind.label())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.create_artifact(kind, window, cx);
+                    }))
+            }))
+    }
+
+    /// In place of an artifact whose file couldn't be read.
+    fn render_unreadable(&self, id: usize, cx: &Context<Self>) -> impl IntoElement {
+        let (title, error) = match self.ws.artifact(id) {
+            Some(a) => (a.title.clone(), a.load_error.clone().unwrap_or_default()),
+            None => (String::new(), String::new()),
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_6()
+            .child(div().text_size(px(18.)).font_weight(FontWeight::BOLD).child(format!("Couldn't open “{title}”")))
+            .child(div().text_size(px(14.)).text_color(theme::error()).child(error))
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(theme::muted())
+                    .child("Pots won't write over the file. Fix it and restart Pots, or delete the artifact."),
+            )
+            .child(
+                div()
+                    .id("unreadable-delete")
+                    .flex_none()
+                    .w_auto()
+                    .self_start()
+                    .px_4()
+                    .py(px(6.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_size(px(14.))
+                    .hover(|s| s.bg(theme::hover()))
+                    .child("Delete…")
+                    .on_click(cx.listener(move |this, _, window, cx| this.ask_delete_artifact(id, window, cx))),
+            )
+    }
+
+    /// "Delete this artifact?", over everything else.
+    fn render_delete_dialog(&self, id: usize, cx: &Context<Self>) -> impl IntoElement {
+        let (title, kind) = match self.ws.artifact(id) {
+            Some(a) => (a.title.clone(), a.kind.label().to_lowercase()),
+            None => (String::new(), String::new()),
+        };
+        let button = |id: &'static str, text: &'static str, danger: bool| {
+            div()
+                .id(id)
+                .px_4()
+                .py(px(6.))
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(14.))
+                .font_weight(FontWeight::BOLD)
+                .map(|d| match danger {
+                    true => d.bg(theme::error()).text_color(gpui::white()).hover(|s| s.opacity(0.9)),
+                    false => d.border_1().border_color(theme::border()).hover(|s| s.bg(theme::hover())),
+                })
+                .child(text)
+        };
+        div()
+            .id("delete-artifact-dialog")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::black().opacity(0.4))
+            .occlude()
+            .child(
+                div()
+                    .id("delete-artifact-box")
+                    .w(px(420.))
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_6()
+                    .rounded_lg()
+                    .bg(theme::bg())
+                    .shadow_lg()
+                    .track_focus(&self.confirm_focus)
+                    .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "escape" {
+                            this.cancel_delete_artifact(window, cx);
+                        }
+                    }))
+                    .child(div().text_size(px(20.)).font_weight(FontWeight::BOLD).child(format!("Delete “{title}”?")))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(theme::muted())
+                            .child(format!("The {kind} and everything in it will be gone. This can't be undone.")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                button("delete-artifact-cancel", "Cancel", false)
+                                    .on_click(cx.listener(|this, _, window, cx| this.cancel_delete_artifact(window, cx))),
+                            )
+                            .child(
+                                button("delete-artifact-confirm", "Delete", true)
+                                    .on_click(cx.listener(|this, _, window, cx| this.delete_artifact(window, cx))),
+                            ),
+                    ),
+            )
+    }
+
     /// A selectable message list with its key and mouse handling.
     fn render_pane(&self, id: PaneId, cx: &Context<Self>) -> impl IntoElement {
         let pane = self.pane(id);
@@ -2772,6 +3167,11 @@ fn badge(kind: UserKind) -> Option<&'static str> {
 
 struct Tooltip(SharedString);
 
+/// A tooltip in the app's style, for other views.
+pub(crate) fn tooltip(text: &'static str, cx: &mut gpui::App) -> AnyView {
+    Tooltip::view(text, cx)
+}
+
 impl Tooltip {
     fn view(text: &'static str, cx: &mut gpui::App) -> AnyView {
         cx.new(|_| Tooltip(text.into())).into()
@@ -2836,6 +3236,19 @@ impl Render for ChatApp {
         let menu = self.menu.then(|| self.render_menu(cx));
         let settings = self.settings.as_ref().map(|(s, _)| s.clone());
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
+        let delete = self.confirm_delete.map(|id| self.render_delete_dialog(id, cx));
+        let main = match &self.view {
+            MainView::Messages => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(self.render_pane(PaneId::Main, cx))
+                .child(div().flex_none().px_5().pb_5().child(self.composer.clone()))
+                .into_any_element(),
+            MainView::Artifact { frame, .. } => frame.clone().into_any_element(),
+            MainView::Unreadable(id) => self.render_unreadable(*id, cx).into_any_element(),
+        };
         div()
             .relative()
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
@@ -2859,13 +3272,14 @@ impl Render for ChatApp {
                             .flex()
                             .flex_col()
                             .child(self.render_header(cx))
-                            .child(self.render_pane(PaneId::Main, cx))
-                            .child(div().flex_none().px_5().pb_5().child(self.composer.clone())),
+                            .child(self.render_tabs(cx))
+                            .child(main),
                     )
                     .children(panel),
             )
             .children(search)
             .children(dialog)
+            .children(delete)
             .children(menu)
             .children(settings)
     }
@@ -2911,6 +3325,98 @@ fn selection_text(ws: &Workspace, messages: &[&Message], start: Pos, end: Pos) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The app in mock mode (seed data, nothing saved) in a test window,
+    /// with its data directory in a temporary folder.
+    fn mock_app(cx: &mut gpui::TestAppContext) -> (Entity<ChatApp>, &mut gpui::VisualTestContext) {
+        let home = std::env::temp_dir().join(format!("pots-ui-test-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: the only test in this binary that reads or writes the environment.
+        unsafe { std::env::set_var("POTS_HOME", &home) };
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            composer::bind_keys(cx);
+            bind_keys(cx);
+            crate::table_editor::bind_keys(cx);
+        });
+        let (app, cx) = cx.add_window_view(|window, cx| ChatApp::new(true, window, cx));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (app, cx)
+    }
+
+    fn draw(cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+
+    fn cell(app: &Entity<ChatApp>, id: usize, row: usize, cx: &mut gpui::VisualTestContext) -> String {
+        app.read_with(cx, |app, _| match &app.ws.artifact(id).unwrap().content {
+            Some(ArtifactContent::Table(t)) => t.cell(row, 0).to_string(),
+            None => panic!("no content"),
+        })
+    }
+
+    #[gpui::test]
+    fn a_table_is_made_named_edited_kept_and_deleted(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = mock_app(cx);
+        draw(cx);
+
+        app.update_in(cx, |app, window, cx| app.create_artifact(ArtifactKind::Table, window, cx));
+        draw(cx);
+        let (id, channel) = app.read_with(cx, |app, cx| (app.open_artifact_id(cx).unwrap(), app.active));
+        assert_eq!(app.read_with(cx, |app, _| app.ws.channel_artifacts(channel)), [id]);
+
+        // It opens with its title selected, to be typed over.
+        cx.simulate_input("Budget");
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert_eq!(app.read_with(cx, |app, _| app.ws.artifact(id).unwrap().title.clone()), "Budget");
+
+        // Then the table has the keyboard: type in the first cell.
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("42");
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert_eq!(cell(&app, id, 0, cx), "", "saved once edits settle, not on every one");
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(cell(&app, id, 0, cx), "42");
+
+        // An edit still in progress (in the row below, where Enter moved)
+        // is kept when going back to the messages.
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("43");
+        app.update_in(cx, |app, window, cx| app.show_messages(window, cx));
+        draw(cx);
+        assert_eq!(cell(&app, id, 1, cx), "43");
+        assert!(app.read_with(cx, |app, cx| app.open_artifact_id(cx).is_none()));
+
+        // Reopened, it shows what was saved; another channel closes it.
+        app.update_in(cx, |app, window, cx| app.open_artifact(id, window, cx));
+        draw(cx);
+        let other = app.read_with(cx, |app, _| app.ws.find_channel("general").unwrap());
+        app.update_in(cx, |app, window, cx| app.select_channel(other, window, cx));
+        draw(cx);
+        assert!(app.read_with(cx, |app, cx| app.open_artifact_id(cx).is_none()));
+        app.update_in(cx, |app, window, cx| {
+            app.select_channel(channel, window, cx);
+            app.open_artifact(id, window, cx);
+        });
+        draw(cx);
+
+        // Deleting asks first; Escape keeps it.
+        app.update_in(cx, |app, window, cx| app.ask_delete_artifact(id, window, cx));
+        draw(cx);
+        cx.simulate_keystrokes("escape");
+        assert!(app.read_with(cx, |app, _| app.confirm_delete.is_none() && app.ws.artifact(id).is_some()));
+        app.update_in(cx, |app, window, cx| {
+            app.ask_delete_artifact(id, window, cx);
+            app.delete_artifact(window, cx);
+        });
+        draw(cx);
+        assert!(app.read_with(cx, |app, cx| app.ws.artifact(id).is_none() && app.open_artifact_id(cx).is_none()));
+    }
 
     fn pos(msg: usize, frag: usize, offset: usize) -> Pos {
         Pos { msg, frag, offset }

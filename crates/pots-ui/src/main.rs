@@ -15,11 +15,13 @@ macro_rules! secondary {
     }};
 }
 
+mod artifact;
 mod chat;
 mod composer;
 mod render_md;
 mod selection;
 mod settings;
+mod table_editor;
 mod theme;
 
 use gpui::{
@@ -58,6 +60,7 @@ fn main() {
         theme::install_component_theme(cx);
         composer::bind_keys(cx);
         chat::bind_keys(cx);
+        table_editor::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| cx.quit()).detach();
