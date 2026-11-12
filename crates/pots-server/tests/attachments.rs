@@ -7,8 +7,8 @@ use std::path::Path;
 use common::{TestServer, auth_headers, http_get, http_post};
 use pots_llm::testing::ScriptedTurn;
 use pots_proto::{
-    AttachmentId, AttachmentView, ClientCommand, ItemId, ProjectId, SendMode, ServerEvent,
-    StreamItemKind, StreamItemView, MAX_ATTACHMENT_BYTES,
+    AttachmentId, AttachmentView, ClientCommand, ItemId, MAX_ATTACHMENT_BYTES, ProjectId, SendMode,
+    ServerEvent, StreamItemKind, StreamItemView,
 };
 
 /// 一張最小的 PNG（`image` 編出來的），內容不同時 sha256 也不同。
@@ -96,7 +96,11 @@ async fn upload_dedups_by_sha256() {
     // 同一張圖再傳一次：回同一個 id，只落地一份。
     let second = upload_ok(&srv, project, "image/png", Some("copy.png"), &bytes).await;
     assert_eq!(second.id, first.id);
-    assert_eq!(second.filename.as_deref(), Some("cat.png"), "去重時保留第一次的檔名");
+    assert_eq!(
+        second.filename.as_deref(),
+        Some("cat.png"),
+        "去重時保留第一次的檔名"
+    );
     let files = stored_files(tmp.path());
     assert_eq!(files.len(), 1, "同圖只落地一份：{files:?}");
 
@@ -214,7 +218,10 @@ async fn message_carries_only_metadata() {
     let stored = items.iter().find(|i| i.id == id).expect("訊息沒有落庫");
     let json = serde_json::to_string(stored).unwrap();
     assert!(!json.contains("base64"), "{json}");
-    assert!(!json.contains("iVBORw0KGgo"), "PNG 的 base64 前綴不該出現：{json}");
+    assert!(
+        !json.contains("iVBORw0KGgo"),
+        "PNG 的 base64 前綴不該出現：{json}"
+    );
     assert_eq!(json.matches(a.id.to_string().as_str()).count(), 1);
 
     srv.stop().await;
@@ -234,7 +241,11 @@ async fn send_validates_attachment_list() {
     // 超過 4 張被拒。
     let mut many = vec![a.id, b.id];
     for seed in 10..13 {
-        many.push(upload_ok(&srv, project, "image/png", None, &png(2, 2, seed)).await.id);
+        many.push(
+            upload_ok(&srv, project, "image/png", None, &png(2, 2, seed))
+                .await
+                .id,
+        );
     }
     c.send(&ClientCommand::Send {
         project,

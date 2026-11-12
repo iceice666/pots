@@ -2,10 +2,10 @@
 //! 被拒絕或失敗時只回給發出指令的連線一個 `Error`。
 
 use pots_proto::{
-    AgentState, ArtifactId, ArtifactKind, AttachmentId, Author, Card, ClientCommand, GoalId, ItemId,
-    MAX_ATTACHMENTS_PER_MSG, Msg, MsgStatus, ProjectId, ProjectSnapshot, SendMode, ServerEvent,
-    StreamItemKind, StreamItemView, StreamScope, TaskDiffView, TaskId, TaskRunView, TaskTraceView,
-    Timestamp, TraceStepView, WhyView, WorkDir,
+    AgentState, ArtifactId, ArtifactKind, AttachmentId, Author, Card, ClientCommand, GoalId,
+    ItemId, MAX_ATTACHMENTS_PER_MSG, Msg, MsgStatus, ProjectId, ProjectSnapshot, SendMode,
+    ServerEvent, StreamItemKind, StreamItemView, StreamScope, TaskDiffView, TaskId, TaskRunView,
+    TaskTraceView, Timestamp, TraceStepView, WhyView, WorkDir,
 };
 use tokio::sync::mpsc;
 

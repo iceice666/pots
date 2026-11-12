@@ -3113,7 +3113,8 @@ mod tests {
             mode: SendMode::Queue,
             attachments: vec![AttachmentId::from_u64(7), AttachmentId::from_u64(8)],
         };
-        let back: ClientCommand = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        let back: ClientCommand =
+            serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
         assert!(matches!(
             back,
             ClientCommand::Send { attachments, .. }

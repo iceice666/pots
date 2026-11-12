@@ -106,7 +106,7 @@ pub async fn upload(
 
     let mut txn = store.begin().await?;
     // 已經上傳過（去重）：回原本那一列，只補寫本體。
-    if let Some(row) = Store::attachment_by_sha(&mut *txn, project, &sha256).await? {
+    if let Some(row) = Store::attachment_by_sha(&mut txn, project, &sha256).await? {
         if !path.is_file() {
             write_body(data_dir, &sha256, bytes).await?;
         }
@@ -125,9 +125,9 @@ pub async fn upload(
         filename,
         created_at: Timestamp::now(),
     };
-    Store::insert_attachment(&mut *txn, &row).await?;
+    Store::insert_attachment(&mut txn, &row).await?;
     // 同時上傳同一張圖時另一條 transaction 可能先寫進去，讀回來的那一列才是準的。
-    let row = Store::attachment_by_sha(&mut *txn, project, &sha256)
+    let row = Store::attachment_by_sha(&mut txn, project, &sha256)
         .await?
         .unwrap_or(row);
     txn.commit().await?;
@@ -173,7 +173,12 @@ fn view(row: &AttachmentRow) -> AttachmentView {
 
 /// 去掉 `; charset=...` 之類的參數並轉小寫；沒給時當成 `application/octet-stream`。
 fn normalize_mime(mime: &str) -> String {
-    let base = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let base = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     if base.is_empty() {
         "application/octet-stream".into()
     } else if base == "image/jpg" {
