@@ -554,7 +554,7 @@ mod shots {
         });
         s.shot("18b-live-worker");
 
-        // 頻道「自動化」分頁：監看 repo；agent 建立排程，對話裡出現卡片。
+        // 「專案設定」：監看 repo；agent 建立排程，對話裡出現卡片。
         s.update(|app, window, cx| {
             app.close_settings(cx);
             app.open_panel(None, cx);
@@ -576,9 +576,13 @@ mod shots {
             }) && app.current_instance().schedules.len() == 1
         });
         s.update(|app, _, cx| {
+            app.open_panel(Some(Panel::ProjectSettings), cx);
+        });
+        s.shot("19-live-project-settings");
+        s.update(|app, _, cx| {
             app.open_panel(Some(Panel::Automations), cx);
         });
-        s.shot("19-live-project-automations");
+        s.shot("19a-live-project-automations");
 
         // 自動化頁：新增「issue 加上 agent label → 開 Goal」的 listener。
         s.update(|app, window, cx| {
@@ -1025,7 +1029,9 @@ mod shots {
             app.toggle_panel(Panel::Automations, cx);
         });
         s.shot("10-channel-automations");
-        // 「環境」區塊：展開使用中的規格；打開「重新分析」的表單；換成第 1 版。
+        // 「專案設定」的「環境」區塊：展開使用中的規格；打開「重新分析」的表單；換成第 1 版。
+        s.update(|app, _, cx| app.toggle_panel(Panel::ProjectSettings, cx));
+        s.shot("10-channel-project-settings");
         s.update(|app, _, cx| {
             let auth = app.current_project().unwrap().id;
             assert_eq!(app.current_project().unwrap().env.current, Some(2));
@@ -1068,6 +1074,7 @@ mod shots {
             cx.notify();
         });
         s.update(|app, _, cx| {
+            app.toggle_panel(Panel::Automations, cx);
             let auth = app.current_project().unwrap().id;
             let schedule = app
                 .current_instance()

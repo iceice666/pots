@@ -1,7 +1,7 @@
 //! 設定視窗的「Worker」類別：coding worker 的後端（內建或 Claude Code）、容器執行檔與
 //! image、Claude Code 的模型、同時執行的 worker 數，以及登入 Claude Code 的指令。worker
 //! 一律在容器裡執行（沒有本機模式）；project 有「環境」時改用環境建出的 image（見頻道的
-//! 「自動化」分頁）。
+//! 「專案設定」）。
 //!
 //! 「儲存」送 `SaveWorkerSettings`；服務回 `Worker` 時收起表單，被拒絕時（`Error`）原因留在
 //! 表單裡（見 `automation_forms::Forms`）。設定只影響之後開始的任務。
@@ -235,7 +235,7 @@ impl PotsApp {
                 .child(self.command_box("image", IMAGE_BUILD_COMMAND.to_string(), cx))
                 .child(muted_text(
                     "project 建立了「環境」時，worker 改用環境以這個 image 為基底建出的 image\
-                     （在頻道的「自動化」分頁管理）。",
+                     （在頻道的「專案設定」管理）。",
                 )),
         )
     }

@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | 數量 | 每個 project 最多一個；未設定時 worker 不派工 | 零到多個 |
 | 語意 | 程式碼在哪、worker 在哪裡改 | 哪些外部事件要收進來 |
-| 設定位置 | 新增專案精靈、頻道提示／自動化分頁、對話 agent 的 `set_workdir` | 自動化分頁 |
+| 設定位置 | 新增專案精靈、頻道提示／「專案設定」、對話 agent 的 `set_workdir` | 「專案設定」 |
 | 影響 | 派工、任務分支、核准與套用 | connector、subscription、listener、喚醒 |
 | 協定 | `WorkDir`、`ProjectWorkdir` | 既有的 `SetProjectRepos`、`ProjectRepos` |
 
@@ -70,7 +70,7 @@ pub enum WorkDir {
 ## Onboarding 三步
 
 1. **新增專案精靈。** 名稱之外選 GitHub repo 或本機資料夾，也可以「稍後再設定」。`CreateProject { name, workdir }` 在寫入前驗證；錯誤直接顯示在對話框，不建立空 project。
-2. **未設定提示。** 沒有工作資料夾的 project 在頻道顯示提示橫幅，按「設定」打開同一個對話框補上；自動化分頁也能改。這段期間 Goal 與任務仍可建立，但任務只記在任務樹上、不派工；Planner 的 `create_task` 與對話都會說明原因。
+2. **未設定提示。** 沒有工作資料夾的 project 在頻道顯示提示橫幅，按「設定」打開同一個對話框補上；頻道的「專案設定」也能改。這段期間 Goal 與任務仍可建立，但任務只記在任務樹上、不派工；Planner 的 `create_task` 與對話都會說明原因。
 3. **對話 agent 的 `set_workdir`。** 使用者說「用這個 repo」或「在這個資料夾工作」時，對話 agent 以 `kind = github|local` 設定；和人類指令共用驗證。成功後寫入 `projects.workdir_kind`／`workdir`、送出 `ProjectWorkdir`，並在回覆與 instructions 說明 worker 實際在哪工作。
 
 對話、Planner 與 worker 的 instructions 都有「工作資料夾」段落：對話與 Planner 知道程式碼在哪、沒有設定時要先問；worker 知道自己改的是平台副本，以及本機資料夾沒有 PR 與 CI。`create_task` 的舊 `repo` 參數保留，但只能是同一個工作資料夾。
@@ -93,7 +93,7 @@ ApprovalActionView::ApplyChanges { path: String, branch: String, base: String, s
 
 ## 既有 project
 
-M9 之前的 project 沒有 `WorkDir`：任務只記在任務樹上、不派工，頻道提示與自動化分頁的「設定」可以補上。原本「監看的 repo」同時被當成工作位置，M9 起不再自動派工——寧可停下來要求設定，也不要讓 worker 在使用者沒有確認過的 repo 上改 code。
+M9 之前的 project 沒有 `WorkDir`：任務只記在任務樹上、不派工，頻道提示與「專案設定」的「設定」可以補上。原本「監看的 repo」同時被當成工作位置，M9 起不再自動派工——寧可停下來要求設定，也不要讓 worker 在使用者沒有確認過的 repo 上改 code。
 
 ## 已知限制
 
@@ -110,7 +110,7 @@ M9 之前的 project 沒有 `WorkDir`：任務只記在任務樹上、不派工�
 
 ## 待確認
 
-- 精靈與提示的文案、錯誤訊息是否足夠清楚；目前允許「稍後再設定」，頻道提示與自動化分頁都能補，需實際走一次 onboarding 驗證。
+- 精靈與提示的文案、錯誤訊息是否足夠清楚；目前允許「稍後再設定」，頻道提示與「專案設定」都能補，需實際走一次 onboarding 驗證。
 - 多設備版的「本機資料夾」是伺服器主機上的路徑，不是手機或桌面客戶端的路徑；遠端實例要怎麼呈現與授權。
 - 有衝突而套用失敗後的引導：直接顯示衝突的 commit，或提供「讓 worker 在最新的分支上重做」的按鈕。
 - 本機資料夾的 hooks 與 git 設定要不要隔離；目前沿用使用者自己的環境。

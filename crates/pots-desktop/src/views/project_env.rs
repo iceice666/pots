@@ -1,4 +1,4 @@
-//! 頻道「自動化」分頁的「環境」區塊：project 的 worker 環境（環境 worker 分析 repo 後寫出、
+//! 右欄「專案設定」的「環境」區塊：project 的 worker 環境（環境 worker 分析 repo 後寫出、
 //! 驗證過才套用的 [`EnvSpec`]）。
 //!
 //! 看得到使用中的版本與它的規格、版本歷史；「分析並建立環境」送 `SetupProjectEnv`（可以附一段

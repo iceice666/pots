@@ -1,6 +1,6 @@
 //! 自動化：排程與 listener。
 //!
-//! 左欄「排程」「Listener」進入實例層級的自動化頁，可依專案篩選；頻道的「自動化」分頁
+//! 左欄「排程」「Listener」進入實例層級的自動化頁，可依專案篩選；頻道的「自動化」面板
 //! 顯示同一份資料、只看這個 project（含套用到所有專案的 listener）。點一列在右欄看細節。
 
 use gpui_kit::assets::IconName;
@@ -355,14 +355,13 @@ impl PotsApp {
             .child(body)
     }
 
-    /// 右欄「自動化」：這個 project 的監看設定、環境、排程與 listener。
+    /// 右欄「自動化」：這個 project 的暫停、排程與 listener。監看設定與環境在「專案設定」。
     pub fn render_project_automations(
         &self,
         p: &ProjectView,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let watch = self.render_project_watch(p, cx);
-        let env = self.render_project_env(p, cx);
+        let pause = self.render_project_pause(p, cx);
         let inst = self.current_instance();
         // 空狀態看有沒有資料，不看計數：只剩已結束的排程時表格還是要看得到。
         let nothing = inst.schedules_for(Some(p.id)).count() == 0
@@ -388,10 +387,54 @@ impl PotsApp {
             .flex()
             .flex_col()
             .gap(px(24.))
-            .child(watch)
-            .child(env)
+            .when_some(pause, |d, pause| d.child(pause))
             .children(body)
             .into_any_element()
+    }
+
+    /// 「自動化」面板最上面：暫停或恢復這個 project 的排程與 listener。全部暫停時由
+    /// 下面的橫幅負責，這裡不顯示。
+    fn render_project_pause(&self, p: &ProjectView, cx: &mut Context<Self>) -> Option<Div> {
+        let project = p.id;
+        let inst = self.current_instance();
+        if inst.automation_pause.is_some() || inst.pauses.iter().any(|p| p.project.is_none()) {
+            return None;
+        }
+        let paused = inst.project_paused(project).is_some();
+        Some(
+            white_box().gap(px(8.)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .line_height(relative(1.5))
+                            .text_color(if paused {
+                                theme::warn_text()
+                            } else {
+                                theme::text_muted()
+                            })
+                            .child(if paused {
+                                "這個 project 的排程與 listener 已暫停，期間錯過的觸發不會補跑。"
+                            } else {
+                                "暫停這個 project 的排程與 listener；恢復前錯過的觸發不會補跑。"
+                            }),
+                    )
+                    .child(if paused {
+                        small(secondary_button("project-resume", "恢復自動化")).on_click(
+                            cx.listener(move |this, _, _, cx| this.resume_project(project, cx)),
+                        )
+                    } else {
+                        small(secondary_button("project-pause", "暫停這個 project")).on_click(
+                            cx.listener(move |this, _, _, cx| this.pause_project(project, cx)),
+                        )
+                    }),
+            ),
+        )
     }
 
     /// 暫停橫幅（若有）、排程、listener 三塊，自動化頁的捲動定位依賴這個順序。

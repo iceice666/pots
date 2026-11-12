@@ -292,6 +292,16 @@ impl PotsApp {
                 let body = self.render_project_automations(p, cx);
                 Some(self.list_panel("自動化", count, body, cx))
             }
+            Panel::ProjectSettings => {
+                let p = self.current_project()?;
+                let body = self.render_project_settings(p, cx);
+                Some(
+                    panel_frame()
+                        .child(self.panel_title_header("專案設定", None, cx))
+                        .child(body)
+                        .into_any_element(),
+                )
+            }
             Panel::Memory => {
                 let p = self.current_project()?;
                 let body = self.render_memory_tab(p, cx);
@@ -307,6 +317,16 @@ impl PotsApp {
         count: usize,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.panel_title_header(title, Some(count), cx)
+    }
+
+    /// 右欄的標題列：名稱、數量（沒有就不顯示）與關閉。
+    fn panel_title_header(
+        &self,
+        title: &'static str,
+        count: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             .items_center()
@@ -316,12 +336,14 @@ impl PotsApp {
             .border_b_1()
             .border_color(theme::border())
             .child(div().font_weight(FontWeight::BOLD).child(title))
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(theme::text_muted())
-                    .child(count.to_string()),
-            )
+            .when_some(count, |d, n| {
+                d.child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(theme::text_muted())
+                        .child(n.to_string()),
+                )
+            })
             .child(self.close_button(cx))
     }
 

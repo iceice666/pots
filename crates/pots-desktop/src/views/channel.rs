@@ -89,7 +89,7 @@ impl PotsApp {
             }
         };
         let inst = self.current_instance();
-        // 右欄切換：成員、Goals、Artifacts、自動化、記憶都在右欄開，和「成員」同樣的圖示按鈕。
+        // 右欄切換：成員、Goals、Artifacts、自動化、記憶、專案設定都在右欄開，和「成員」同樣的圖示按鈕。
         let panel_buttons = div()
             .flex()
             .items_center()
@@ -127,6 +127,13 @@ impl PotsApp {
                 IconName::Users,
                 "成員列表".to_string(),
                 Panel::Members,
+                cx,
+            ))
+            .child(self.panel_button(
+                "toggle-project-settings",
+                IconName::Settings2,
+                "專案設定".to_string(),
+                Panel::ProjectSettings,
                 cx,
             ));
 

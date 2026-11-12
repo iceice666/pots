@@ -1,6 +1,6 @@
 //! project 的工作資料夾（`proposal/onboarding.md`）：程式碼在哪、worker 在哪裡改。
 //!
-//! 一個 project 只有一個工作資料夾，和自動化分頁「監看的 repo」（外部事件來源）分開：
+//! 一個 project 只有一個工作資料夾，和「專案設定」的「監看的 repo」（外部事件來源）分開：
 //! - `github.com/owner/repo`：平台維護 bare 鏡像，每個任務一個任務分支，核准後 merge PR。
 //! - 本機的 git repo：平台一樣在鏡像與任務分支上做，核准後由平台把分支套用回這個資料夾。
 //!
@@ -90,12 +90,12 @@ pub fn describe(dir: Option<&WorkDir>) -> String {
             .into(),
         Some(WorkDir::Github { repo }) => format!(
             "GitHub repo {repo}：平台維護自己的鏡像，每個任務在自己的分支上改、開 PR、等 CI，核准後 merge。\
-             這不是你電腦上的資料夾。自動化分頁「監看的 repo」只決定要看哪些事件，和這裡分開。"
+             這不是你電腦上的資料夾。「專案設定」的「監看的 repo」只決定要看哪些事件，和這裡分開。"
         ),
         Some(WorkDir::Local { path }) => format!(
             "本機資料夾 {path}（git repo）：worker 在任務分支上改平台自己的副本，不是你資料夾裡的即時檔案；\
              核准後平台把分支的 commit 線性接到你的分支上（能快轉就快轉，岔開時接到後面；有衝突就不套用）。沒有 PR 與 CI；資料夾有未 commit 的修改時不能套用。\
-             自動化分頁「監看的 repo」只決定要看哪些事件，和這裡分開。"
+             「專案設定」的「監看的 repo」只決定要看哪些事件，和這裡分開。"
         ),
     }
 }

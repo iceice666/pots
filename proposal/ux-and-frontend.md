@@ -28,7 +28,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 ## 桌面客戶端現況
 
-桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）；M4 接上 Goal 面板的任務狀態（執行中、需要決定、完成、失敗）、指派、分支與 PR 連結、worker 的最後一句進度、「重試」、Team 分頁、快速修改的標籤，以及設定的「Worker」類別（後端、執行環境、image、Claude Code 的登入指令）；M5 接上 Inbox 與對話裡的核准卡片（核准、拒絕附理由、看 PR 與提案的 diff）、「需要你處理」的任務、系統通知、設定的「通知」（靜音時段）與「USER.md」類別，以及頻道「自動化」分頁的 merge 方式。M6a 接上總管（live 的全域對話、專案概況與記憶）、每一則 agent 訊息的「為什麼這樣回答」面板（觸發來源、記憶版本、模型、用量與工具順序）、真實的 Goal 預算百分比，以及服務產生的「你不在期間」摘要卡片。協定 v19 接上任務 thread 的「看 diff」（`TaskDiff`：服務從自己的鏡像讀任務分支相對基準分支的改動，不碰 worker 的工作目錄；Inbox 與核准卡片的「看 diff」也開它，本機資料夾的套用因此在核准前看得到改動）與「看 trace」（`TaskTrace`：這個任務每一次 run 的模型說的話與工具呼叫，點一列展開參數與結果），以及 Goal 面板與任務 thread 的留言（`NoteGoal`：Team 分頁記一則你的問題並叫醒 Planner，像改方向；快速修改與環境分析沒有 Planner，不顯示留言框）。任務的耗時由客戶端依開始時間計算，旁邊是任務用掉的 token；內建 worker 說的話與用的工具即時寫成任務的進度（Claude Code 原本就是）。M9 接上 project onboarding 與工作資料夾（進行中）：新增專案改成精靈（名稱加上 GitHub repo 或本機 git repo 的絕對路徑，先驗證再建立，也可以「稍後再設定」），沒設定時頻道顯示提示，按「設定」在同一個對話框補上，自動化分頁也能改；設定後對話 agent 也知道工作資料夾，使用者也可以直接請它用 `set_workdir` 設定。`--mock` 模式用假資料展示其他畫面：實例直列、任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
+桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）；M4 接上 Goal 面板的任務狀態（執行中、需要決定、完成、失敗）、指派、分支與 PR 連結、worker 的最後一句進度、「重試」、Team 分頁、快速修改的標籤，以及設定的「Worker」類別（後端、執行環境、image、Claude Code 的登入指令）；M5 接上 Inbox 與對話裡的核准卡片（核准、拒絕附理由、看 PR 與提案的 diff）、「需要你處理」的任務、系統通知、設定的「通知」（靜音時段）與「USER.md」類別，以及頻道「自動化」分頁的 merge 方式。M6a 接上總管（live 的全域對話、專案概況與記憶）、每一則 agent 訊息的「為什麼這樣回答」面板（觸發來源、記憶版本、模型、用量與工具順序）、真實的 Goal 預算百分比，以及服務產生的「你不在期間」摘要卡片。協定 v19 接上任務 thread 的「看 diff」（`TaskDiff`：服務從自己的鏡像讀任務分支相對基準分支的改動，不碰 worker 的工作目錄；Inbox 與核准卡片的「看 diff」也開它，本機資料夾的套用因此在核准前看得到改動）與「看 trace」（`TaskTrace`：這個任務每一次 run 的模型說的話與工具呼叫，點一列展開參數與結果），以及 Goal 面板與任務 thread 的留言（`NoteGoal`：Team 分頁記一則你的問題並叫醒 Planner，像改方向；快速修改與環境分析沒有 Planner，不顯示留言框）。任務的耗時由客戶端依開始時間計算，旁邊是任務用掉的 token；內建 worker 說的話與用的工具即時寫成任務的進度（Claude Code 原本就是）。M9 接上 project onboarding 與工作資料夾（進行中）：新增專案改成精靈（名稱加上 GitHub repo 或本機 git repo 的絕對路徑，先驗證再建立，也可以「稍後再設定」），沒設定時頻道顯示提示，按「設定」在同一個對話框補上，頻道的「專案設定」也能改；設定後對話 agent 也知道工作資料夾，使用者也可以直接請它用 `set_workdir` 設定。`--mock` 模式用假資料展示其他畫面：實例直列、任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
 
 下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
 
@@ -57,7 +57,7 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 | 記憶 | project 頻道的「記憶」分頁 | 同左 | 觀察紀錄與「目前在做什麼」，可修正、釘選、刪除；整理失敗時顯示原因 |
 | Artifact | 列表是 project 頻道的「Artifacts」分頁；編輯器在右欄，取代狀態面板 | 全螢幕頁 | Markdown 編輯器，以 `##` 區段標示你改過的區段與 agent 正在寫入的區段；版本紀錄與 diff |
 | 總管 | 左欄入口的獨立畫面，和對話流一樣佔中欄，右欄是專案概況與記憶；任何畫面都可用快捷鍵切過去 | 底部分頁「總管」 | 同一個實例內跨 project 的永久對話，依目前選取的實例切換 |
-| 自動化 | 左欄「排程」「Listener」進入的實例層級畫面，佔中欄，可依專案篩選；project 頻道的「自動化」分頁只看這個 project。點一列在右欄看細節 | 同左 | 排程與 listener 列表、批次暫停狀態；可停用、刪除、看條件與觸發紀錄，待核准的 listener 可以直接核准 |
+| 自動化 | 左欄「排程」「Listener」進入的實例層級畫面，佔中欄，可依專案篩選；project 頻道的「自動化」面板只看這個 project（負責人、工作資料夾、監看的 repo、merge 方式與環境在旁邊的「專案設定」）。點一列在右欄看細節 | 同左 | 排程與 listener 列表、批次暫停狀態；可停用、刪除、看條件與觸發紀錄，待核准的 listener 可以直接核准 |
 | 電腦 | 左欄入口的實例層級畫面，佔中欄 | 同左 | 託管電腦的連線狀態、lease 持有者、即時縮圖、權限檢查；「接手」、「交還」與「停止」 |
 | 設定 | 左欄最下方的入口，打開蓋在主畫面上的設定視窗：左邊是類別（模型 Provider、角色、記憶、關於），右邊是內容；點背景、右上角或按 Esc 關閉 | 「設定」分頁 | 屬於目前實例的設定。模型 provider：內建的 ChatGPT 方案（登入、登出、模型）與新增的 OpenAI／Anthropic 相容 API（base URL、API key、模型、測試連線），選一個「使用中」。角色：對話 agent、總管、Planner、內建 worker、explorer 與 reviewer 各自的 provider、模型與思考強度（模型預設／關閉／低／中／高），預設跟使用中的 provider 相同。記憶：整理記憶（Observer／Reflector）用的 provider 與模型，預設跟對話 agent 相同。還沒有使用中的 provider 時，Inbox 有一筆「設定模型 provider」指向這裡 |
 
@@ -127,7 +127,7 @@ pub enum ClientCommand {
 
 - 任務樹與 artifact：快照裡每個 project 帶著所有 Goal（含任務樹與 Brief 全文）與 artifact；任何變化都送一筆 `GoalChanged` 或 `ArtifactChanged` 整筆替換，客戶端不用自己拼狀態。Goal 的進展是 `GoalView::activity`（`goal_activity` 表），在 Goal 面板的「動態」分頁；只有 Goal 結束與快速修改需要你處理時，同一句話也以 `Card::Milestone` 貼到對話流。`SaveArtifact` 被拒絕（同一段兩邊都改過）時只回 `Error`，草稿留在客戶端；`Cancel { task }` 取消一個還沒結束的任務。
 
-- 工作資料夾：快照的 `ProjectSnapshot` 帶 `workdir`；建立、設定或 agent 的 `set_workdir` 成功後送一筆 `ProjectWorkdir` 整份替換。自動化分頁的 `ProjectRepos` 只影響監看，不影響 worker 在哪工作。本機資料夾的核准是 `ApplyChanges`（路徑、分支、sha），核准後平台才線性套用（岔開時把任務 commit 接到你的分支後面）。
+- 工作資料夾：快照的 `ProjectSnapshot` 帶 `workdir`；建立、設定或 agent 的 `set_workdir` 成功後送一筆 `ProjectWorkdir` 整份替換。「專案設定」的 `ProjectRepos` 只影響監看，不影響 worker 在哪工作。本機資料夾的核准是 `ApplyChanges`（路徑、分支、sha），核准後平台才線性套用（岔開時把任務 commit 接到你的分支後面）。
 
 - 核准：快照帶著還沒決定與最近有變化的核准（`ApprovalView`：具體動作、hash、狀態、理由與結果），之後每次變化送一筆 `ApprovalChanged` 整筆替換；`Decide { approval, approve, note }` 核准或拒絕，已決定或逾時時回 `Error` 並重送目前的狀態。通知設定、USER.md 與 project 的 merge 方式也在快照裡，改了分別送 `Notifications`、`UserMd`、`ProjectMergeMethod`。
 

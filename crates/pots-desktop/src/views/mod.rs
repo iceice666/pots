@@ -13,6 +13,7 @@ mod overseer;
 mod panel;
 mod preferences;
 mod project_env;
+mod project_settings;
 mod roles;
 mod settings;
 mod stream;

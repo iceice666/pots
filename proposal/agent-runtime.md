@@ -17,7 +17,7 @@
 | Watcher | 純 Rust（webhook 或輪詢） | 外部事件 | 不限 |
 | 總管 agent | 內建 agent，掛自己的 OM（全域對話） | 人類在總管對話中的訊息、自己的排程 | 全域同時 1 個 run |
 
-對話 agent 是那個 project 的**負責人**：每個 project 一個，名字存在 `projects.agent_name`，建立時預設是「`<project 名稱>` 負責人」（`store::default_agent_name`），可以在頻道「自動化」分頁改名（協定 v15 的 `RenameAgent`，廣播 `ProjectAgentName`，最多 40 個字）。chat profile 的 role prompt 讓它以負責人的身份和你對話，每次 run 的 instructions 帶著 project 名稱與它的名字，改名從下一個 run 生效。以前所有 project 共用全域的「Pots」，`0013_project_lead.sql` 把這些舊資料轉成預設名字（總管不動）；舊訊息的作者欄不改寫，桌面版在頻道裡一律顯示負責人現在的名字。
+對話 agent 是那個 project 的**負責人**：每個 project 一個，名字存在 `projects.agent_name`，建立時預設是「`<project 名稱>` 負責人」（`store::default_agent_name`），可以在頻道的「專案設定」改名（協定 v15 的 `RenameAgent`，廣播 `ProjectAgentName`，最多 40 個字）。chat profile 的 role prompt 讓它以負責人的身份和你對話，每次 run 的 instructions 帶著 project 名稱與它的名字，改名從下一個 run 生效。以前所有 project 共用全域的「Pots」，`0013_project_lead.sql` 把這些舊資料轉成預設名字（總管不動）；舊訊息的作者欄不改寫，桌面版在頻道裡一律顯示負責人現在的名字。
 
 ### 對話 agent 與 Planner 的分工
 

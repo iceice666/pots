@@ -334,7 +334,7 @@ pub struct SourceEditor {
     pub error: Option<String>,
 }
 
-/// 頻道「自動化」分頁內聯編輯的欄位。
+/// 右欄「專案設定」內聯編輯的欄位。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectField {
     /// 監看的 repo（`SetProjectRepos`）。
@@ -343,7 +343,7 @@ pub enum ProjectField {
     AgentName,
 }
 
-/// 頻道「自動化」分頁正在改的監看 repo 或負責人名字（一次只編一個）。
+/// 右欄「專案設定」正在改的監看 repo 或負責人名字（一次只編一個）。
 pub struct RepoEditor {
     pub project: ProjectId,
     pub field: ProjectField,
@@ -353,7 +353,7 @@ pub struct RepoEditor {
     _subscription: Subscription,
 }
 
-/// 頻道「自動化」分頁「環境」區塊的「分析並建立環境」表單。
+/// 右欄「專案設定」「環境」區塊的「分析並建立環境」表單。
 pub struct EnvEditor {
     pub project: ProjectId,
     /// 給環境 worker 的說明（可留白）。
@@ -664,8 +664,10 @@ pub enum Panel {
     Goals,
     /// 目前 project 的 artifact 列表。
     Artifacts,
-    /// 目前 project 的自動化（監看設定、排程與 listener）。
+    /// 目前 project 的自動化（暫停、排程與 listener）。
     Automations,
+    /// 目前 project 的設定（負責人、工作資料夾、監看的 repo、merge 方式、環境）。
+    ProjectSettings,
     /// 目前 project 對話 agent 的記憶。
     Memory,
 }
@@ -675,7 +677,12 @@ impl Panel {
     pub fn is_project_list(self) -> bool {
         matches!(
             self,
-            Self::Members | Self::Goals | Self::Artifacts | Self::Automations | Self::Memory
+            Self::Members
+                | Self::Goals
+                | Self::Artifacts
+                | Self::Automations
+                | Self::ProjectSettings
+                | Self::Memory
         )
     }
 
@@ -686,6 +693,7 @@ impl Panel {
             Self::Goals => "Goals 列表",
             Self::Artifacts => "Artifacts 列表",
             Self::Automations => "自動化",
+            Self::ProjectSettings => "專案設定",
             Self::Memory => "記憶",
             _ => "列表",
         }
@@ -1524,7 +1532,7 @@ impl PotsApp {
         }
     }
 
-    /// 「稍後再設定」：工作資料夾留白就建立（agent 之後可以問，或你自己在自動化分頁補）。
+    /// 「稍後再設定」：工作資料夾留白就建立（agent 之後可以問，或你自己在「專案設定」補）。
     pub fn skip_workdir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(d) = &self.workdir_dialog {
             let target = d.target.clone();
@@ -2280,7 +2288,7 @@ impl PotsApp {
             .filter(|_| self.panel.is_some_and(|p| !p.is_project_list()))
     }
 
-    /// 頻道標題列的按鈕（成員、Goals、Artifacts、自動化、記憶）：右欄在這個列表與關閉之間
+    /// 頻道標題列的按鈕（成員、Goals、Artifacts、自動化、專案設定、記憶）：右欄在這個列表與關閉之間
     /// 切換。右欄一次只有一種內容，打開列表就換掉 Goal 面板（或任務 thread、artifact 編輯器，
     /// 草稿留在編輯器裡）。
     pub fn toggle_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {

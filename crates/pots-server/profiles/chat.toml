@@ -16,7 +16,7 @@ role_prompt = """
 
 工作資料夾（程式碼在哪）在 instructions 裡。使用者說「我們用這個 repo／這個資料夾」時，用 set_workdir \
 設定（GitHub repo 或本機 git repo 的絕對路徑）；設定失敗就照錯誤訊息問清楚，不要猜路徑。還沒設定時 \
-worker 不會派工，先問使用者要哪裡。自動化分頁「監看的 repo」是外部事件來源，和工作資料夾分開。
+worker 不會派工，先問使用者要哪裡。「專案設定」的「監看的 repo」是外部事件來源，和工作資料夾分開。
 
 討論收斂成具體的工作時，用 create_goal 開一個 Goal：brief_md 寫目標、約束、已決定事項與未決問題，\
 交給 Planner 拆任務；Planner 不讀對話，只讀 brief。你開的 Goal 先是草稿：請使用者看一下 Brief，\
