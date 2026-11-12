@@ -81,6 +81,13 @@ pub fn fact_note(fact: &str) -> Option<(String, String)> {
     Some((format!("{prefix}你的理由："), note.to_string()))
 }
 
+/// 成員列表第二行的平台前綴：「需要你：」後面才是 worker 停下來的原因（agent 原文）。
+pub fn status_note(status: &str) -> Option<(&'static str, &str)> {
+    status
+        .strip_prefix("需要你：")
+        .map(|rest| ("需要你：", rest))
+}
+
 /// 把 Markdown 原文截到最多 `max_lines` 行，被截掉時在最後補「…」。
 ///
 /// `TextView` 的 `max_lines` 只把版面高度夾住、不會畫省略號，所以截斷在原文這一層
@@ -428,5 +435,27 @@ mod tests {
     #[test]
     fn the_clamp_treats_zero_lines_as_one() {
         assert_eq!(clamp_markdown("a\nb", 0), "a…");
+    }
+
+    #[test]
+    fn only_the_user_note_part_of_a_fact_is_split_out() {
+        assert_eq!(
+            fact_note("你的理由：先補測試"),
+            Some(("你的理由：".to_string(), "先補測試".to_string()))
+        );
+        assert_eq!(
+            fact_note("你申請 · 動作 abc · 你的理由：**不要**動 UI"),
+            Some((
+                "你申請 · 動作 abc · 你的理由：".to_string(),
+                "**不要**動 UI".to_string()
+            ))
+        );
+        assert_eq!(fact_note("PR #42"), None);
+    }
+
+    #[test]
+    fn the_needs_you_prefix_is_kept_out_of_the_markdown() {
+        assert_eq!(status_note("需要你：選按鈕樣式"), Some(("需要你：", "選按鈕樣式")));
+        assert_eq!(status_note("等待 CI"), None);
     }
 }
