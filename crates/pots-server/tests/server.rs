@@ -230,6 +230,7 @@ async fn chat_round_trip() {
         id: human,
         text: "嗨".into(),
         mode: SendMode::Queue,
+        attachments: Vec::new(),
     })
     .await;
     c.assert_quiet(Duration::from_millis(300)).await;

@@ -377,6 +377,8 @@ impl Reply {
                 tools: self.tools.summary(),
                 cards: self.cards.clone(),
                 steer: false,
+                // agent 目前不會回圖；圖片是人類訊息帶進來的。
+                attachments: Vec::new(),
             }),
         }
     }

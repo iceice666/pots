@@ -177,6 +177,7 @@ fn human(text: &str) -> StreamItemKind {
         narration: Vec::new(),
         cards: vec![],
         steer: false,
+        attachments: Vec::new(),
     })
 }
 
@@ -192,6 +193,7 @@ fn agent(label: &str, role: AgentRole, text: &str) -> Msg {
         narration: Vec::new(),
         cards: vec![],
         steer: false,
+        attachments: Vec::new(),
     }
 }
 

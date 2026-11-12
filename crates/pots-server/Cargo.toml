@@ -36,6 +36,9 @@ hex = "0.4"
 hmac = "0.12"
 # 中斷 worker 的整個行程群組（本機執行環境）。
 libc = "0.2"
+# 圖片附件的格式驗證與寬高（`attachments.rs`）：只開四種要接受的格式，
+# `Cargo.lock` 裡的 `image 0.25.10` 已經因為 `pots-desktop` 的截圖測試存在。
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 # 給 Claude Code worker 的平台工具（proposal/agent-runtime.md#worker-adapter內建-worker-與外部-coding-cli）。
 # client 端只有假的 Claude CLI 與測試用。
 rmcp = { version = "3.9", default-features = false, features = ["server", "transport-streamable-http-server", "client", "transport-streamable-http-client-reqwest"] }
@@ -69,5 +72,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 pots-llm = { path = "../pots-llm", features = ["test-util"] }
+# 測試自己產生最小的 png／jpeg 內容（`tests/attachments.rs`）。
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 tempfile = "3"
 tokio-tungstenite = "0.30"
