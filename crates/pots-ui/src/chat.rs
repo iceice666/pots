@@ -955,7 +955,6 @@ impl ChatApp {
 
     fn merge_done(&mut self, id: usize, result: Result<String, String>, cx: &mut Context<Self>) {
         self.merging.remove(&id);
-        let Some(name) = self.author_name(id) else { return };
         let Some(msg) = self.ws.message_by_id_mut(id) else { return };
         let Some(Card::Merge { branch, outcome, .. }) = &mut msg.card else { return };
         let branch = branch.clone();
@@ -965,17 +964,24 @@ impl ChatApp {
             Err(e) => MergeOutcome::Failed(e),
         });
         self.message_changed(id);
-        if ok {
-            self.reply_as_owner(id, &format!("@{name} Approved: `{branch}` is now a branch in the project repo."), cx);
-            if let Some((conv, _)) = self.ws.locate(id) {
-                let note = agent::merge_approved_note(&branch, &agent::task_place(&self.ws, conv));
-                let shown = format!("Pots asked for this: you accepted `{branch}`.");
-                self.wake_coordinators(conv, note, shown, cx);
+        if ok && let Some((conv, _)) = self.ws.locate(id) {
+            // An accepted merge request ends the task: say so in the thread
+            // without waking anyone there (any owner post would wake the
+            // last agent, and its reply would reopen the thread), close the
+            // thread, and let the coordinator report it in #general.
+            let ix = self.ws.post(conv, self.ws.me, &format!("Approved: `{branch}` is now a branch in the project repo."));
+            self.message_added(conv, ix);
+            if let Conv::Thread(t) = conv
+                && !self.ws.waits_on_owner(t)
+            {
+                self.ws.threads[t].archived = true;
             }
-        } else {
-            self.save();
-            cx.notify();
+            let note = agent::merge_approved_note(&branch, &agent::task_place(&self.ws, conv));
+            let shown = format!("Pots asked for this: you accepted `{branch}`.");
+            self.wake_coordinators(conv, note, shown, cx);
         }
+        self.save();
+        cx.notify();
     }
 
     fn author_name(&self, id: usize) -> Option<String> {

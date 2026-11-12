@@ -153,7 +153,7 @@ PM 用 `start_task` 分派工作時也會自動開 thread。
 
 **結案（Archive）：** 用不到的 thread 可以封存，讓它從左側欄消失。滑鼠移到左側欄的 thread 上點 ✓，或在 thread 面板標題列點 **Archive**。封存只是藏起來：訊息、clone 和 branch 都還在，頻道裡起頭訊息下面的 thread 卡片會標上 Archived，點進去按 **Unarchive** 就拿回來。有人（包括 agent）在封存的 thread 裡發新訊息時，它會自動回到側欄。
 
-Engineer 用 `task_done` 回報任務完成（status 是 done）時，Pots 會自動封存那個 thread，結果由 PM 到 #general 跟你回報。卡住（stuck）、還有等你回答的選擇卡或 merge request、或是沒有 PM 可以回報時，thread 會留在側欄。
+Engineer 用 `task_done` 回報任務完成（status 是 done），或你按 **Approve** 收下任務的 merge request 時，Pots 會自動封存那個 thread，結果由 PM 到 #general 跟你回報。卡住（stuck）、還有等你回答的選擇卡或 merge request、或是 `task_done` 時沒有 PM 可以回報，thread 會留在側欄。
 
 ### DM
 
@@ -179,7 +179,7 @@ Engineer 用 `task_done` 回報任務完成（status 是 done）時，Pots 會�
 4. Reviewer checkout 那個 branch 來審：
    - 需要修改 → @Engineer，回到第 3 步。
    - 沒問題 → 呼叫 `request_merge`，thread 裡出現 🔀 **Merge request** 卡片，列出這個 branch 的 commit。同時 Pots 會叫 PM 到 #general 跟你回報哪個任務可以收了（見下方「PM 的回報」）。
-5. 你按 **Approve**：Pots 把 branch 以同名 branch（`pots/...`）fetch 到專案 repo。**不會動到你目前的 checkout 和其他 branch**，要不要 merge 由你自己在 repo 裡處理。PM 也會在 #general 回報，順便說還有哪些任務在跑。按 **Reject** 會通知 Reviewer。
+5. 你按 **Approve**：Pots 把 branch 以同名 branch（`pots/...`）fetch 到專案 repo。**不會動到你目前的 checkout 和其他 branch**，要不要 merge 由你自己在 repo 裡處理。PM 也會在 #general 回報，順便說還有哪些任務在跑。任務到這裡就結束了：thread 會自動封存，thread 裡的 agent 不會再回話。按 **Reject** 會通知 Reviewer。
 
 想在接受前自己看看，可以直接從任務的 clone 抓：
 
