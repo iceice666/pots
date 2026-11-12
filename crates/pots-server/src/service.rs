@@ -514,9 +514,10 @@ mod tests {
     #[test]
     fn api_providers_take_the_attachment_loader() {
         // 有 loader 時照樣建得起來（loader 只在送出含圖片的請求時才會被讀）。
-        let dir = std::env::temp_dir().join(format!("pots-att-{}", uuid::Uuid::new_v4()));
         let loader: Arc<dyn pots_llm::image::ImageLoader> =
-            Arc::new(pots_llm::image::DirectoryImages::new(&dir));
+            Arc::new(pots_llm::image::FnImages::new(|id: String| async move {
+                Err(LlmError::Unsupported(format!("沒有附件 {id}")))
+            }));
         let factory = HttpApiProviders::new(reqwest::Client::new(), None).with_images(loader);
         let base = Url::parse("https://api.openai.com/v1").unwrap();
         for kind in [

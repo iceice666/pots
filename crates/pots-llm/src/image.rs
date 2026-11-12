@@ -8,8 +8,6 @@
 //! `with_images` 掛上去，三個 body 產生器在序列化時查 [`ImagePayloads`]。
 //! 沒有掛 loader 但歷史裡有圖片時，provider 直接回錯誤，不會默默把使用者的圖丟掉。
 
-use std::path::{Path, PathBuf};
-
 use crate::provider::{Item, LlmError, ModelRequest};
 
 /// 這次請求要送的圖片：attachment id → base64（不含 data URL 前綴）。
@@ -139,35 +137,45 @@ pub fn payload<'a>(images: &'a ImagePayloads, attachment_id: &str) -> Result<&'a
         })
 }
 
-/// 讀 `{dir}/{attachment_id}` 的原始位元組並轉成 base64。
+/// 用閉包提供附件的內容：伺服器的附件儲存是「attachment id → 檔案」，組裝時把查詢接上來。
 ///
-/// 檔案以 attachment id 命名；附件目錄的位置與命名由伺服器的附件儲存決定
-/// （`pots-server` 的 `POST /attachments`），layout 不同時自己實作 [`ImageLoader`]。
-#[derive(Clone, Debug)]
-pub struct DirectoryImages {
-    dir: PathBuf,
+/// ```ignore
+/// let images = FnImages::new(move |id: String| {
+///     let store = store.clone();
+///     async move { store.attachment_bytes(&id).await.map(|b| base64::encode(b)) }
+/// });
+/// provider.with_images(Arc::new(images));
+/// ```
+pub struct FnImages<F> {
+    load: F,
 }
 
-impl DirectoryImages {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
-    }
-
-    pub fn dir(&self) -> &Path {
-        &self.dir
+impl<F, Fut> FnImages<F>
+where
+    F: Fn(String) -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = Result<String, LlmError>> + Send,
+{
+    /// `load` 收到 attachment id，回 base64（不含 data URL 前綴）。
+    pub fn new(load: F) -> Self {
+        Self { load }
     }
 }
 
 #[async_trait::async_trait]
-impl ImageLoader for DirectoryImages {
+impl<F, Fut> ImageLoader for FnImages<F>
+where
+    F: Fn(String) -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = Result<String, LlmError>> + Send,
+{
     async fn base64(&self, attachment_id: &str) -> Result<String, LlmError> {
-        use base64::Engine as _;
-        let path = self.dir.join(attachment_id);
-        let bytes = tokio::fs::read(&path).await.map_err(|error| {
-            LlmError::Unsupported(format!("讀不到圖片附件「{attachment_id}」：{error}"))
-        })?;
-        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+        (self.load)(attachment_id.to_owned()).await
     }
+}
+
+/// 原始位元組轉成 base64（標準字母表，沒有換行）。
+pub fn base64_bytes(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 #[cfg(test)]
@@ -185,20 +193,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn directory_loader_reads_by_attachment_id() {
-        let dir = tempfile_dir();
-        std::fs::write(dir.join("att-1"), b"png").unwrap();
-        let loader = DirectoryImages::new(dir.clone());
-        use base64::Engine as _;
-        assert_eq!(
-            loader.base64("att-1").await.unwrap(),
-            base64::engine::general_purpose::STANDARD.encode(b"png")
-        );
+    async fn fn_loader_wraps_any_lookup() {
+        let loader = FnImages::new(|id: String| async move {
+            if id == "att-1" {
+                Ok(base64_bytes(b"png"))
+            } else {
+                Err(LlmError::Unsupported(format!("讀不到圖片附件「{id}」")))
+            }
+        });
+        assert_eq!(loader.base64("att-1").await.unwrap(), "cG5n");
         assert!(matches!(
             loader.base64("missing").await,
             Err(LlmError::Unsupported(m)) if m.contains("讀不到圖片附件")
         ));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -232,12 +239,5 @@ mod tests {
         assert_eq!(map["a"], "<a>");
         assert_eq!(map["b"], "<b>");
         assert!(payloads(&Fixed, &items[..1]).await.unwrap().is_empty());
-    }
-
-    /// 測試用的暫存目錄，不引入額外依賴。
-    fn tempfile_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pots-images-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 }
