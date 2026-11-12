@@ -1068,7 +1068,7 @@ pub mod tools {
     }
 
     /// The channel `input["channel"]` names.
-    fn channel(ws: &Workspace, input: &Value) -> Result<usize, String> {
+    pub(crate) fn channel(ws: &Workspace, input: &Value) -> Result<usize, String> {
         let name = input["channel"].as_str().ok_or("`channel` is required.")?;
         ws.find_channel(name).ok_or_else(|| {
             let names = ws.channels.iter().filter(|c| c.dm.is_none()).map(|c| format!("#{}", c.name)).collect::<Vec<_>>();
@@ -1137,6 +1137,9 @@ pub mod tools {
                 }),
             },
         ]
+        .into_iter()
+        .chain(crate::artifact_tools::specs())
+        .collect()
     }
 
     /// The card an `ask_owner` call asks for.
@@ -1158,6 +1161,9 @@ pub mod tools {
 
     /// What the UI shows while a tool runs.
     pub fn activity(name: &str, input: &Value) -> String {
+        if let Some(text) = crate::artifact_tools::activity(name, input) {
+            return text;
+        }
         match (name, input["channel"].as_str()) {
             ("read_channel", Some(c)) => match input["thread"].as_str() {
                 Some(t) => format!("Reading thread “{t}” in #{c}…"),
@@ -1181,6 +1187,9 @@ pub mod tools {
         let result = match name {
             "list_channels" => Ok(list_channels(ws)),
             "read_channel" => read_channel(ws, input),
+            crate::artifact_tools::LIST_ARTIFACTS | crate::artifact_tools::READ_ARTIFACT => {
+                crate::artifact_tools::read(ws, name, input)
+            }
             _ => Err(format!("There is no tool named {name}.")),
         };
         match result {
@@ -1202,6 +1211,10 @@ pub mod tools {
             out.push('\n');
             for t in ws.channel_threads(c) {
                 out.push_str(&format!("  thread “{}” ({} replies)\n", ws.threads[t].name, ws.threads[t].messages.len()));
+            }
+            for id in ws.channel_artifacts(c) {
+                let a = ws.artifact(id).expect("listed");
+                out.push_str(&format!("  {} {id} “{}”\n", a.kind.label().to_lowercase(), a.title));
             }
         }
         out
@@ -1573,7 +1586,7 @@ mod tests {
         let conv = Conv::Thread(t);
         let ix = ws.post(conv, ws.me, "@Engineer go");
         let names = |a: usize| agents.request(a, &ws, conv, ix + 1).tools.iter().map(|t| t.name).collect::<Vec<_>>();
-        let chat = ["pass", "list_channels", "read_channel", "ask_owner"];
+        let chat = ["pass", "list_channels", "read_channel", "ask_owner", "list_artifacts", "read_artifact", "create_table", "update_table", "add_table_rows"];
         assert_eq!(
             names(0),
             [&chat[..], &["start_task", "post_in_thread", "check_merge_conflicts", "record_decision"]].concat(),
@@ -1626,7 +1639,7 @@ mod tests {
         );
         assert!(req.system.starts_with("Be useful.\n\n# Where you are"));
         assert!(req.system.contains("your direct messages with the owner"));
-        assert_eq!(req.tools.len(), 8);
+        assert_eq!(req.tools.len(), 13);
     }
 
     #[test]

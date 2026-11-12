@@ -24,7 +24,7 @@ pub const ASK_WORKER: &str = "ask_worker";
 pub const NAME: &str = "Worker";
 pub const DEFAULT_MAX_STEPS: u32 = 30;
 /// Chat tools the worker may use; the rest (start_task, ask_owner, …) act.
-const CHAT_TOOLS: [&str; 2] = ["list_channels", "read_channel"];
+const CHAT_TOOLS: [&str; 4] = ["list_channels", "read_channel", "list_artifacts", "read_artifact"];
 
 pub const DEFAULT_PROMPT: &str = "You are Worker, a helper that teammates hand look-ups to. Do the task you're \
 given and reply with what it asks for: findings with file paths and line numbers, the commands you ran and what \

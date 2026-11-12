@@ -696,23 +696,22 @@ impl Workspace {
     /// A new, blank artifact of `kind` in `channel`, titled "Untitled
     /// table" (numbered if the channel has one by that name). Returns its id.
     pub fn add_artifact(&mut self, channel: usize, kind: ArtifactKind) -> usize {
-        // Never reuse an id, even with a counter from an older file.
-        let id = self.next_artifact_id.max(self.artifacts.iter().map(|a| a.id + 1).max().unwrap_or(0));
-        self.next_artifact_id = id + 1;
         let base = format!("Untitled {}", kind.label().to_lowercase());
         let taken = |title: &str| self.artifacts.iter().any(|a| a.channel == channel && a.title == title);
         let title = std::iter::once(base.clone())
             .chain((2..).map(|n| format!("{base} {n}")))
             .find(|t| !taken(t))
             .expect("some number is free");
-        self.artifacts.push(Artifact {
-            id,
-            title,
-            kind,
-            channel,
-            content: Some(ArtifactContent::new(kind)),
-            load_error: None,
-        });
+        self.add_artifact_with(channel, title, ArtifactContent::new(kind))
+    }
+
+    /// A new artifact in `channel` titled `title` (taken as it is),
+    /// holding `content`. Returns its id.
+    pub fn add_artifact_with(&mut self, channel: usize, title: String, content: ArtifactContent) -> usize {
+        // Never reuse an id, even with a counter from an older file.
+        let id = self.next_artifact_id.max(self.artifacts.iter().map(|a| a.id + 1).max().unwrap_or(0));
+        self.next_artifact_id = id + 1;
+        self.artifacts.push(Artifact { id, title, kind: content.kind(), channel, content: Some(content), load_error: None });
         id
     }
 

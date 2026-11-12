@@ -4,6 +4,7 @@
 //! [`claude_code`], which hands it to the owner's Claude Code CLI).
 
 pub mod agent;
+pub mod artifact_tools;
 pub mod claude_code;
 pub mod config;
 pub mod data;

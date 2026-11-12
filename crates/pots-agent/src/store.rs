@@ -289,6 +289,30 @@ mod tests {
     }
 
     #[test]
+    fn a_table_an_agent_made_and_changed_is_saved_like_any_other() {
+        use crate::artifact_tools::{self, ADD_TABLE_ROWS, CREATE_TABLE, UPDATE_TABLE};
+        use serde_json::json;
+        let home = temp_home("agent-table");
+        let mut ws = data::empty();
+        let input = json!({"channel": "general", "title": "Reading list", "columns": ["Book", "Done"], "rows": [["Dune", "no"]]});
+        let id = artifact_tools::write(&mut ws, CREATE_TABLE, &input).unwrap().id;
+        artifact_tools::write(&mut ws, UPDATE_TABLE, &json!({"id": id, "title": "Books"})).unwrap();
+        artifact_tools::write(&mut ws, ADD_TABLE_ROWS, &json!({"id": id, "rows": [["Emma", "yes"]]})).unwrap();
+        // As the app saves it: the file, then the workspace listing it.
+        let content = ws.artifact(id).unwrap().content.clone().unwrap();
+        super::save_artifact_in(&home, id, &content).unwrap();
+        std::fs::write(home.join("workspace.json"), serde_json::to_vec(&ws).unwrap()).unwrap();
+
+        let file: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join(format!("artifacts/{id}.json"))).unwrap()).unwrap();
+        assert_eq!(file, json!({"kind": "table", "columns": ["Book", "Done"], "rows": [["Dune", "no"], ["Emma", "yes"]]}));
+        let back = super::load_workspace_from(&home).unwrap().unwrap();
+        let a = back.artifact(id).unwrap();
+        assert_eq!((a.title.as_str(), a.kind, a.channel), ("Books", ArtifactKind::Table, 0));
+        assert_eq!(a.content.as_ref(), Some(&content));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn an_unreadable_artifact_is_reported_not_replaced() {
         let home = temp_home("broken-artifact");
         let mut ws = data::empty();
