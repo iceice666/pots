@@ -20,6 +20,7 @@ pub mod cost;
 mod datadir;
 mod gateway;
 mod hub;
+mod images;
 mod memory;
 pub mod model_auth;
 mod notifications;
@@ -104,6 +105,10 @@ pub struct Deps {
     pub model_auth: Arc<dyn ModelAuthControl>,
     /// 建立使用者新增的 API provider（OpenAI／Anthropic 相容）。
     pub api_providers: Arc<dyn ApiProviderFactory>,
+    /// 圖片附件的內容來源（見 [`images::ImageSlot`]）。組裝端建立 provider 時還沒有資料庫，
+    /// 只能先放一個空的槽；[`start`] 開好資料庫之後把 [`images::StoreImages`] 填進去，
+    /// 已經建好的 provider 共用同一個槽，所以正式推論路徑拿到的是填好的來源。
+    pub images: images::ImageSlot,
 }
 
 impl Deps {
@@ -118,11 +123,18 @@ impl Deps {
             model: model.into(),
             model_auth,
             api_providers: Arc::new(NoApiProviders),
+            images: images::ImageSlot::new(),
         }
     }
 
     pub fn with_api_providers(mut self, factory: Arc<dyn ApiProviderFactory>) -> Self {
         self.api_providers = factory;
+        self
+    }
+
+    /// 直接指定圖片來源（測試用；正式路徑由 [`start`] 填）。
+    pub fn with_images(self, loader: Arc<dyn pots_llm::image::ImageLoader>) -> Self {
+        self.images.fill(loader);
         self
     }
 }
@@ -247,6 +259,15 @@ pub async fn start(config: Config, deps: Deps) -> Result<ServerHandle, Error> {
     if backfilled > 0 {
         tracing::info!(backfilled, "補算舊的原始歷史的 token 數");
     }
+
+    // 圖片附件的內容來源：讀 `<data_dir>/attachments/<sha256>`，base64 只在送出請求那一刻
+    // 產生（見 `images`）。組裝端建 provider 時只有一個空槽，這裡把它填起來——ChatGPT 的
+    // provider（`Deps::provider`）、`HttpApiProviders` 建出來的 API provider，以及
+    // `ProviderRegistry` 之後新建／重建的 provider 都共用同一個槽。
+    deps.images.fill(Arc::new(images::StoreImages::new(
+        store.clone(),
+        config.data_dir.clone(),
+    )));
 
     let auth_rx = deps.model_auth.status();
     let initial_auth = auth_rx.borrow().clone();
