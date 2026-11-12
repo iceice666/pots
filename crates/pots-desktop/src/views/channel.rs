@@ -4,9 +4,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Textarea;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Div, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Window, div, img, px, relative,
+    AnyElement, Context, Div, DragMoveEvent, ExternalPaths, FileDropEvent, FontWeight, ImageSource,
+    InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, div, img, px, relative,
 };
 
 use super::composer_attach::{PendingSnapshot, UploadState};
@@ -15,6 +15,9 @@ use super::widgets::*;
 use crate::app::{Panel, PotsApp};
 use crate::model::*;
 use crate::theme;
+
+/// 輸入框容器在測試與 debug 查詢用的 id（也是拖放目標）。
+const DROP_TARGET_ID: &str = "composer-drop";
 
 pub fn empty_state(title: impl Into<SharedString>, body: impl Into<SharedString>) -> Div {
     div()
@@ -426,14 +429,46 @@ impl PotsApp {
             "/fix 快速修改 · /goal 開 Goal · /schedule 排程"
         };
 
+        // 拖放目標就是輸入框本身：不需要整頁的 drop zone。
+        // `on_drop` 的 payload 是平台層塞進 `active_drag` 的 `ExternalPaths`
+        // （`gpui-pre` 把 OS 的 `FileDropEvent` 轉過來），所以型別必須是它。
+        // 高亮用 `on_drag_move` 判斷游標是否在範圍內，`on_file_drop_exit` 收回。
+        let this = cx.entity().downgrade();
         div()
+            .id(DROP_TARGET_ID)
+            // 測試要拖到「真的在輸入框上面」的位置才能命中 hitbox。
+            .debug_selector(|| DROP_TARGET_ID.to_string())
             .mx(px(24.))
             .mb(px(20.))
             .rounded(px(10.))
             .border_1()
-            .border_color(theme::input_border())
+            .border_color(if self.drop_hot {
+                theme::accent()
+            } else {
+                theme::input_border()
+            })
+            .when(self.drop_hot, |d| d.bg(theme::accent_soft()))
             .flex()
             .flex_col()
+            .can_drop(|payload, _, _| payload.is::<ExternalPaths>())
+            .on_drag_move(move |event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                let hot = event.bounds.contains(&event.event.position);
+                this.update(cx, |app, cx| app.set_drop_hot(hot, cx)).ok();
+            })
+            .on_file_drop_exit({
+                let this = cx.entity().downgrade();
+                move |_: &FileDropEvent, _, cx| {
+                    this.update(cx, |app, cx| app.set_drop_hot(false, cx)).ok();
+                }
+            })
+            .on_drop({
+                let this = cx.entity().downgrade();
+                move |paths: &ExternalPaths, window, cx| {
+                    let paths = paths.paths().to_vec();
+                    this.update(cx, |app, cx| app.accept_dropped(paths, window, cx))
+                        .ok();
+                }
+            })
             .child(
                 div()
                     .px(px(4.))

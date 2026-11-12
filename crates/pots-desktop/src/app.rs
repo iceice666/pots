@@ -1,6 +1,7 @@
 //! 根視圖：持有 [`Store`] 與所有 UI 狀態，各區塊的 render 拆在 `views/`。
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,7 +24,7 @@ use crate::model::*;
 use crate::notify::{self, Notifier};
 use crate::sync::{self, Notice, Sync};
 use crate::theme;
-use crate::views::composer_attach::PendingAttachments;
+use crate::views::composer_attach::{DroppedFile, PendingAttachments, read_dropped};
 use crate::views::images::{AttachmentImages, FetchEvent};
 
 gpui_kit::actions!(pots, [OpenOverseer, CloseSettings]);
@@ -829,6 +830,8 @@ pub struct PotsApp {
     pub composer: Entity<TextareaState>,
     /// 輸入框裡待送的圖片（貼上、上傳狀態、縮圖）。
     pub pending: Entity<PendingAttachments>,
+    /// 有檔案正被拖到輸入框上方：只在這裡加高亮，不是整頁的 drop zone。
+    pub drop_hot: bool,
     /// 訊息附圖的快取（`GET /attachments/{id}`）；假資料模式沒有 fetcher，只畫佔位。
     pub attachment_images: AttachmentImages,
     /// 點開的大圖；`None` 是關著。
@@ -970,6 +973,7 @@ impl PotsApp {
             toast: None,
             composer,
             pending,
+            drop_hot: false,
             attachment_images: AttachmentImages::new(),
             image_viewer: None,
             goal_note,
@@ -3233,6 +3237,62 @@ impl PotsApp {
             self.drain_uploads(cx);
         }
         took
+    }
+
+    /// 檔案被拖到輸入框上放開。讀檔（可能幾 MB）在背景執行緒做，讀完才在 UI 執行緒
+    /// 走同一條驗證管線（[`PendingAttachments::accept_read`]）。
+    ///
+    /// 被拒的原因（不是檔案、讀不到、不是圖片、超過上限）會累積在
+    /// `pending.error`；收下幾張由 [`Self::accept_dropped_files`] 回報，因為讀檔是
+    /// 非同步的，這裡拿不到同步的結果。
+    pub fn accept_dropped(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        self.drop_hot = false;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move { paths.iter().map(|path| read_dropped(path)).collect() })
+                .await;
+            this.update_in(cx, |app, _window, cx| {
+                app.accept_dropped_files(files, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 讀完的拖放檔案進待送附件。回傳是否有任一張被收下（全部被拒時圖片不會進
+    /// pending，原因在 `pending.error`）。
+    pub(crate) fn accept_dropped_files(
+        &mut self,
+        files: Vec<DroppedFile>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let took = self.pending.update(cx, |p, cx| {
+            let took = p.accept_read(files);
+            cx.notify();
+            took
+        });
+        if took {
+            self.drain_uploads(cx);
+        }
+        took
+    }
+
+    /// 拖放懸停：只有游標真的在這個元素上才亮，離開就收回。
+    pub fn set_drop_hot(&mut self, hot: bool, cx: &mut Context<Self>) {
+        if self.drop_hot != hot {
+            self.drop_hot = hot;
+            cx.notify();
+        }
     }
 
     /// 有待上傳的工作就交給上傳執行緒（或假資料模式下直接完成）。
