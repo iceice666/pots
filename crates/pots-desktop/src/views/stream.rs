@@ -385,7 +385,7 @@ impl PotsApp {
                 })
                 .into_any_element(),
             Card::Approval { id } => match self.store.approval(*id) {
-                Some(a) => self.render_approval_card(a, cx).into_any_element(),
+                Some(a) => self.render_approval_card(a, &scope, cx).into_any_element(),
                 None => muted("核准請求已不存在").into_any_element(),
             },
             Card::Artifact {
@@ -831,7 +831,15 @@ impl PotsApp {
         )
     }
 
-    pub fn render_approval_card(&self, a: &InboxItem, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 核准／ask_user 卡片。`scope` 是它在畫面上的位置（`render_card` 給的
+    /// `msg-{訊息}-{序號}`）：同一筆核准可能同時出現在 thread 與頻道、或同一則訊息裡
+    /// 兩張卡，`TextView` 的 id 只靠 approval id 會讓 `use_keyed_state` 共用同一份 state。
+    pub fn render_approval_card(
+        &self,
+        a: &InboxItem,
+        scope: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let id = a.id;
         let question = super::preferences::question_of(a);
         let (banner, banner_fg, banner_bg, border) = match &a.decision {
@@ -900,7 +908,7 @@ impl PotsApp {
                     .child(match question {
                         // ask_user 的問題是 agent 寫的 Markdown：字級與粗體沿用標題樣式。
                         Some((q, _, _)) => agent_text(
-                            SharedString::from(format!("approval-question-{}", id.0)),
+                            SharedString::from(format!("approval-question-{scope}-{}", id.0)),
                             q.to_string(),
                         )
                         .text_size(px(16.))
@@ -919,7 +927,7 @@ impl PotsApp {
                         // 原本是 14px／1.5 行高的理由內文。
                         d.child(
                             agent_text(
-                                SharedString::from(format!("approval-detail-{}", id.0)),
+                                SharedString::from(format!("approval-detail-{scope}-{}", id.0)),
                                 a.detail.clone(),
                             )
                             .text_size(px(14.))
@@ -934,7 +942,10 @@ impl PotsApp {
                                 Some((prefix, note)) => agent_text_prefixed(
                                     prefix,
                                     agent_text_muted(
-                                        SharedString::from(format!("approval-fact-{}-{i}", id.0)),
+                                        SharedString::from(format!(
+                                            "approval-fact-{scope}-{}-{i}",
+                                            id.0
+                                        )),
                                         note,
                                     ),
                                 )
@@ -950,9 +961,9 @@ impl PotsApp {
                             cx.theme().mono_font_family.clone(),
                         ))
                     })
-                    .children(self.render_question_options(a, "card", cx))
+                    .children(self.render_question_options(a, scope, cx))
                     .when(pending, |d| {
-                        d.child(self.render_actions(id, &a.actions, "card", cx))
+                        d.child(self.render_actions(id, &a.actions, scope, cx))
                     }),
             )
     }
