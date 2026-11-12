@@ -36,6 +36,10 @@ use crate::{ApiProviderFactory, Config, Deps, Error, ModelAuthControl};
 pub const AUTO_MODEL: &str = "auto";
 
 /// 建立連到 ChatGPT 的 [`Deps`]。`model` 為 `None` 時自動選模型。
+///
+/// 圖片附件的內容來源（[`crate::Deps::images`]）在這裡只有一個空的槽：讀檔案需要資料庫
+/// （attachment id → sha256），`chatgpt_deps` 拿不到。真正的 [`crate::images::StoreImages`]
+/// 由 [`crate::start`] 填進同一個槽，provider 建好之後仍共用它，所以推論路徑用的是填好的來源。
 pub async fn chatgpt_deps(data_dir: &Path, model: Option<String>) -> Result<Deps, Error> {
     crate::datadir::create_private_dir(data_dir)?;
     let host_id = load_or_create_host_id(&data_dir.join("host-id"))?;
@@ -50,13 +54,35 @@ pub async fn chatgpt_deps(data_dir: &Path, model: Option<String>) -> Result<Deps
     let base = Url::parse(DEFAULT_BASE_URL).map_err(|e| Error::Config(e.to_string()))?;
     let provider = ResponsesProvider::new(base, auth.clone(), http.clone());
     let control = SiwcControl::new(auth);
-    let auto = Arc::new(AutoModel::new(provider, model.is_none(), control.status()));
-    Ok(Deps {
-        provider: auto.clone(),
-        model: model.unwrap_or_else(|| AUTO_MODEL.into()),
-        model_auth: Arc::new(control),
-        api_providers: Arc::new(HttpApiProviders::new(http, Some(auto))),
-    })
+    // 圖片來源：這裡只有一個空槽（讀檔要資料庫），`crate::start` 把 `StoreImages` 填進去；
+    // provider 與 `Deps::images` 共用同一個槽，所以填的就是推論路徑用的。
+    let images = crate::images::ImageSlot::new();
+    let auto = Arc::new(
+        AutoModel::new(provider, model.is_none(), control.status())
+            .with_images(Arc::new(images.clone())),
+    );
+    let mut deps = Deps::new(
+        auto.clone(),
+        model.unwrap_or_else(|| AUTO_MODEL.into()),
+        Arc::new(control),
+    );
+    deps.images = images;
+    Ok(deps.with_http_api_providers(http, Some(auto)))
+}
+
+impl Deps {
+    /// 換成正式組裝的 API provider 工廠，並讓它與 [`Deps::images`] 共用同一個圖片來源槽：
+    /// [`start`](crate::start) 填進去的讀檔來源就是這些 provider 發請求時用的來源。
+    pub fn with_http_api_providers(
+        mut self,
+        http: pots_llm::reqwest::Client,
+        chatgpt: Option<Arc<AutoModel>>,
+    ) -> Self {
+        self.api_providers = Arc::new(
+            HttpApiProviders::new(http, chatgpt).with_images(Arc::new(self.images.clone())),
+        );
+        self
+    }
 }
 
 /// 用 ChatGPT 授權啟動服務，直到收到結束訊號。
@@ -275,7 +301,8 @@ impl AutoModel {
     }
 
     /// 圖片附件的內容來源：歷史裡的 [`pots_llm::Item::Image`] 只有附件參照，送出前由它讀出
-    /// base64（見 [`pots_llm::image`]）。附件儲存接上去之後由組裝端呼叫。
+    /// base64（見 [`pots_llm::image`]）。正式版給的是 [`crate::images::ImageSlot`]：建立
+    /// provider 時還沒有資料庫，[`crate::start`] 之後才把讀檔的實作填進同一個槽。
     pub fn with_images(mut self, loader: Arc<dyn pots_llm::image::ImageLoader>) -> Self {
         self.inner = self.inner.with_images(loader);
         self
@@ -350,7 +377,8 @@ impl HttpApiProviders {
     }
 
     /// 圖片附件的內容來源。沒有設定時，歷史裡出現 [`pots_llm::Item::Image`] 會回錯誤，
-    /// 而不是默默送一個少了圖的請求。
+    /// 而不是默默送一個少了圖的請求。正式版給的是 [`crate::images::ImageSlot`]
+    /// （`service::chatgpt_deps` 先放空槽，[`crate::start`] 再填上讀檔的實作）。
     pub fn with_images(mut self, loader: Arc<dyn pots_llm::image::ImageLoader>) -> Self {
         self.images = Some(loader);
         self
