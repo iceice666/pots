@@ -20,7 +20,12 @@
 //! 串流中的訊息另外處理游標，見 [`agent_stream`]／[`streaming_markdown`]。
 
 use gpui_kit::component::text::TextView;
-use gpui_kit::{ElementId, SharedString, Styled as _, px, relative};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    Div, ElementId, ParentElement as _, SharedString, Styled as _, div, px, relative,
+};
+
+use crate::theme;
 
 /// 內文預設字級（一般密度的對話流）。
 pub const BODY_SIZE: f32 = 15.;
@@ -45,6 +50,50 @@ pub fn agent_text(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Te
 /// 串流中的 agent 文字：收尾未閉合的區塊後把游標接在後面。
 pub fn agent_stream(id: impl Into<ElementId>, source: &str) -> TextView {
     agent_text(id, streaming_markdown(source))
+}
+
+/// 淡色的 agent 文字（13px）：卡片附註、核准理由、記憶觀察這類次要內文。
+pub fn agent_text_muted(id: impl Into<ElementId>, text: impl Into<SharedString>) -> TextView {
+    agent_text(id, text)
+        .text_size(px(13.))
+        .text_color(theme::text_muted())
+}
+
+/// 有固定前綴的一段文字：前綴維持純文字，`body` 那段 agent 原文走 Markdown。
+///
+/// 「需要你：」「失敗 N 次：」「你的理由：」這類前綴是平台自己加的字，不是 Markdown
+/// 的一部分；只把後面的原文交給 Markdown 解析，前綴就不會因為鄰近的 `*`／`_` 被吃掉
+/// 或誤判成語法。前綴與內文分成兩行（Markdown 是區塊層渲染，接不成同一行）。
+///
+/// 字級與顏色下在回傳的 `Div` 上：前綴吃得到，`body` 沒有自己指定顏色時也會沿用。
+pub fn agent_text_prefixed(prefix: impl Into<SharedString>, body: TextView) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(div().child(prefix.into()))
+        .child(body)
+}
+
+/// 把 Markdown 原文截到最多 `max_lines` 行，被截掉時在最後補「…」。
+///
+/// `TextView` 的 `max_lines` 只把版面高度夾住、不會畫省略號，所以截斷在原文這一層
+/// 做（按原行數切，行內語法可能因此不完整，Markdown 會照剩下的字面渲染，不會丟字）。
+/// 呼叫端通常兩者一起用：這裡給「…」，`max_lines` 保證渲染後的高度上限。
+pub fn clamp_markdown(source: &str, max_lines: usize) -> String {
+    let max_lines = max_lines.max(1);
+    let mut lines: Vec<&str> = source.lines().collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.len() <= max_lines {
+        return lines.join("\n");
+    }
+    let mut out = lines[..max_lines].join("\n");
+    while out.ends_with([' ', '\t']) {
+        out.pop();
+    }
+    out.push('…');
+    out
 }
 
 /// 把串流中的 Markdown 原文補成可以安全接上游標的樣子。
@@ -341,5 +390,36 @@ mod tests {
     #[test]
     fn escaped_backtick_is_not_an_opening_delimiter() {
         assert_eq!(streaming_markdown("不是 \\`code"), "不是 \\`code▍");
+    }
+
+    #[test]
+    fn short_markdown_is_left_alone_by_the_clamp() {
+        assert_eq!(clamp_markdown("第一行\n第二行", 3), "第一行\n第二行");
+        assert_eq!(clamp_markdown("第一行\n第二行\n第三行", 3), "第一行\n第二行\n第三行");
+    }
+
+    #[test]
+    fn the_clamp_appends_an_ellipsis_to_the_last_kept_line() {
+        assert_eq!(
+            clamp_markdown("第一行\n第二行\n第三行\n第四行", 2),
+            "第一行\n第二行…"
+        );
+    }
+
+    #[test]
+    fn the_clamp_drops_trailing_blank_lines_before_counting() {
+        assert_eq!(clamp_markdown("第一行\n第二行\n\n\n", 2), "第一行\n第二行");
+        // 只有空行也一樣：不會變成「…」。
+        assert_eq!(clamp_markdown("\n\n", 2), "");
+    }
+
+    #[test]
+    fn the_clamp_never_leaves_a_space_before_the_ellipsis() {
+        assert_eq!(clamp_markdown("a\nb   \nc", 2), "a\nb…");
+    }
+
+    #[test]
+    fn the_clamp_treats_zero_lines_as_one() {
+        assert_eq!(clamp_markdown("a\nb", 0), "a…");
     }
 }
