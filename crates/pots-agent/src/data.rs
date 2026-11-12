@@ -238,6 +238,32 @@ pub struct Channel {
     pub messages: Vec<Message>,
 }
 
+/// Something the owner decided that holds beyond the conversation it was
+/// decided in. Agents record them with `record_decision`, and every agent
+/// sees the ones still in force. Its index in [`Workspace::decisions`] is its
+/// id; entries are never removed, only retired.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Decision {
+    /// One self-contained line.
+    pub text: String,
+    /// Who recorded it.
+    pub author: usize,
+    /// Unix time in seconds.
+    pub ts: i64,
+    /// Where it was decided, as shown to agents: "#general", "thread “A” in #app".
+    pub place: String,
+    /// Why it no longer holds: replaced by another decision, or withdrawn.
+    #[serde(default)]
+    pub retired: Option<Retired>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Retired {
+    ReplacedBy(usize),
+    Withdrawn,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Workspace {
     pub name: String,
@@ -246,6 +272,8 @@ pub struct Workspace {
     pub channels: Vec<Channel>,
     pub threads: Vec<Thread>,
     next_id: usize,
+    #[serde(default)]
+    pub decisions: Vec<Decision>,
 }
 
 impl Workspace {
@@ -502,6 +530,7 @@ pub fn empty() -> Workspace {
         channels: Vec::new(),
         threads: Vec::new(),
         next_id: 0,
+        decisions: Vec::new(),
     };
     ws.channels.push(Channel {
         name: "general".to_string(),
@@ -531,6 +560,7 @@ pub fn seed() -> Workspace {
         channels: Vec::new(),
         threads: Vec::new(),
         next_id: 0,
+        decisions: Vec::new(),
     };
 
     let add = |ws: &mut Workspace, name: &str, topic: &str, dm: Option<usize>, unread: bool, msgs: &[(usize, u32, &str, &[(&str, u32, bool)])]| {
@@ -689,6 +719,14 @@ mod tests {
         assert!(ws.waits_on_owner(t));
         ws.message_mut(Conv::Thread(t), ix).card = Some(choice(Some(0)));
         assert!(!ws.waits_on_owner(t));
+    }
+
+    #[test]
+    fn workspaces_saved_before_the_decision_log_load_with_none() {
+        let mut json = serde_json::to_value(empty()).unwrap();
+        json.as_object_mut().unwrap().remove("decisions");
+        let ws: Workspace = serde_json::from_value(json).unwrap();
+        assert!(ws.decisions.is_empty());
     }
 
     #[test]

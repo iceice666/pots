@@ -876,6 +876,26 @@ impl ChatApp {
         (format!("{} will tell the owner. Finish your reply here as usual.", names.join(", ")), false)
     }
 
+    /// Agent `a`'s `record_decision` call, from its reply `id`: add it to
+    /// the log, and say so under the reply so the owner sees what was kept.
+    fn record_decision(&mut self, id: usize, a: usize, input: &serde_json::Value, cx: &mut Context<Self>) -> (String, bool) {
+        let author = self.agents.list[a].user;
+        let conv = self.ws.locate(id).map(|(conv, _)| conv);
+        let recorded = match agent::tools::record_decision(&mut self.ws, author, conv, input) {
+            Ok(recorded) => recorded,
+            Err(e) => return (e, true),
+        };
+        if let Some(msg) = self.ws.message_by_id_mut(id) {
+            msg.note = Some(match msg.note.take() {
+                Some(note) => format!("{note}\n{}", recorded.shown),
+                None => recorded.shown,
+            });
+        }
+        self.save();
+        cx.notify();
+        (recorded.result, false)
+    }
+
     /// Agent `a`'s `post_in_thread` call: its message in the thread, and
     /// whoever it @mentions starts on it there.
     fn post_in_thread(&mut self, a: usize, input: &serde_json::Value, cx: &mut Context<Self>) -> (String, bool) {
@@ -2700,6 +2720,10 @@ impl Host for UiHost<'_> {
             agent::tools::TASK_DONE => {
                 let id = self.id;
                 self.update(|app, cx| app.task_done(id, agent, input, cx))
+            }
+            agent::tools::RECORD_DECISION => {
+                let id = self.id;
+                self.update(|app, cx| app.record_decision(id, agent, input, cx))
             }
             _ => self.update(|app, _| agent::tools::run(&app.ws, name, input)),
         }

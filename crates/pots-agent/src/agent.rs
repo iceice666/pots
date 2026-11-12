@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::config::{
     AgentConfig, ChannelConfig, Config, ProjectConfig, SandboxConfig, TeamConfig, WorkerConfig, WorkspaceMode, expand_home,
 };
-use crate::data::{Card, Conv, MergeOutcome, UserKind, Workspace};
+use crate::data::{Card, Conv, Decision, MergeOutcome, Retired, UserKind, Workspace};
 use crate::reply::Reply;
 use pots_llm::{Api, Part, Provider, Request, Role, ToolSpec, Turn};
 use crate::sandbox;
@@ -454,13 +454,17 @@ impl Agents {
         system.push_str(&context(ws, conv, agent.user));
         let mut tools = tools::specs();
         // Agents that don't write or review code coordinate: they hand out
-        // tasks and keep parallel ones from getting in each other's way.
+        // tasks and keep parallel ones from getting in each other's way,
+        // and keep the decision log.
         if agent.config.workspace.is_none() {
             tools.push(tools::start_task_spec());
             tools.push(tools::post_in_thread_spec());
             tools.push(sandbox::check_merge_conflicts_spec());
+            tools.push(tools::record_decision_spec());
             system.push_str(COORDINATING);
+            system.push_str(RECORDING);
         }
+        system.push_str(&decisions(ws));
         // Workers in a task thread say when it ends without a merge request.
         if agent.config.workspace.is_some() && matches!(conv, Conv::Thread(_)) {
             tools.push(tools::task_done_spec());
@@ -611,6 +615,59 @@ pub fn owner_question_note(asker: &str, place: &str, question: &str, options: &[
         options.join(" / ")
     )
 }
+
+/// The most decisions shown to agents: the most recent ones in force.
+const MAX_DECISIONS_SHOWN: usize = 80;
+
+/// The decision log as agents see it: the decisions still in force, oldest
+/// first. Dates are spelled out, since agents see no dates on messages.
+pub fn decisions(ws: &Workspace) -> String {
+    let active: Vec<(usize, &Decision)> = ws.decisions.iter().enumerate().filter(|(_, d)| d.retired.is_none()).collect();
+    let mut out = String::from(
+        "\n\n# Decisions so far\n\
+         The owner's decisions that hold across conversations, from the team's decision log. Follow them. When \
+         a request goes against one, say which, and ask before acting against it.\n",
+    );
+    if active.is_empty() {
+        out.push_str("(none recorded yet)");
+        return out;
+    }
+    let skipped = active.len().saturating_sub(MAX_DECISIONS_SHOWN);
+    if skipped > 0 {
+        out.push_str(&format!("({skipped} older decisions not shown.)\n"));
+    }
+    for (id, d) in &active[skipped..] {
+        let date = chrono::TimeZone::timestamp_opt(&chrono::Local, d.ts, 0)
+            .single()
+            .map(|t| t.format("%b %-d, %Y").to_string())
+            .unwrap_or_default();
+        let place = match d.place.as_str() {
+            "" => String::new(),
+            p => format!(", {p}"),
+        };
+        out.push_str(&format!("- [{id}] ({date}{place}) {}\n", d.text));
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
+/// Where a decision made in `conv` was made, for the log.
+fn decision_place(ws: &Workspace, conv: Conv) -> String {
+    match conv {
+        Conv::Channel(c) if ws.channels[c].dm.is_some() => "direct messages".to_string(),
+        conv => task_place(ws, conv),
+    }
+}
+
+/// What coordinators are told about keeping the decision log.
+const RECORDING: &str = "\n\n# The decision log\n\
+Teammates only see the conversation they are in, plus the decision log below. So when the owner settles \
+something meant to hold beyond this conversation (a choice, a constraint, a convention, a date, a priority), \
+call record_decision right away with one self-contained line. If it changes an earlier decision, pass that \
+decision's id in `replaces`. Don't record tasks or status, things already in the log, or your own suggestions \
+the owner hasn't agreed to.\n\
+The owner often settles things in follow-ups that don't @mention you, so they never reached you. Each time you \
+reply, look over the conversation you can see for decisions missing from the log, and record those too.";
 
 /// What agents with a workspace are told about ending a task.
 const FINISHING: &str = "\n\n# Ending a task\n\
@@ -878,6 +935,88 @@ pub mod tools {
         };
         let summary = input["summary"].as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("`summary` is required.")?;
         Ok(Done { status, summary: summary.to_string() })
+    }
+
+    /// The tool that adds to the workspace's decision log; the host runs it
+    /// with [`record_decision`].
+    pub const RECORD_DECISION: &str = "record_decision";
+    /// The longest decision recorded, in characters.
+    pub const MAX_DECISION: usize = 300;
+
+    pub fn record_decision_spec() -> ToolSpec {
+        ToolSpec {
+            name: RECORD_DECISION,
+            description: "Add a decision the owner made to the team's decision log, which every teammate sees in \
+                          every conversation from now on. Record choices, constraints, conventions, dates and \
+                          priorities meant to hold beyond this conversation, as soon as the owner settles them. \
+                          Not tasks, status, or your own suggestions the owner hasn't agreed to. When it changes \
+                          an earlier decision, pass that decision's id in `replaces`; to withdraw one with nothing \
+                          in its place, pass only `replaces`. Your reply goes on as usual.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string", "description": "One self-contained line that makes sense without this conversation: what was decided, and why if it matters. In the owner's language."},
+                    "replaces": {"type": "integer", "minimum": 0, "description": "Id of the decision this one changes or withdraws."}
+                },
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    /// What a `record_decision` call did.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Recorded {
+        /// The new decision's id, unless one was only withdrawn.
+        pub id: Option<usize>,
+        /// A line for the owner, under the agent's reply.
+        pub shown: String,
+        /// The tool result for the agent.
+        pub result: String,
+    }
+
+    /// Run `record_decision` for `author`, decided in `conv`.
+    pub fn record_decision(ws: &mut Workspace, author: usize, conv: Option<Conv>, input: &Value) -> Result<Recorded, String> {
+        let text = input["decision"].as_str().map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "));
+        let text = text.filter(|t| !t.is_empty());
+        let replaces = match &input["replaces"] {
+            Value::Null => None,
+            v => {
+                let id = v.as_u64().ok_or("`replaces` must be a decision id.")? as usize;
+                match ws.decisions.get(id) {
+                    None => return Err(format!("There is no decision {id}.")),
+                    Some(d) if d.retired.is_some() => return Err(format!("Decision {id} no longer holds already.")),
+                    Some(_) => Some(id),
+                }
+            }
+        };
+        let Some(text) = text else {
+            let id = replaces.ok_or("Pass `decision`, `replaces`, or both.")?;
+            ws.decisions[id].retired = Some(Retired::Withdrawn);
+            return Ok(Recorded {
+                id: None,
+                shown: format!("Withdrew decision {id}: {}", ws.decisions[id].text),
+                result: format!("Withdrew decision {id}."),
+            });
+        };
+        if text.chars().count() > MAX_DECISION {
+            return Err(format!("Keep a decision to one line of at most {MAX_DECISION} characters."));
+        }
+        let id = ws.decisions.len();
+        ws.decisions.push(Decision {
+            text: text.clone(),
+            author,
+            ts: crate::data::now(),
+            place: conv.map(|c| decision_place(ws, c)).unwrap_or_default(),
+            retired: None,
+        });
+        if let Some(old) = replaces {
+            ws.decisions[old].retired = Some(Retired::ReplacedBy(id));
+        }
+        let (shown, result) = match replaces {
+            Some(old) => (format!("Decision {id} (replaces {old}): {text}"), format!("Recorded decision {id}; decision {old} no longer holds.")),
+            None => (format!("Decision {id}: {text}"), format!("Recorded decision {id}.")),
+        };
+        Ok(Recorded { id: Some(id), shown, result })
     }
 
     /// The tool that posts into an existing task thread; like
@@ -1437,7 +1576,7 @@ mod tests {
         let chat = ["pass", "list_channels", "read_channel", "ask_owner"];
         assert_eq!(
             names(0),
-            [&chat[..], &["start_task", "post_in_thread", "check_merge_conflicts"]].concat(),
+            [&chat[..], &["start_task", "post_in_thread", "check_merge_conflicts", "record_decision"]].concat(),
             "only coordinators start tasks"
         );
         assert!(agents.request(0, &ws, conv, ix + 1).system.contains("# Tasks side by side"));
@@ -1487,7 +1626,7 @@ mod tests {
         );
         assert!(req.system.starts_with("Be useful.\n\n# Where you are"));
         assert!(req.system.contains("your direct messages with the owner"));
-        assert_eq!(req.tools.len(), 7);
+        assert_eq!(req.tools.len(), 8);
     }
 
     #[test]
@@ -1523,5 +1662,62 @@ mod tests {
 
         let (out, _) = tools::run(&ws, "list_channels", &json!({}));
         assert!(out.contains("#engineering (6 messages)") && out.contains("thread “search index migration”"), "{out}");
+    }
+
+    #[test]
+    fn decisions_are_recorded_replaced_and_withdrawn() {
+        let (mut ws, _, [pm, _, _]) = team();
+        let general = Conv::Channel(ws.find_channel("general").unwrap());
+        let record = |ws: &mut Workspace, input: Value| tools::record_decision(ws, pm, Some(general), &input);
+
+        let first = record(&mut ws, json!({"decision": "  Rate limit:\n 100 requests/min  "})).unwrap();
+        assert_eq!(first.id, Some(0));
+        assert_eq!(first.shown, "Decision 0: Rate limit: 100 requests/min");
+        assert_eq!(ws.decisions[0].place, "#general");
+        assert_eq!(ws.decisions[0].author, pm);
+
+        let second = record(&mut ws, json!({"decision": "Rate limit: 60 requests/min", "replaces": 0})).unwrap();
+        assert_eq!(second.id, Some(1));
+        assert!(second.result.contains("decision 0 no longer holds"), "{}", second.result);
+        assert_eq!(ws.decisions[0].retired, Some(Retired::ReplacedBy(1)));
+
+        assert!(record(&mut ws, json!({"decision": "x", "replaces": 0})).unwrap_err().contains("no longer holds"));
+        assert!(record(&mut ws, json!({"replaces": 9})).unwrap_err().contains("no decision 9"));
+        assert!(record(&mut ws, json!({"decision": "  "})).is_err());
+        assert!(record(&mut ws, json!({"decision": "x".repeat(tools::MAX_DECISION + 1)})).is_err());
+
+        let withdrawn = record(&mut ws, json!({"replaces": 1})).unwrap();
+        assert_eq!(withdrawn.id, None);
+        assert_eq!(ws.decisions[1].retired, Some(Retired::Withdrawn));
+        assert_eq!(ws.decisions.len(), 2, "nothing is ever removed");
+
+        let dm = Conv::Channel(ws.ensure_dm(pm));
+        tools::record_decision(&mut ws, pm, Some(dm), &json!({"decision": "Ship on Fridays"})).unwrap();
+        assert_eq!(ws.decisions[2].place, "direct messages");
+    }
+
+    #[test]
+    fn every_agent_sees_the_decisions_in_force_and_coordinators_keep_them() {
+        let (mut ws, agents, [pm, _, _]) = team();
+        let general = Conv::Channel(ws.find_channel("general").unwrap());
+        let ix = ws.post(general, ws.me, "@PM @Engineer hi");
+        let request = |ws: &Workspace, a: usize| agents.request(a, ws, general, ix + 1);
+        assert!(request(&ws, 0).system.contains("# Decisions so far\n"));
+        assert!(request(&ws, 0).system.ends_with("(none recorded yet)"));
+
+        for input in [json!({"decision": "Use SQLite"}), json!({"decision": "Freeze auth until v0.5"}), json!({"decision": "Use Postgres", "replaces": 0})] {
+            tools::record_decision(&mut ws, pm, Some(general), &input).unwrap();
+        }
+        let today = chrono::Local::now().format("%b %-d, %Y").to_string();
+        for a in [0, 1] {
+            let system = request(&ws, a).system;
+            assert!(system.contains(&format!("- [1] ({today}, #general) Freeze auth until v0.5\n- [2] ({today}, #general) Use Postgres")), "{system}");
+            assert!(!system.contains("Use SQLite"), "replaced decisions are left out");
+        }
+        let names = |a: usize| request(&ws, a).tools.iter().map(|t| t.name).collect::<Vec<_>>();
+        assert!(names(0).contains(&tools::RECORD_DECISION));
+        assert!(request(&ws, 0).system.contains("# The decision log"));
+        assert!(!names(1).contains(&tools::RECORD_DECISION), "only coordinators record");
+        assert!(!request(&ws, 1).system.contains("# The decision log"));
     }
 }
