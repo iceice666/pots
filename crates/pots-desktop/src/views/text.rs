@@ -96,13 +96,22 @@ pub fn status_note(status: &str) -> Option<(&'static str, &str)> {
         .map(|rest| ("需要你：", rest))
 }
 
-/// 里程碑卡片的平台前綴：「Goal 完成：」是伺服器加的字（`tools.rs::complete_goal`），
-/// 後面才是 Planner 寫的 summary。
+/// 里程碑卡片的平台前綴：前綴由伺服器加（`tools.rs::complete_goal` 的「Goal 完成：」、
+/// `worker/mod.rs` 快速修正的四種結果），後面才是 Planner／worker 寫的 summary。
 pub fn milestone_parts(text: &str) -> (&'static str, &str) {
-    match text.strip_prefix("Goal 完成：") {
-        Some(rest) => ("Goal 完成：", rest),
-        None => ("", text),
+    const PREFIXES: [&str; 5] = [
+        "Goal 完成：",
+        "快速修改完成：",
+        "快速修改沒有完成：",
+        "快速修改卡住了：",
+        "快速修改超出範圍，已升級成一般 Goal 交給 Planner：",
+    ];
+    for prefix in PREFIXES {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            return (prefix, rest);
+        }
     }
+    ("", text)
 }
 
 /// 把 Markdown 原文截到最多 `max_lines` 行，被截掉時在最後補「…」。
@@ -487,6 +496,10 @@ mod tests {
         assert_eq!(
             milestone_parts("Goal 完成：**全部**通過"),
             ("Goal 完成：", "**全部**通過")
+        );
+        assert_eq!(
+            milestone_parts("快速修改卡住了：CI 紅燈"),
+            ("快速修改卡住了：", "CI 紅燈")
         );
         assert_eq!(milestone_parts("拆好 3 個任務"), ("", "拆好 3 個任務"));
     }
