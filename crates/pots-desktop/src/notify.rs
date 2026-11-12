@@ -29,6 +29,8 @@ impl Sender for Os {
     fn send(&self, title: &str, body: &str) {
         let (title, body) = (title.to_string(), body.to_string());
         std::thread::spawn(move || {
+            #[cfg(target_os = "macos")]
+            set_macos_application();
             let result = notify_rust::Notification::new()
                 .appname("Pots")
                 .summary(&title)
@@ -39,6 +41,20 @@ impl Sender for Os {
             }
         });
     }
+}
+
+/// macOS 的通知要掛在某個 app 的 bundle id 底下（`appname` 在 macOS 沒有作用）。沒先設定的話，
+/// `mac-notification-sys` 第一次送通知時會跑 AppleScript `get id of application "use_default"`，
+/// 找不到這個 app，系統就跳出「Where is use_default?」的選擇 App 視窗。桌面版是沒有 bundle 的
+/// 執行檔，所以直接指定它原本的退路 Finder，跳過那段查詢。
+#[cfg(target_os = "macos")]
+fn set_macos_application() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Err(e) = notify_rust::set_application("com.apple.Finder") {
+            tracing::warn!(error = %e, "無法設定送出通知的 app");
+        }
+    });
 }
 
 /// 只記下來（測試與截圖用）。
