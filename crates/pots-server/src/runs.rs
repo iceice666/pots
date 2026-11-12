@@ -273,8 +273,27 @@ pub(crate) async fn post_system_trigger(
     Ok(id)
 }
 
+/// 觸發訊息附的圖片：歷史裡只留附件參照（`Item::Image` 的 attachment id 與 MIME），
+/// base64 之後才由 [`crate::images::StoreImages`] 從本體檔讀出來（見 [`pots_llm::image`]）。
+///
+/// 只有人類訊息會有附件；排程與 listener 的系統觸發（`stream_items.trigger_text`）沒有，
+/// 走原本「一筆 `Item::User`」的路徑。
+fn attachments_of(view: Option<&StreamItemView>) -> Vec<(String, String)> {
+    match view.map(|v| &v.kind) {
+        Some(StreamItemKind::Human(msg)) => msg
+            .attachments
+            .iter()
+            .map(|a| (a.id.to_string(), a.mime.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// 人類訊息進入原始歷史：寫 `om_raw`、標成已處理，並記一筆 `ItemUpdated`，
 /// 讓客戶端清掉「排隊中」的標示。
+///
+/// 有圖片附件時寫一筆 `Item::User` 後面接著每張圖的 `Item::Image`（見
+/// [`pots_llm::image::user_items`]）；沒有附件時與以前完全一樣，只寫一筆 `Item::User`。
 pub(crate) async fn consume(
     txn: &mut LogTxn<'_>,
     project: ProjectId,
@@ -282,17 +301,27 @@ pub(crate) async fn consume(
     text: &str,
     run_id: Option<Uuid>,
 ) -> Result<(), Error> {
-    Store::append_om_raw(
-        txn.conn(),
-        project,
-        run_id,
-        &Item::User {
-            text: text.to_string(),
-        },
-    )
-    .await?;
+    // 先讀一次串流訊息：附件清單與後面廣播的 `ItemUpdated` 都用這一份。
+    // `mark_consumed` 只改 `stream_items` 的欄位，不改 `body`，所以這份內容與之後重讀相同。
+    let view = Store::item(txn.conn(), item).await?;
+    let images = attachments_of(view.as_ref());
+    if images.is_empty() {
+        Store::append_om_raw(
+            txn.conn(),
+            project,
+            run_id,
+            &Item::User {
+                text: text.to_string(),
+            },
+        )
+        .await?;
+    } else {
+        for history_item in pots_llm::image::user_items(text, &images) {
+            Store::append_om_raw(txn.conn(), project, run_id, &history_item).await?;
+        }
+    }
     Store::mark_consumed(txn.conn(), item, run_id).await?;
-    if let Some(view) = Store::item(txn.conn(), item).await? {
+    if let Some(view) = view {
         txn.push(|seq| ServerEvent::ItemUpdated {
             seq,
             scope: crate::store::stream_scope(project),
