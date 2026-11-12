@@ -191,6 +191,21 @@ fn header_icon_button(
         .tip(tip)
 }
 
+/// 輸入框底列的「選擇檔案」按鈕：紙夾圖示，滑過顯示說明。
+fn icon_pick_button(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(28.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::track()))
+        .child(icon(IconName::ImagePlus, 17., theme::text_muted()))
+}
+
 impl PotsApp {
     pub fn render_channel(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(p) = self.current_project() else {
@@ -499,6 +514,15 @@ impl PotsApp {
                             .text_color(theme::text_muted())
                             .truncate()
                             .child(hint),
+                    )
+                    // 選檔走系統對話框（gpui `prompt_for_paths`），選到的路徑跟拖放
+                    // 共用同一條管線。`window` 要傳進去是因為對話框是非同步回覆。
+                    .child(
+                        icon_pick_button("composer-pick")
+                            .tip("選擇圖片檔（也可以直接拖放或貼上）")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.pick_images(window, cx)
+                            })),
                     )
                     .child(send_button("send", 36.).on_click(
                         cx.listener(|this, _, window, cx| this.send_composer(window, cx)),

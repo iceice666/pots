@@ -11,7 +11,7 @@
 //! png/jpeg/webp/gif（`pots_proto::ATTACHMENT_MIMES`），所以轉檔在客戶端做。
 
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::{ClipboardEntry, ClipboardItem, Image as GpuiImage, ImageFormat as GpuiImageFormat};
@@ -236,6 +236,12 @@ impl PendingAttachments {
         took
     }
 
+    /// 系統檔案對話框開不起來（Linux 缺 `xdg-desktop-portal` 之類）：只留中文提示，
+    /// 不動已經在輸入框裡的圖片。使用者取消對話框不算失敗，不會走這裡。
+    pub fn note_prompt_failure(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
+    }
+
     /// 貼上的內容。`true` 代表這次貼上被吃掉了（有圖片被收下），呼叫端不要讓文字插進
     /// 輸入框；全部被拒時回 `false`，讓一般文字貼上照常運作。
     pub fn accept_clipboard(&mut self, item: &ClipboardItem) -> bool {
@@ -277,7 +283,43 @@ impl PendingAttachments {
     }
 }
 
-/// 拖進來的一個路徑讀完了：`bytes` 成功是檔案的位元組，失敗是中文原因。
+/// 「選擇檔案」對話框的回覆要怎麼處理：拖放與選檔共用同一條「讀檔 → 驗證」管線，
+/// 差別只在路徑從哪裡來。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickOutcome {
+    /// 使用者選了這些路徑（空清單等於沒選，會歸到 [`Self::Cancelled`]）。
+    Paths(Vec<PathBuf>),
+    /// 使用者按取消，或對話框的回覆管道被丟掉：不動輸入框。
+    Cancelled,
+    /// 對話框開不起來（Linux 缺 `xdg-desktop-portal` 等）：給中文說明。
+    Failed(String),
+}
+
+/// 把 `prompt_for_paths` 那條 oneshot 的結果翻成要做的事。
+///
+/// 三種結局都要分清楚：`Ok(Some(paths))` 是真的選了、`Ok(None)` 是取消、
+/// `Err` 是系統根本開不起對話框（要提示使用者改走拖放／貼上）。
+pub fn pick_outcome<E, C>(result: Result<Result<Option<Vec<PathBuf>>, E>, C>) -> PickOutcome
+where
+    E: std::fmt::Display,
+    C: std::fmt::Display,
+{
+    match result {
+        Ok(Ok(Some(paths))) if !paths.is_empty() => PickOutcome::Paths(paths),
+        Ok(Ok(_)) => PickOutcome::Cancelled,
+        Ok(Err(reason)) => PickOutcome::Failed(prompt_failure(reason)),
+        // 回覆管道被丟掉（視窗關了、對話框沒了）：當成取消，不吵使用者。
+        Err(_) => PickOutcome::Cancelled,
+    }
+}
+
+/// 系統沒有檔案選擇對話框時給使用者的中文說明；`reason` 是平台回的原因，附在後面
+/// 方便回報問題，但前面那句一定要看得懂。
+pub fn prompt_failure(reason: impl std::fmt::Display) -> String {
+    format!("系統沒有檔案選擇對話框（缺少 xdg-desktop-portal），請改用拖放或貼上：{reason}")
+}
+
+/// 拖進來或選進來的一個路徑讀完了：`bytes` 成功是檔案的位元組，失敗是中文原因。
 pub struct DroppedFile {
     /// 檔名（或整條路徑，取不到檔名時）；顯示與上傳都用它。
     pub name: String,

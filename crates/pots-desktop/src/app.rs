@@ -24,7 +24,9 @@ use crate::model::*;
 use crate::notify::{self, Notifier};
 use crate::sync::{self, Notice, Sync};
 use crate::theme;
-use crate::views::composer_attach::{DroppedFile, PendingAttachments, read_dropped};
+use crate::views::composer_attach::{
+    DroppedFile, PendingAttachments, PickOutcome, pick_outcome, read_dropped,
+};
 use crate::views::images::{AttachmentImages, FetchEvent};
 
 gpui_kit::actions!(pots, [OpenOverseer, CloseSettings]);
@@ -3285,6 +3287,49 @@ impl PotsApp {
             self.drain_uploads(cx);
         }
         took
+    }
+
+    /// 「選擇檔案」按鈕：開系統的檔案對話框（gpui 的 `prompt_for_paths`）選圖。
+    ///
+    /// 對話框是非同步回覆的，所以整段在 `cx.spawn_in` 裡等，不在 render／事件處理裡
+    /// 同步卡住 UI 執行緒。三種結局：選了路徑 → 走跟拖放同一條管線
+    /// （[`Self::accept_dropped`]，讀檔在背景）；取消 → 什麼都不動；對話框開不起來
+    /// （Linux 缺 `xdg-desktop-portal`）→ 中文提示改用拖放或貼上。
+    pub fn pick_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("選擇要送給模型的圖片".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = pick_outcome(rx.await);
+            this.update_in(cx, |app, window, cx| app.on_picked(outcome, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// 檔案對話框的結局。`pick_images` 的非同步部分把結果交給它；測試也直接餵它，
+    /// 因為 headless 平台只能模擬「選了」與「取消」，模擬不出「對話框開不起來」。
+    pub fn on_picked(
+        &mut self,
+        outcome: PickOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match outcome {
+            PickOutcome::Cancelled => {}
+            PickOutcome::Failed(reason) => {
+                self.pending.update(cx, |p, cx| {
+                    p.note_prompt_failure(reason);
+                    cx.notify();
+                });
+                cx.notify();
+            }
+            // 選到的路徑跟拖進來的一模一樣：同一條讀檔 + 驗證管線。
+            PickOutcome::Paths(paths) => self.accept_dropped(paths, window, cx),
+        }
     }
 
     /// 拖放懸停：只有游標真的在這個元素上才亮，離開就收回。
