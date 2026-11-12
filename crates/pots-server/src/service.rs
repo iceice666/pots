@@ -274,6 +274,13 @@ impl AutoModel {
         }
     }
 
+    /// 圖片附件的內容來源：歷史裡的 [`pots_llm::Item::Image`] 只有附件參照，送出前由它讀出
+    /// base64（見 [`pots_llm::image`]）。附件儲存接上去之後由組裝端呼叫。
+    pub fn with_images(mut self, loader: Arc<dyn pots_llm::image::ImageLoader>) -> Self {
+        self.inner = self.inner.with_images(loader);
+        self
+    }
+
     async fn resolve(&self) -> Result<String, LlmError> {
         {
             let mut auth = self.auth.lock().await;
@@ -329,11 +336,24 @@ impl ModelProvider for AutoModel {
 pub struct HttpApiProviders {
     http: pots_llm::reqwest::Client,
     chatgpt: Option<Arc<AutoModel>>,
+    /// 圖片附件的內容來源；見 [`pots_llm::image`]。
+    images: Option<Arc<dyn pots_llm::image::ImageLoader>>,
 }
 
 impl HttpApiProviders {
     pub fn new(http: pots_llm::reqwest::Client, chatgpt: Option<Arc<AutoModel>>) -> Self {
-        Self { http, chatgpt }
+        Self {
+            http,
+            chatgpt,
+            images: None,
+        }
+    }
+
+    /// 圖片附件的內容來源。沒有設定時，歷史裡出現 [`pots_llm::Item::Image`] 會回錯誤，
+    /// 而不是默默送一個少了圖的請求。
+    pub fn with_images(mut self, loader: Arc<dyn pots_llm::image::ImageLoader>) -> Self {
+        self.images = Some(loader);
+        self
     }
 }
 
@@ -374,19 +394,38 @@ impl ApiProviderFactory for HttpApiProviders {
         let headers = header_map(headers)?;
         if let Some(preset) = kind.preset() {
             return Ok(Arc::new(PresetProvider::new(
-                preset, base, key, http, headers,
+                preset,
+                base,
+                key,
+                http,
+                headers,
+                self.images.clone(),
             )));
         }
+        let images = self.images.clone();
         match kind {
-            ProviderKind::OpenAiCompatible => Ok(Arc::new(
-                OpenAiCompatProvider::new(base, key, http).with_headers(headers),
-            )),
-            ProviderKind::OpenAiResponses => Ok(Arc::new(
-                ResponsesProvider::with_api_key(base, key, http).with_headers(headers),
-            )),
-            ProviderKind::AnthropicCompatible => Ok(Arc::new(
-                AnthropicProvider::new(base, key, http).with_headers(headers),
-            )),
+            ProviderKind::OpenAiCompatible => {
+                let provider = OpenAiCompatProvider::new(base, key, http).with_headers(headers);
+                Ok(Arc::new(match images {
+                    Some(loader) => provider.with_images(loader),
+                    None => provider,
+                }))
+            }
+            ProviderKind::OpenAiResponses => {
+                let provider =
+                    ResponsesProvider::with_api_key(base, key, http).with_headers(headers);
+                Ok(Arc::new(match images {
+                    Some(loader) => provider.with_images(loader),
+                    None => provider,
+                }))
+            }
+            ProviderKind::AnthropicCompatible => {
+                let provider = AnthropicProvider::new(base, key, http).with_headers(headers);
+                Ok(Arc::new(match images {
+                    Some(loader) => provider.with_images(loader),
+                    None => provider,
+                }))
+            }
             ProviderKind::ChatGpt => Err("ChatGPT 方案不是 API provider".into()),
             ProviderKind::OpenCodeZen | ProviderKind::OpenCodeGo => {
                 unreachable!("preset 在上面的分支處理")
@@ -404,14 +443,16 @@ impl ApiProviderFactory for HttpApiProviders {
         let (base, key, http) = (base_url.clone(), api_key.to_string(), self.http.clone());
         let headers = header_map(headers).map_err(LlmError::Other)?;
         if let Some(preset) = kind.preset() {
-            return Ok(PresetProvider::new(preset, base, key, http, headers)
-                .models()
-                .into_iter()
-                .map(|m| ModelOption {
-                    id: m.slug,
-                    display_name: m.display_name,
-                })
-                .collect());
+            return Ok(
+                PresetProvider::new(preset, base, key, http, headers, self.images.clone())
+                    .models()
+                    .into_iter()
+                    .map(|m| ModelOption {
+                        id: m.slug,
+                        display_name: m.display_name,
+                    })
+                    .collect(),
+            );
         }
         let models = match kind {
             ProviderKind::OpenAiCompatible => {
@@ -468,6 +509,25 @@ mod tests {
             }),
             ModelAuthView::SignedIn { account: None }
         );
+    }
+
+    #[test]
+    fn api_providers_take_the_attachment_loader() {
+        // 有 loader 時照樣建得起來（loader 只在送出含圖片的請求時才會被讀）。
+        let loader: Arc<dyn pots_llm::image::ImageLoader> =
+            Arc::new(pots_llm::image::FnImages::new(|id: String| async move {
+                Err(LlmError::Unsupported(format!("沒有附件 {id}")))
+            }));
+        let factory = HttpApiProviders::new(reqwest::Client::new(), None).with_images(loader);
+        let base = Url::parse("https://api.openai.com/v1").unwrap();
+        for kind in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::OpenAiResponses,
+            ProviderKind::AnthropicCompatible,
+            ProviderKind::OpenCodeGo,
+        ] {
+            factory.build(kind, &base, "sk-test", &[]).unwrap();
+        }
     }
 
     #[test]

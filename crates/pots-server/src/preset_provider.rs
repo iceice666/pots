@@ -35,6 +35,7 @@ impl PresetProvider {
         api_key: String,
         http: pots_llm::reqwest::Client,
         headers: HeaderMap,
+        images: Option<Arc<dyn pots_llm::image::ImageLoader>>,
     ) -> Self {
         let mut inner = HashMap::new();
         for api in [
@@ -46,22 +47,36 @@ impl PresetProvider {
                 continue;
             }
             let base = base_for_api(&base_url, api);
+            // 圖片來源：歷史裡的 `Item::Image` 只有附件參照，送出前才由它讀出 base64。
             let provider: Arc<dyn ModelProvider> = match api {
-                PresetApi::AnthropicMessages => Arc::new(
-                    AnthropicProvider::new(base, api_key.clone(), http.clone())
+                PresetApi::AnthropicMessages => {
+                    let provider = AnthropicProvider::new(base, api_key.clone(), http.clone())
                         .with_headers(headers.clone())
-                        .with_session_header(SESSION_HEADER),
-                ),
-                PresetApi::OpenAiCompletions => Arc::new(
-                    OpenAiCompatProvider::new(base, api_key.clone(), http.clone())
+                        .with_session_header(SESSION_HEADER);
+                    Arc::new(match &images {
+                        Some(loader) => provider.with_images(loader.clone()),
+                        None => provider,
+                    })
+                }
+                PresetApi::OpenAiCompletions => {
+                    let provider = OpenAiCompatProvider::new(base, api_key.clone(), http.clone())
                         .with_headers(headers.clone())
-                        .with_session_header(SESSION_HEADER),
-                ),
-                PresetApi::OpenAiResponses => Arc::new(
-                    ResponsesProvider::with_api_key(base, api_key.clone(), http.clone())
-                        .with_headers(headers.clone())
-                        .with_session_header(SESSION_HEADER),
-                ),
+                        .with_session_header(SESSION_HEADER);
+                    Arc::new(match &images {
+                        Some(loader) => provider.with_images(loader.clone()),
+                        None => provider,
+                    })
+                }
+                PresetApi::OpenAiResponses => {
+                    let provider =
+                        ResponsesProvider::with_api_key(base, api_key.clone(), http.clone())
+                            .with_headers(headers.clone())
+                            .with_session_header(SESSION_HEADER);
+                    Arc::new(match &images {
+                        Some(loader) => provider.with_images(loader.clone()),
+                        None => provider,
+                    })
+                }
             };
             inner.insert(api, provider);
         }
@@ -155,6 +170,7 @@ mod tests {
             "sk-test".into(),
             pots_llm::reqwest::Client::new(),
             HeaderMap::new(),
+            None,
         )
     }
 

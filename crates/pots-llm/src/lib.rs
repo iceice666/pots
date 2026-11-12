@@ -1,6 +1,7 @@
 //! Pots 的模型推論層。
 //!
 //! - [`provider`]：與模型無關的請求、串流事件與 [`ModelProvider`] trait。
+//! - [`image`]：`Item::Image` 的附件內容來源（base64 只在送出請求那一刻從本機檔案產生）。
 //! - [`responses`]：OpenAI Responses API 的 provider，給 ChatGPT Plan（SIWC）用。
 //! - [`openai_compat`]：OpenAI 相容的 Chat Completions provider（API key；OpenAI、OpenRouter、Ollama 等）。
 //! - [`anthropic`]：Anthropic Messages API provider（API key）。
@@ -14,6 +15,7 @@
 pub mod agent;
 pub mod anthropic;
 mod api_common;
+pub mod image;
 pub mod openai_compat;
 pub mod provider;
 pub mod responses;

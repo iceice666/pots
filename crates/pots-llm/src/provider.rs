@@ -3,6 +3,9 @@
 //! [`Item`] 是對話歷史的單位：使用者訊息、模型回覆、工具呼叫與結果。伺服器把
 //! 每個 `Item` 序列化成 JSON 存進 `om_raw`，下一輪原樣放回 [`ModelRequest::input`]，
 //! 所以 provider 專屬、需要原樣回送的內容（例如 reasoning）放在 [`Item::Opaque`]。
+//!
+//! [`Item::Image`] 也只存附件參照（id + MIME）：base64 在組請求時才由呼叫端讀檔產生
+//! （見 [`crate::image`]），不會進 `om_raw`、資料庫或 events 日誌。
 
 use std::pin::Pin;
 
@@ -22,6 +25,11 @@ pub enum Item {
     ToolCall(ToolCall),
     /// 工具結果，送回給模型。
     ToolResult { call_id: String, output: String },
+    /// 使用者附上的圖片。**只存參照**：`attachment_id` 是本機附件檔的 ID，`mime` 是它的型別。
+    ///
+    /// 這是持久化格式，所以不要在這裡放 base64：base64 在組請求時才由呼叫端從本機檔案產生
+    /// （見 [`crate::image::ImageLoader`]）。不支援圖片的模型由 provider 回錯並轉成白話說明。
+    Image { attachment_id: String, mime: String },
     /// provider 專屬、要原樣回送的項目（例如 Responses 的 reasoning item）。
     /// `provider` 不符時，其他 provider 可以略過它。
     Opaque {
@@ -147,6 +155,10 @@ pub enum LlmError {
     /// 請求內容不被支援（參數、工具、模型）；重試同一個請求沒有用。
     #[error("請求不被支援：{0}")]
     Unsupported(String),
+    /// 模型不支援圖片輸入（非 vision 模型）。provider 的原始錯誤已經轉成白話說明，
+    /// 顯示時直接用它，不要把 API 錯誤原樣丟給使用者。
+    #[error("目前選用的模型不支援圖片輸入")]
+    UnsupportedImage,
     /// 串流在完成前中斷。
     #[error("串流中斷：{0}")]
     Interrupted(String),
@@ -166,5 +178,49 @@ impl LlmError {
     /// 稍後重試同一個請求可能成功。
     pub fn is_transient(&self) -> bool {
         matches!(self, Self::Unavailable(_) | Self::Interrupted(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_item_round_trips_and_only_holds_a_reference() {
+        let item = Item::Image {
+            attachment_id: "01a1ce3f-464e-70e0-8867-8efd52f1d10d".into(),
+            mime: "image/png".into(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "image",
+                "attachment_id": "01a1ce3f-464e-70e0-8867-8efd52f1d10d",
+                "mime": "image/png",
+            })
+        );
+        assert_eq!(serde_json::from_value::<Item>(json).unwrap(), item);
+        // 歷史是持久化格式：裡面不該出現 base64 或 data URL。
+        let text = serde_json::to_string(&item).unwrap();
+        assert!(
+            !text.contains("base64") && !text.contains("data:"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn existing_items_keep_their_serialized_shape() {
+        // 已經存進 `om_raw` 的舊項目要能原樣讀回來。
+        assert_eq!(
+            serde_json::from_value::<Item>(serde_json::json!({
+                "type": "tool_result", "call_id": "c1", "output": "12:00",
+            }))
+            .unwrap(),
+            Item::ToolResult {
+                call_id: "c1".into(),
+                output: "12:00".into(),
+            }
+        );
     }
 }

@@ -310,6 +310,7 @@ pub(crate) fn redact_error(error: LlmError, secret: &str) -> LlmError {
         LlmError::NotEntitled(m) => LlmError::NotEntitled(redact(m)),
         LlmError::Unavailable(m) => LlmError::Unavailable(redact(m)),
         LlmError::Unsupported(m) => LlmError::Unsupported(redact(m)),
+        LlmError::UnsupportedImage => LlmError::UnsupportedImage,
         LlmError::Interrupted(m) => LlmError::Interrupted(redact(m)),
         LlmError::InvalidCredentials(m) => LlmError::InvalidCredentials(redact(m)),
         LlmError::Other(m) => LlmError::Other(redact(m)),

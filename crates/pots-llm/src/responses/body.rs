@@ -2,7 +2,8 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::provider::{Item, ModelRequest, ToolSpec};
+use crate::image::{ImagePayloads, payload};
+use crate::provider::{Item, LlmError, ModelRequest, ToolSpec};
 
 /// [`Item::Opaque`] 的 provider 名稱，也是 [`super::ResponsesProvider`] 的名稱。
 pub const PROVIDER_NAME: &str = "openai-responses";
@@ -49,21 +50,29 @@ impl Default for ResponsesOptions {
 /// `store: false`、`stream: true`。不送 `previous_response_id`、`temperature`、
 /// `max_output_tokens` 等，也不產生 system message item。
 ///
+/// [`Item::Image`] 併進前一則 user message 的 `content`，變成 `input_image`（data URL）；
+/// 前面沒有 user message 時自己開一則。沒有圖片時輸出一模一樣。
+///
 /// [`ModelRequest::reasoning`] 有設定時送 `reasoning: {"effort": ...}`（`Off` 是 `"none"`）；
 /// 沒設定時不送 `reasoning`，讓伺服器用模型預設值（推理模型預設會推理，Responses API 允許
 /// 工具與推理並用）。不接受某個 effort 的模型會回錯誤，不自動重送。
-pub fn build_request_body(request: &ModelRequest, options: &ResponsesOptions) -> Value {
+///
+/// `images` 是這次請求的附件內容（attachment id → base64）；歷史裡有圖片但少了它的內容時
+/// 回 [`LlmError::Unsupported`]。
+pub fn build_request_body(
+    request: &ModelRequest,
+    options: &ResponsesOptions,
+    images: &ImagePayloads,
+) -> Result<Value, LlmError> {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
     if let Some(instructions) = request.instructions.as_deref().filter(|s| !s.is_empty()) {
         body.insert("instructions".into(), json!(instructions));
     }
-    let input: Vec<Value> = request
-        .input
-        .iter()
-        .filter_map(|item| input_item(item, options))
-        .collect();
-    body.insert("input".into(), Value::Array(input));
+    body.insert(
+        "input".into(),
+        Value::Array(input_items(request, options, images)?),
+    );
     if !request.tools.is_empty() {
         body.insert("tools".into(), tools_field(&request.tools, options));
     }
@@ -78,7 +87,45 @@ pub fn build_request_body(request: &ModelRequest, options: &ResponsesOptions) ->
     }
     body.insert("store".into(), json!(false));
     body.insert("stream".into(), json!(true));
-    Value::Object(body)
+    Ok(Value::Object(body))
+}
+
+/// 歷史 → `input` 陣列。圖片併進前一則 user message。
+fn input_items(
+    request: &ModelRequest,
+    options: &ResponsesOptions,
+    images: &ImagePayloads,
+) -> Result<Vec<Value>, LlmError> {
+    let mut input: Vec<Value> = Vec::with_capacity(request.input.len());
+    for item in &request.input {
+        let Item::Image {
+            attachment_id,
+            mime,
+        } = item
+        else {
+            if let Some(value) = input_item(item, options) {
+                input.push(value);
+            }
+            continue;
+        };
+        let image = json!({
+            "type": "input_image",
+            "image_url": crate::image::data_url(mime, payload(images, attachment_id)?),
+        });
+        match input.last_mut() {
+            Some(message) if message["type"] == "message" && message["role"] == "user" => {
+                if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
+                    content.push(image);
+                }
+            }
+            _ => input.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": [image],
+            })),
+        }
+    }
+    Ok(input)
 }
 
 /// 工具放進 namespace（SIWC）或平整地放在頂層（一般 OpenAI 平台）。
@@ -147,6 +194,8 @@ fn input_item(item: &Item, options: &ResponsesOptions) -> Option<Value> {
             return replay_opaque(value);
         }
         Item::Opaque { .. } => return None,
+        // 圖片由 [`input_items`] 處理：要併進前一則 user message，不能在這裡單獨產生一個 item。
+        Item::Image { .. } => return None,
     };
     Some(value)
 }
@@ -221,7 +270,12 @@ mod tests {
 
     #[test]
     fn body_matches_siwc_contract() {
-        let body = build_request_body(&request(), &ResponsesOptions::default());
+        let body = build_request_body(
+            &request(),
+            &ResponsesOptions::default(),
+            &ImagePayloads::new(),
+        )
+        .unwrap();
         assert_eq!(
             body,
             json!({
@@ -267,7 +321,7 @@ mod tests {
             include_encrypted_reasoning: false,
             ..ResponsesOptions::default()
         };
-        let body = build_request_body(&request, &options);
+        let body = build_request_body(&request, &options, &ImagePayloads::new()).unwrap();
         let keys: Vec<&str> = body
             .as_object()
             .unwrap()
@@ -280,13 +334,102 @@ mod tests {
         }
     }
 
+    fn image_request() -> ModelRequest {
+        ModelRequest {
+            model: "gpt-test".into(),
+            input: vec![
+                Item::User {
+                    text: "這張圖是什麼？".into(),
+                },
+                Item::Image {
+                    attachment_id: "att-1".into(),
+                    mime: "image/png".into(),
+                },
+                Item::Assistant {
+                    text: "一隻貓".into(),
+                },
+                Item::User {
+                    text: "換一張".into(),
+                },
+                Item::Image {
+                    attachment_id: "att-2".into(),
+                    mime: "image/jpeg".into(),
+                },
+            ],
+            ..ModelRequest::default()
+        }
+    }
+
+    fn images() -> ImagePayloads {
+        ImagePayloads::from([
+            ("att-1".to_string(), "QUJD".to_string()),
+            ("att-2".to_string(), "REVG".to_string()),
+        ])
+    }
+
+    #[test]
+    fn image_becomes_input_image_in_the_previous_user_message() {
+        let options = ResponsesOptions {
+            include_encrypted_reasoning: false,
+            ..ResponsesOptions::default()
+        };
+        let body = build_request_body(&image_request(), &options, &images()).unwrap();
+        assert_eq!(
+            body["input"],
+            json!([
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "這張圖是什麼？"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,QUJD"},
+                ]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "一隻貓"}]},
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "換一張"},
+                    {"type": "input_image", "image_url": "data:image/jpeg;base64,REVG"},
+                ]},
+            ])
+        );
+    }
+
+    #[test]
+    fn image_alone_opens_its_own_user_message() {
+        let request = ModelRequest {
+            model: "m".into(),
+            input: vec![Item::Image {
+                attachment_id: "att-1".into(),
+                mime: "image/webp".into(),
+            }],
+            ..ModelRequest::default()
+        };
+        let body = build_request_body(&request, &ResponsesOptions::default(), &images()).unwrap();
+        assert_eq!(
+            body["input"],
+            json!([{"type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": "data:image/webp;base64,QUJD"},
+            ]}])
+        );
+    }
+
+    #[test]
+    fn image_without_payload_is_an_error() {
+        let error = build_request_body(
+            &image_request(),
+            &ResponsesOptions::default(),
+            &ImagePayloads::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::Unsupported(m) if m.contains("att-1")),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn reasoning_replay_depends_on_encrypted_content_only() {
         let options = ResponsesOptions {
             include_encrypted_reasoning: false,
             ..ResponsesOptions::default()
         };
-        let body = build_request_body(&request(), &options);
+        let body = build_request_body(&request(), &options, &ImagePayloads::new()).unwrap();
         assert!(body.get("include").is_none());
         let reasoning: Vec<&Value> = body["input"]
             .as_array()
@@ -309,11 +452,21 @@ mod tests {
             (Reasoning::High, "high"),
         ] {
             request.reasoning = Some(reasoning);
-            let body = build_request_body(&request, &ResponsesOptions::default());
+            let body = build_request_body(
+                &request,
+                &ResponsesOptions::default(),
+                &ImagePayloads::new(),
+            )
+            .unwrap();
             assert_eq!(body["reasoning"], json!({"effort": effort}));
         }
         request.reasoning = None;
-        let body = build_request_body(&request, &ResponsesOptions::default());
+        let body = build_request_body(
+            &request,
+            &ResponsesOptions::default(),
+            &ImagePayloads::new(),
+        )
+        .unwrap();
         assert!(body.get("reasoning").is_none());
     }
 
@@ -324,7 +477,7 @@ mod tests {
             include_encrypted_reasoning: false,
             ..ResponsesOptions::default()
         };
-        let body = build_request_body(&request(), &options);
+        let body = build_request_body(&request(), &options, &ImagePayloads::new()).unwrap();
         assert_eq!(
             body["tools"],
             json!([{

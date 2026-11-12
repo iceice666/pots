@@ -2,7 +2,8 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::provider::{Item, ModelRequest, Reasoning, ToolCall};
+use crate::image::{ImagePayloads, normalize_mime, payload};
+use crate::provider::{Item, LlmError, ModelRequest, Reasoning, ToolCall};
 
 /// [`super::AnthropicProvider`] 的名稱，也是 thinking block 的 [`Item::Opaque`] provider。
 pub const PROVIDER_NAME: &str = "anthropic-compatible";
@@ -55,11 +56,16 @@ impl ThinkingConfig {
 
 /// 組出 `POST /v1/messages` 的 body，`thinking` 用 [`ThinkingConfig::from_reasoning`]。
 /// 見 [`build_request_body_with_thinking`]。
-pub fn build_request_body(request: &ModelRequest, max_tokens: u32) -> Value {
+pub fn build_request_body(
+    request: &ModelRequest,
+    max_tokens: u32,
+    images: &ImagePayloads,
+) -> Result<Value, LlmError> {
     build_request_body_with_thinking(
         request,
         max_tokens,
         ThinkingConfig::from_reasoning(request.reasoning),
+        images,
     )
 }
 
@@ -73,13 +79,16 @@ pub fn build_request_body(request: &ModelRequest, max_tokens: u32) -> Value {
 ///   （例如工具結果與接著的新使用者訊息）。
 /// - 這個 provider 的 [`Item::Opaque`]（`thinking`／`redacted_thinking` block）原樣放回 assistant
 ///   message 的對應位置：搭配工具時 API 要求它們完整、不經修改地回送。
+/// - [`Item::Image`] 變成 user 的 `image` block（`source: {type: "base64", ...}`），併進相鄰的
+///   user message；`images` 少了附件內容時回 [`LlmError::Unsupported`]。
 /// - 其他 provider 的 [`Item::Opaque`] 與空白文字略過；沒有工具時不送 `tools`。
 /// - `thinking` 依 [`ThinkingConfig`]。
 pub fn build_request_body_with_thinking(
     request: &ModelRequest,
     max_tokens: u32,
     thinking: ThinkingConfig,
-) -> Value {
+    images: &ImagePayloads,
+) -> Result<Value, LlmError> {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
     let max_tokens = match thinking {
@@ -108,7 +117,10 @@ pub fn build_request_body_with_thinking(
     if let Some(instructions) = request.instructions.as_deref().filter(|s| !s.is_empty()) {
         body.insert("system".into(), json!(instructions));
     }
-    body.insert("messages".into(), Value::Array(messages(&request.input)));
+    body.insert(
+        "messages".into(),
+        Value::Array(messages(&request.input, images)?),
+    );
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
             .tools
@@ -124,13 +136,17 @@ pub fn build_request_body_with_thinking(
         body.insert("tools".into(), Value::Array(tools));
     }
     body.insert("stream".into(), json!(true));
-    Value::Object(body)
+    Ok(Value::Object(body))
 }
 
-fn messages(items: &[Item]) -> Vec<Value> {
+fn messages(items: &[Item], images: &ImagePayloads) -> Result<Vec<Value>, LlmError> {
     let mut messages: Vec<(&'static str, Vec<Value>)> = Vec::new();
     for item in items {
         let (role, block) = match item {
+            Item::Image {
+                attachment_id,
+                mime,
+            } => ("user", image(mime, payload(images, attachment_id)?)?),
             Item::User { text } if !text.trim().is_empty() => {
                 ("user", json!({"type": "text", "text": text}))
             }
@@ -153,10 +169,28 @@ fn messages(items: &[Item]) -> Vec<Value> {
             _ => messages.push((role, vec![block])),
         }
     }
-    messages
+    Ok(messages
         .into_iter()
         .map(|(role, content)| json!({"role": role, "content": content}))
-        .collect()
+        .collect())
+}
+
+/// `image` content block。Anthropic 只收 `image/jpeg`、`image/png`、`image/gif`、`image/webp`
+/// 四種 `media_type`，其他型別由 client 端先擋掉；這裡再確認一次，避免送出一定失敗的請求。
+fn image(mime: &str, base64: &str) -> Result<Value, LlmError> {
+    let mime = normalize_mime(mime);
+    if !matches!(
+        mime,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    ) {
+        return Err(LlmError::Unsupported(format!(
+            "Anthropic 不支援這個圖片格式：{mime}（只收 png、jpeg、gif、webp）"
+        )));
+    }
+    Ok(json!({
+        "type": "image",
+        "source": {"type": "base64", "media_type": mime, "data": base64},
+    }))
 }
 
 fn tool_use(call: &ToolCall) -> Value {
@@ -227,7 +261,7 @@ mod tests {
             session_id: None,
         };
         assert_eq!(
-            build_request_body(&request, 1024),
+            build_request_body(&request, 1024, &ImagePayloads::new()).unwrap(),
             json!({
                 "model": "claude-test",
                 "max_tokens": 1024,
@@ -268,7 +302,7 @@ mod tests {
             tools: vec![],
             session_id: None,
         };
-        let body = build_request_body(&request, DEFAULT_MAX_TOKENS);
+        let body = build_request_body(&request, DEFAULT_MAX_TOKENS, &ImagePayloads::new()).unwrap();
         let object = body.as_object().unwrap();
         assert!(!object.contains_key("tools"));
         assert!(!object.contains_key("system"));
@@ -290,13 +324,13 @@ mod tests {
             (Reasoning::High, "high"),
         ] {
             request.reasoning = Some(reasoning);
-            let body = build_request_body(&request, 1024);
+            let body = build_request_body(&request, 1024, &ImagePayloads::new()).unwrap();
             assert_eq!(body["thinking"], json!({"type": "adaptive"}));
             assert_eq!(body["output_config"], json!({"effort": effort}));
             assert_eq!(body["max_tokens"], 1024);
         }
         request.reasoning = Some(Reasoning::Off);
-        let body = build_request_body(&request, 1024);
+        let body = build_request_body(&request, 1024, &ImagePayloads::new()).unwrap();
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
         assert!(body.get("output_config").is_none());
     }
@@ -316,7 +350,13 @@ mod tests {
             (Reasoning::High, 16384),
         ] {
             let config = ThinkingConfig::budget(reasoning).unwrap();
-            let body = build_request_body_with_thinking(&request, DEFAULT_MAX_TOKENS, config);
+            let body = build_request_body_with_thinking(
+                &request,
+                DEFAULT_MAX_TOKENS,
+                config,
+                &ImagePayloads::new(),
+            )
+            .unwrap();
             assert_eq!(
                 body["thinking"],
                 json!({"type": "enabled", "budget_tokens": budget})
@@ -328,12 +368,95 @@ mod tests {
         let config = ThinkingConfig::Budget {
             budget_tokens: 2048,
         };
-        let body = build_request_body_with_thinking(&request, 64_000, config);
+        let body =
+            build_request_body_with_thinking(&request, 64_000, config, &ImagePayloads::new())
+                .unwrap();
         assert_eq!(body["max_tokens"], 64_000);
         // 明確不送。
-        let body = build_request_body_with_thinking(&request, 1024, ThinkingConfig::ModelDefault);
+        let body = build_request_body_with_thinking(
+            &request,
+            1024,
+            ThinkingConfig::ModelDefault,
+            &ImagePayloads::new(),
+        )
+        .unwrap();
         assert!(body.get("thinking").is_none());
         assert!(body.get("output_config").is_none());
+    }
+
+    fn image_request() -> ModelRequest {
+        ModelRequest {
+            model: "claude-test".into(),
+            input: vec![
+                Item::User {
+                    text: "這張圖是什麼？".into(),
+                },
+                Item::Image {
+                    attachment_id: "att-1".into(),
+                    mime: "image/png".into(),
+                },
+                Item::Assistant {
+                    text: "一隻貓".into(),
+                },
+            ],
+            ..ModelRequest::default()
+        }
+    }
+
+    fn images() -> ImagePayloads {
+        ImagePayloads::from([("att-1".to_string(), "QUJD".to_string())])
+    }
+
+    #[test]
+    fn image_becomes_base64_block_in_the_same_user_message() {
+        let body = build_request_body(&image_request(), 1024, &images()).unwrap();
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "user", "content": [
+                    {"type": "text", "text": "這張圖是什麼？"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"},
+                    },
+                ]},
+                {"role": "assistant", "content": [{"type": "text", "text": "一隻貓"}]},
+            ])
+        );
+    }
+
+    #[test]
+    fn image_without_payload_is_an_error() {
+        let error = build_request_body(&image_request(), 1024, &ImagePayloads::new()).unwrap_err();
+        assert!(
+            matches!(&error, LlmError::Unsupported(m) if m.contains("att-1")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn image_mime_is_normalized_and_validated() {
+        let mut request = image_request();
+        request.input[1] = Item::Image {
+            attachment_id: "att-1".into(),
+            mime: "image/jpg".into(),
+        };
+        let body = build_request_body(&request, 1024, &images()).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][1]["source"]["media_type"],
+            "image/jpeg"
+        );
+
+        let mut request = image_request();
+        request.input[1] = Item::Image {
+            attachment_id: "att-1".into(),
+            mime: "image/tiff".into(),
+        };
+        let error = build_request_body(&request, 1024, &images()).unwrap_err();
+        assert!(
+            matches!(&error, LlmError::Unsupported(m) if m.contains("image/tiff")),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -372,7 +495,7 @@ mod tests {
             ..ModelRequest::default()
         };
         assert_eq!(
-            build_request_body(&request, 1024)["messages"],
+            build_request_body(&request, 1024, &ImagePayloads::new()).unwrap()["messages"],
             json!([
                 {"role": "user", "content": [{"type": "text", "text": "幾點"}]},
                 {"role": "assistant", "content": [
