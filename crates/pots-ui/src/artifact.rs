@@ -42,6 +42,10 @@ pub trait ArtifactEditor: Render + Focusable + EventEmitter<EditorEvent> {
     fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool;
     /// Take the keyboard focus, where typing should go.
     fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>);
+    /// Show `content` (of the editor's kind), written by someone else: an
+    /// edit in progress is dropped, so it can't later write over it. No
+    /// window needed: an agent's tool call has none.
+    fn replace(&mut self, content: ArtifactContent, cx: &mut Context<Self>);
 }
 
 /// An editor of any kind, as the frame holds it.
@@ -51,6 +55,7 @@ trait AnyEditor {
     fn has_pending_edit(&self, cx: &App) -> bool;
     fn commit(&self, window: &mut Window, cx: &mut App) -> bool;
     fn focus(&self, window: &mut Window, cx: &mut App);
+    fn replace(&self, content: ArtifactContent, cx: &mut App);
 }
 
 impl<E: ArtifactEditor> AnyEditor for Entity<E> {
@@ -72,6 +77,10 @@ impl<E: ArtifactEditor> AnyEditor for Entity<E> {
 
     fn focus(&self, window: &mut Window, cx: &mut App) {
         self.update(cx, |e, cx| e.focus(window, cx));
+    }
+
+    fn replace(&self, content: ArtifactContent, cx: &mut App) {
+        self.update(cx, |e, cx| e.replace(content, cx));
     }
 }
 
@@ -143,6 +152,17 @@ impl ArtifactFrame {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// What the editor shows, an edit in progress included.
+    #[cfg(test)]
+    pub fn content(&self, cx: &App) -> ArtifactContent {
+        self.editor.content(cx)
+    }
+
     pub fn focus_editor(&self, window: &mut Window, cx: &mut App) {
         self.editor.focus(window, cx);
     }
@@ -183,6 +203,26 @@ impl ArtifactFrame {
             self.dirty = true;
         }
         self.take_unsaved(cx)
+    }
+
+    /// Show `content`, now saved, in place of what the editor has: an
+    /// agent changed the artifact. Edits not saved yet are dropped, and so
+    /// is a save waiting to happen, so neither brings the old content back.
+    /// (The app saves what the frame had before letting the agent at it.)
+    pub fn replace(&mut self, content: ArtifactContent, cx: &mut Context<Self>) {
+        self.save_task = None;
+        self.dirty = false;
+        self.editor.replace(content, cx);
+        cx.notify();
+    }
+
+    /// The title, now saved, set by someone else (an agent). A rename in
+    /// progress gives way, so it can't put its old text back on blur.
+    pub fn replace_title(&mut self, title: String, cx: &mut Context<Self>) {
+        if self.renaming.take().is_some() {
+            self._subscriptions.truncate(1);
+        }
+        self.set_title(title, cx);
     }
 
     // --- renaming ----------------------------------------------------------

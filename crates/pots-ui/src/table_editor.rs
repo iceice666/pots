@@ -157,6 +157,9 @@ pub struct TableEditor {
     state: Entity<TableState<SheetDelegate>>,
     input: Entity<InputState>,
     focus: FocusHandle,
+    /// The table was replaced while a cell was being edited: once drawn
+    /// without the cell's input, the keyboard goes back to the table.
+    refocus: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -188,7 +191,7 @@ impl TableEditor {
                 }
             }),
         ];
-        Self { state, input, focus: cx.focus_handle(), _subscriptions: subscriptions }
+        Self { state, input, focus: cx.focus_handle(), refocus: false, _subscriptions: subscriptions }
     }
 
     fn table(&self, cx: &App) -> Table {
@@ -526,6 +529,30 @@ impl ArtifactEditor for TableEditor {
             self.focus_table(window, cx);
         }
     }
+
+    /// The cell or column name being edited is closed and what was typed
+    /// in it dropped (the app saved it into the table before an agent's
+    /// change, so it is lost only where the agent rewrote the table). The
+    /// selection stays where it was, within the new table's size.
+    fn replace(&mut self, content: ArtifactContent, cx: &mut Context<Self>) {
+        let ArtifactContent::Table(table) = content;
+        let was_editing = self.editing(cx).is_some();
+        self.state.update(cx, |state, cx| {
+            let delegate = state.delegate_mut();
+            delegate.editing = None;
+            delegate.table = table;
+            let (rows, cols) = (delegate.table.rows.len(), delegate.table.columns.len());
+            state.refresh(cx);
+            match state.selected_cell() {
+                Some(_) if rows == 0 || cols == 0 => state.clear_selection(cx),
+                Some((row, col)) => state.set_selected_cell(row.min(rows - 1), col.min(cols - 1), cx),
+                None => {}
+            }
+            cx.notify();
+        });
+        self.refocus |= was_editing;
+        cx.notify();
+    }
 }
 
 impl Focusable for TableEditor {
@@ -535,7 +562,11 @@ impl Focusable for TableEditor {
 }
 
 impl Render for TableEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.refocus) && self.input.focus_handle(cx).is_focused(window) {
+            let table = self.state.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| window.focus(&table, cx));
+        }
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)

@@ -19,7 +19,7 @@ use pots_agent::data::{self, ArtifactContent, ArtifactKind, Card, Conv, MergeOut
 use pots_agent::markdown::{self, Sep};
 use pots_agent::reply::{Host, Outcome, blocking};
 use pots_agent::search::{Hit, MessageHit};
-use pots_agent::{sandbox, store};
+use pots_agent::{artifact_tools, sandbox, store};
 use pots_llm::Usage;
 use pots_llm::cost;
 
@@ -1072,6 +1072,60 @@ impl ChatApp {
         self.save();
         cx.notify();
         (recorded.result, false)
+    }
+
+    /// An agent's artifact tool call, from its reply `id`. What the open
+    /// artifact's editor has that isn't saved yet (a cell being typed in
+    /// included) is saved first, so the agent reads the latest version and
+    /// adds to it rather than to an older one. A change is saved at once,
+    /// shown in the tabs (without switching to it: the owner may be busy
+    /// elsewhere) and in the editor if it's open there, and said under the
+    /// reply, so the owner sees what the agent did.
+    fn artifact_tool(&mut self, id: usize, name: &str, input: &serde_json::Value, cx: &mut Context<Self>) -> (String, bool) {
+        if let MainView::Artifact { frame, .. } = &self.view {
+            let frame = frame.clone();
+            if let Some(content) = frame.update(cx, |f, cx| f.unsaved(cx)) {
+                self.save_artifact(frame.read(cx).id, content);
+            }
+        }
+        if !artifact_tools::is_write(name) {
+            return agent::tools::run(&self.ws, name, input);
+        }
+        let changed = match artifact_tools::write(&mut self.ws, name, input) {
+            Ok(changed) => changed,
+            Err(e) => return (e, true),
+        };
+        let artifact = changed.id;
+        // Its file first: a workspace listing it is never saved without it.
+        if changed.content {
+            if let Some(content) = self.ws.artifact(artifact).and_then(|a| a.content.clone()) {
+                self.save_artifact(artifact, content.clone());
+                if let MainView::Artifact { frame, .. } = &self.view {
+                    if frame.read(cx).id == artifact {
+                        frame.update(cx, |f, cx| f.replace(content, cx));
+                    }
+                }
+            }
+        }
+        if changed.title {
+            if let MainView::Artifact { frame, .. } = &self.view {
+                if frame.read(cx).id == artifact {
+                    let title = self.ws.artifact(artifact).map(|a| a.title.clone()).unwrap_or_default();
+                    frame.update(cx, |f, cx| f.replace_title(title, cx));
+                }
+            }
+        }
+        if !changed.shown.is_empty() {
+            if let Some(msg) = self.ws.message_by_id_mut(id) {
+                msg.note = Some(match msg.note.take() {
+                    Some(note) => format!("{note}\n{}", changed.shown),
+                    None => changed.shown,
+                });
+            }
+        }
+        self.save();
+        cx.notify();
+        (changed.result, false)
     }
 
     /// Agent `a`'s `post_in_thread` call: its message in the thread, and
@@ -3138,6 +3192,10 @@ impl Host for UiHost<'_> {
                 let id = self.id;
                 self.update(|app, cx| app.record_decision(id, agent, input, cx))
             }
+            name if artifact_tools::is_tool(name) => {
+                let id = self.id;
+                self.update(|app, cx| app.artifact_tool(id, name, input, cx))
+            }
             _ => self.update(|app, _| agent::tools::run(&app.ws, name, input)),
         }
     }
@@ -3548,6 +3606,149 @@ mod tests {
         // The app shutting down runs its quit hooks (nothing else saved it).
         cx.quit();
         assert_eq!(cell(&app, id, 0, cx), "last");
+    }
+
+    // --- artifacts an agent makes and changes --------------------------------
+
+    /// A message in the open channel to stand for an agent's reply (it
+    /// gets the notes saying what the agent did); its id.
+    fn reply_id(app: &Entity<ChatApp>, cx: &mut gpui::VisualTestContext) -> usize {
+        app.update(cx, |app, _| {
+            let conv = Conv::Channel(app.active);
+            let ix = app.ws.post(conv, app.ws.me, "On it.");
+            app.ws.message(conv, ix).id
+        })
+    }
+
+    /// Run an artifact tool as an agent's reply `reply` does.
+    fn agent_tool(app: &Entity<ChatApp>, reply: usize, name: &str, input: serde_json::Value, cx: &mut gpui::VisualTestContext) -> (String, bool) {
+        let out = app.update(cx, |app, cx| app.artifact_tool(reply, name, &input, cx));
+        draw(cx);
+        out
+    }
+
+    /// What's on disk for artifact `id`.
+    fn on_disk(home: &TempHome, id: usize) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(home.dir.join(format!("artifacts/{id}.json"))).unwrap()).unwrap()
+    }
+
+    fn table(app: &Entity<ChatApp>, id: usize, cx: &mut gpui::VisualTestContext) -> data::Table {
+        app.read_with(cx, |app, _| match app.ws.artifact(id).unwrap().content.clone() {
+            Some(ArtifactContent::Table(t)) => t,
+            None => panic!("no content"),
+        })
+    }
+
+    #[gpui::test]
+    fn an_agents_table_shows_up_as_a_tab_without_taking_the_view(cx: &mut gpui::TestAppContext) {
+        let (app, cx, home) = mock_app(cx);
+        app.update(cx, |app, _| app.persist = true);
+        draw(cx);
+        let reply = reply_id(&app, cx);
+        let channel = app.read_with(cx, |app, _| app.ws.channels[app.active].name.clone());
+        let (result, failed) = agent_tool(&app, reply, artifact_tools::CREATE_TABLE, serde_json::json!({
+            "channel": channel, "title": "Groceries", "columns": ["Item", "Qty"], "rows": [["Milk", "2"]]}), cx);
+        assert!(!failed, "{result}");
+        let id = app.read_with(cx, |app, _| *app.ws.channel_artifacts(app.active).last().unwrap());
+        assert!(app.read_with(cx, |app, cx| app.open_artifact_id(cx).is_none()), "the messages stay in view");
+        let note = app.read_with(cx, |app, _| app.ws.locate(reply).and_then(|(c, ix)| app.ws.message(c, ix).note.clone()));
+        assert_eq!(note.as_deref(), Some(format!("Created table “Groceries” in #{channel} (2 columns × 1 row).").as_str()));
+        assert_eq!(on_disk(&home, id), serde_json::json!({"kind": "table", "columns": ["Item", "Qty"], "rows": [["Milk", "2"]]}));
+        let listed = std::fs::read_to_string(home.dir.join("workspace.json")).unwrap();
+        assert!(listed.contains("\"Groceries\""), "the workspace lists it");
+
+        // A failed call changes nothing and says why.
+        let (e, failed) = agent_tool(&app, reply, artifact_tools::ADD_TABLE_ROWS, serde_json::json!({"id": id, "rows": [["Eggs"]]}), cx);
+        assert!(failed && e.contains("Row 1 has 1 cells"), "{e}");
+        assert_eq!(table(&app, id, cx).rows.len(), 1);
+
+        // People open and edit it like any other.
+        app.update_in(cx, |app, window, cx| app.open_artifact(id, window, cx));
+        draw(cx);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input(", oat");
+        cx.simulate_keystrokes("enter");
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(on_disk(&home, id)["rows"][0][0], "Milk, oat");
+    }
+
+    #[gpui::test]
+    fn an_agents_rewrite_of_an_open_table_wins_over_edits_not_saved_yet(cx: &mut gpui::TestAppContext) {
+        let (app, cx, home) = mock_app(cx);
+        app.update(cx, |app, _| app.persist = true);
+        let id = new_table(&app, cx);
+        let reply = reply_id(&app, cx);
+        // One cell committed but within the save delay, the next being typed in.
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("mine");
+        cx.simulate_keystrokes("enter enter");
+        cx.simulate_input("half-typ");
+        draw(cx);
+
+        let rows = serde_json::json!([["agent", "b", "c"], ["d", "e", "f"]]);
+        let (result, failed) = agent_tool(&app, reply, artifact_tools::UPDATE_TABLE, serde_json::json!({"id": id, "rows": rows}), cx);
+        assert!(!failed, "{result}");
+        let want = serde_json::json!({"kind": "table", "columns": ["Column 1", "Column 2", "Column 3"], "rows": rows});
+        assert_eq!(on_disk(&home, id), want);
+        // The editor shows the agent's table, and the cell being typed in is closed.
+        let shown = app.read_with(cx, |app, cx| match &app.view {
+            MainView::Artifact { frame, .. } => frame.read(cx).content(cx),
+            _ => panic!("still open"),
+        });
+        assert_eq!(shown, ArtifactContent::Table(table(&app, id, cx)));
+
+        // Nothing the editor had brings the old content back: not the save
+        // that was waiting, not the cell that was being typed in.
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(on_disk(&home, id), want);
+
+        // The keyboard is back on the table, on the cell that was being
+        // typed in: editing goes on from there, from the agent's text ("d").
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("!");
+        cx.simulate_keystrokes("enter");
+        app.update_in(cx, |app, window, cx| app.show_messages(window, cx));
+        draw(cx);
+        let mut after = want.clone();
+        after["rows"][1][0] = "d!".into();
+        assert_eq!(on_disk(&home, id), after);
+    }
+
+    #[gpui::test]
+    fn an_agent_adding_rows_or_renaming_keeps_the_owners_edits(cx: &mut gpui::TestAppContext) {
+        let (app, cx, home) = mock_app(cx);
+        app.update(cx, |app, _| app.persist = true);
+        let id = new_table(&app, cx);
+        let reply = reply_id(&app, cx);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("saved soon");
+        cx.simulate_keystrokes("enter enter");
+        cx.simulate_input("typing");
+        draw(cx);
+
+        // Reading sees what the owner has, the cell being typed in too.
+        let (read, _) = agent_tool(&app, reply, artifact_tools::READ_ARTIFACT, serde_json::json!({"id": id}), cx);
+        assert!(read.contains("\"saved soon\"") && read.contains("\"typing\""), "{read}");
+
+        let (result, failed) = agent_tool(&app, reply, artifact_tools::UPDATE_TABLE, serde_json::json!({"id": id, "title": "Plan"}), cx);
+        assert!(!failed, "{result}");
+        let frame_title = app.read_with(cx, |app, cx| match &app.view {
+            MainView::Artifact { frame, .. } => frame.read(cx).title().to_string(),
+            _ => panic!("still open"),
+        });
+        assert_eq!(frame_title, "Plan");
+        // Only the title changed: the owner goes on typing in the same cell.
+        cx.simulate_input("!");
+        draw(cx);
+        let (_, failed) = agent_tool(&app, reply, artifact_tools::ADD_TABLE_ROWS, serde_json::json!({"id": id, "rows": [["new", "", ""]]}), cx);
+        assert!(!failed);
+        let t = table(&app, id, cx);
+        assert_eq!((t.cell(0, 0), t.cell(1, 0), t.cell(5, 0)), ("saved soon", "typing!", "new"));
+        assert_eq!(on_disk(&home, id)["rows"].as_array().unwrap().len(), 6);
+        let note = app.read_with(cx, |app, _| app.ws.locate(reply).and_then(|(c, ix)| app.ws.message(c, ix).note.clone())).unwrap();
+        assert_eq!(note, "Renamed table “Plan” in #engineering (3 columns × 5 rows).\nAdded 1 row to table “Plan” in #engineering (3 columns × 6 rows).");
     }
 
     fn pos(msg: usize, frag: usize, offset: usize) -> Pos {
