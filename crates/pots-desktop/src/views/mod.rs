@@ -5,6 +5,7 @@ mod automation;
 pub(crate) mod automation_forms;
 mod channel;
 pub(crate) mod composer_attach;
+pub(crate) mod images;
 mod inbox;
 mod member_list;
 mod memory;

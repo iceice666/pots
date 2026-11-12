@@ -2,8 +2,9 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
+    AnyElement, Context, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
+    ObjectFit, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, div, img, px, relative,
 };
 
 use gpui_kit::component::input::Input;
@@ -328,6 +329,120 @@ impl PotsApp {
                 .occlude()
                 .child(dialog)
                 .on_click(cx.listener(|this, _, _, cx| this.close_workdir_dialog(cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// 訊息附圖的大圖：暗色 backdrop 上一張置中的卡片，點 backdrop 或右上角的 ✕ 關閉。
+    ///
+    /// 尺寸照 `task_inspect` 的對話框（`max_w(relative(0.92))`、`h(relative(0.86))`），
+    /// 圖片用 `Contain` 撐進卡片內，不放大失真。
+    pub fn render_image_viewer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let viewer = self.image_viewer.as_ref()?;
+        let image = self
+            .attachment_images
+            .state(&viewer.image.id)
+            .and_then(|state| match state {
+                crate::views::images::ImageState::Ready(image) => Some(image.clone()),
+                _ => None,
+            });
+        let size = viewer
+            .image
+            .width
+            .zip(viewer.image.height)
+            .map(|(w, h)| format!(" · {w}×{h}"))
+            .unwrap_or_default();
+        let caption = format!(
+            "{}{size}",
+            viewer
+                .image
+                .filename
+                .clone()
+                .unwrap_or_else(|| "圖片".into()),
+        );
+        let body = match image {
+            Some(image) => div()
+                .flex_1()
+                .min_h_0()
+                .p(px(12.))
+                .flex()
+                .child(
+                    img(ImageSource::Image(image))
+                        .flex_1()
+                        .h_full()
+                        .object_fit(ObjectFit::Contain),
+                )
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.))
+                .text_color(theme::text_muted())
+                .child("圖片已不在快取裡，請重新點開縮圖")
+                .into_any_element(),
+        };
+        let dialog = div()
+            .id("image-viewer-dialog")
+            .w(px(960.))
+            .max_w(relative(0.92))
+            .h(relative(0.86))
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(theme::white())
+            .shadow_lg()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(16.))
+                    .py(px(10.))
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .text_color(theme::text_muted())
+                            .child(caption),
+                    )
+                    .child(
+                        div()
+                            .id("image-viewer-close")
+                            .flex_none()
+                            .size(px(26.))
+                            .rounded(px(6.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::subtle_bg()))
+                            .child(icon(IconName::X, 15., theme::text_muted()))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_image_viewer(cx))),
+                    ),
+            )
+            .child(body)
+            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation()
+            })
+            .on_click(|_, _, cx| cx.stop_propagation());
+        Some(
+            div()
+                .id("image-viewer-backdrop")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_kit::hsla(0., 0., 0., 0.55))
+                .on_click(cx.listener(|this, _, _, cx| this.close_image_viewer(cx)))
+                .child(dialog)
                 .into_any_element(),
         )
     }
