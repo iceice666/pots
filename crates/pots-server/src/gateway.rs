@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use pots_proto::{AttachmentView, ItemId, ProjectId};
+use pots_proto::{AttachmentId, AttachmentView, ItemId, ProjectId};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
@@ -84,6 +84,9 @@ pub(crate) fn router(app: Arc<App>, guard_state: Arc<Guard>) -> Router {
         .route("/healthz", get(healthz))
         .route("/ws", get(ws))
         .route("/projects/{id}/items", get(items))
+        // 取回圖片本體給桌面端顯示縮圖／大圖；加在這一層就會被 Host／Origin／Authorization
+        // 的守衛包住（**不要**移到下面的 webhook router）。
+        .route("/attachments/{id}", get(attachment_body))
         // axum 的預設 body 上限是 2 MiB，圖片上限是 10 MiB；留一點餘裕，讓超過上限的
         // 圖能走到 `attachments::upload` 回我們自己的中文訊息（而不是 axum 的 413）。
         .route(
@@ -209,4 +212,72 @@ async fn upload_attachment(
 fn internal(e: crate::Error) -> Response {
     tracing::error!(error = %e, "HTTP 請求失敗");
     (StatusCode::INTERNAL_SERVER_ERROR, "伺服器內部錯誤").into_response()
+}
+
+/// `GET /attachments/{id}`：回圖片本體，`Content-Type` 用上傳時驗過、存在 DB 的 MIME。
+///
+/// 本體是內容定址（檔名就是 sha256）且 id 對應的內容永不變，所以可以放心讓客戶端
+/// 長期快取；`private` 是為了不讓任何中介快取留存（本服務本來就只綁 loopback）。
+///
+/// 「DB 有列但檔案不在」回 500 而不是 404：404 會讓客戶端以為這個 id 不存在、
+/// 可能去重新上傳或把訊息裡的圖藏起來；檔案不見是伺服器端資料損毀，要留下痕跡。
+///
+/// 刻意**不**驗附件的 project 歸屬：本服務只綁 loopback、每個實例只有一個使用者，
+/// 能拿到 id 就代表已通過 token 守衛，沒有跨使用者的可利用面（`items` 等端點驗 project
+/// 是因為 project 由客戶端指定，而這裡 id 本身就是唯一的存取鍵）。若之後要多使用者
+/// 或遠端部署，這裡要補 project 歸屬與 project 狀態的檢查。
+async fn attachment_body(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    let Ok(id) = id.parse::<AttachmentId>() else {
+        return (StatusCode::NOT_FOUND, "找不到這個附件").into_response();
+    };
+    let mut conn = match app.store.acquire().await {
+        Ok(conn) => conn,
+        Err(e) => return internal(e),
+    };
+    let row = match crate::store::Store::attachment(&mut conn, id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return (StatusCode::NOT_FOUND, "找不到這個附件").into_response(),
+        Err(e) => return internal(e),
+    };
+    drop(conn);
+    let dir = app.watcher.data_dir().to_path_buf();
+    let path = crate::attachments::body_path(&dir, &row.sha256);
+    // 先看檔案大小再讀：本體是內容定址、寫入後不再變動，長度對不上代表檔案被動過或
+    // 磁碟出了問題。寧可回 500 留下痕跡，也不要整份讀進記憶體或送出長度不符的內容。
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) if meta.len() == row.bytes => {}
+        Ok(meta) => {
+            tracing::error!(
+                id = %row.id,
+                expected = row.bytes,
+                actual = meta.len(),
+                "附件的本體長度與 DB 不符"
+            );
+            return (StatusCode::INTERNAL_SERVER_ERROR, "讀不到這張圖片的內容").into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, id = %row.id, "讀不到附件的本體");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "讀不到這張圖片的內容").into_response();
+        }
+    }
+    let bytes = match crate::attachments::read_body(&dir, &row.sha256).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!(error = %e, id = %row.id, "讀不到附件的本體");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "讀不到這張圖片的內容").into_response();
+        }
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, row.mime.clone()),
+            (header::CONTENT_LENGTH, bytes.len().to_string()),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable".to_string(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
 }
