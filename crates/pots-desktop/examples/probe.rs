@@ -99,6 +99,8 @@ fn main() {
 fn describe(event: &ConnEvent) -> String {
     match event {
         ConnEvent::State(s) => format!("[連線] {s:?}"),
+        // 圖片上傳用的位址與 token 跟連線同一組；probe 只需要知道收到了。
+        ConnEvent::Target(_) => "[目標] 收到連線目標".to_string(),
         ConnEvent::Problem(p) => format!("[問題] {p}"),
         ConnEvent::Server(ev) => {
             let json = serde_json::to_string(ev).unwrap_or_default();

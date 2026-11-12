@@ -616,6 +616,7 @@ mod shots {
                 project,
                 "幫我提案一個 listener：issue 加上 agent label 就開 Goal".into(),
                 SendMode::Queue,
+                Vec::new(),
             );
             cx.notify();
         });
@@ -676,6 +677,7 @@ mod shots {
                 project,
                 "問我一下 merge 的方式".into(),
                 SendMode::Queue,
+                Vec::new(),
             );
             cx.notify();
         });

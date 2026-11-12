@@ -18,11 +18,12 @@ use gpui_kit::{
 
 use markdown_editor::{BlockEditorEvent, BlockEditorState};
 
-use crate::connection::{self, ConnEvent, Connection, Endpoint};
+use crate::connection::{self, ConnEvent, Connection, Endpoint, Target, Uploads};
 use crate::model::*;
 use crate::notify::{self, Notifier};
 use crate::sync::{self, Notice, Sync};
 use crate::theme;
+use crate::views::composer_attach::PendingAttachments;
 
 gpui_kit::actions!(pots, [OpenOverseer, CloseSettings]);
 
@@ -767,6 +768,11 @@ pub enum InboxFilter {
 pub struct Live {
     pub conn: Connection,
     pub sync: Sync,
+    /// 連線目標（位址與 token）；圖片上傳走 HTTP，需要同一組位址與 token。
+    /// 收到 [`ConnEvent::Target`] 之前是 `None`（那時也還不能上傳）。
+    pub target: Option<Target>,
+    /// 圖片上傳的執行緒；與 WebSocket 分開，上傳大圖不會卡住連線。
+    pub uploads: Uploads,
     /// 這條連線的實例在 `Store` 裡目前的 ID（收到快照前是暫用的）。
     pub instance: InstanceId,
     /// 你按了「開始登入」，收到登入網址時要開瀏覽器。
@@ -813,6 +819,8 @@ pub struct PotsApp {
     pub toast: Option<String>,
 
     pub composer: Entity<TextareaState>,
+    /// 輸入框裡待送的圖片（貼上、上傳狀態、縮圖）。
+    pub pending: Entity<PendingAttachments>,
     pub goal_note: Entity<InputState>,
     pub worker_note: Entity<InputState>,
     pub overseer_input: Entity<TextareaState>,
@@ -875,6 +883,7 @@ impl PotsApp {
                 .submit_on_enter(true)
                 .placeholder("問總管任何專案的事")
         });
+        let pending = cx.new(|_| PendingAttachments::new());
         let goal_note =
             cx.new(|cx| InputState::new(window, cx).placeholder("在這個 Goal 留言給 Planner"));
         let worker_note = cx.new(|cx| InputState::new(window, cx).placeholder("對這個任務留言"));
@@ -948,6 +957,7 @@ impl PotsApp {
             usage_loading: false,
             toast: None,
             composer,
+            pending,
             goal_note,
             worker_note,
             overseer_input,
@@ -998,10 +1008,13 @@ impl PotsApp {
         this.screen = Screen::Inbox(Some(placeholder));
 
         let (conn, mut events) = connection::spawn(endpoint);
+        let (uploads, mut uploaded) = Uploads::spawn();
         this.notifier = Some(Notifier::new(Arc::new(notify::Os)));
         this.live = Some(Live {
             conn,
             sync: Sync::new(offset),
+            target: None,
+            uploads,
             instance: placeholder,
             login_requested: false,
             creating: None,
@@ -1010,6 +1023,18 @@ impl PotsApp {
             while let Some(event) = events.next().await {
                 if this
                     .update_in(cx, |app, window, cx| app.on_conn_event(event, window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // 上傳結果回到輸入框的待送圖片；圖片已被移除的話 `finish` 會忽略它。
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some((key, result)) = uploaded.next().await {
+                if this
+                    .update_in(cx, |app, _window, cx| app.on_uploaded(key, result, cx))
                     .is_err()
                 {
                     break;
@@ -1043,6 +1068,16 @@ impl PotsApp {
         };
         let instance = live.instance;
         match event {
+            ConnEvent::Target(target) => {
+                live.target = Some(target.clone());
+                // 連上之前貼上的圖片還排在輸入框裡，現在可以上傳了。
+                if let Screen::Project(project) = self.screen {
+                    let jobs = self.pending.update(cx, |p, _| p.take_jobs());
+                    for job in jobs {
+                        live.uploads.upload(target.clone(), project, job);
+                    }
+                }
+            }
             ConnEvent::State(state) => {
                 if state != ConnectionState::Connected
                     && let Some(editor) = &mut self.artifact_editor
@@ -2996,15 +3031,122 @@ impl PotsApp {
             return;
         };
         let text = self.composer.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        // 只有圖片也可以送（服務端接受「沒有文字、有附件」的訊息）。
+        let attachments = match self.pending.read(cx).ready_views() {
+            Ok(attachments) => attachments,
+            Err(problem) => {
+                // 還在上傳或上傳失敗：整則訊息先不送，免得漏圖。
+                self.toast = Some(problem);
+                cx.notify();
+                return;
+            }
+        };
+        if text.is_empty() && attachments.is_empty() {
             return;
         }
         self.store
-            .send_to_project(self.instance, project, text, self.send_mode);
+            .send_to_project(self.instance, project, text, self.send_mode, attachments);
         self.send_mode = SendMode::Queue;
+        self.pending.update(cx, |p, cx| {
+            p.clear();
+            cx.notify();
+        });
         self.composer.update(cx, |s, cx| s.clean(window, cx));
         self.stream_scroll.scroll_to_bottom();
         cx.notify();
+    }
+
+    /// 輸入框的待送圖片改變了（貼上、移除、上傳完成）：把它們排進上傳執行緒。
+    fn queue_uploads(&mut self, cx: &mut Context<Self>) {
+        let jobs: Vec<(Target, ProjectId, crate::connection::UploadJob)> = {
+            let Some(live) = &self.live else {
+                return;
+            };
+            let Some(target) = live.target.clone() else {
+                return;
+            };
+            let Screen::Project(project) = self.screen else {
+                return;
+            };
+            self.pending.update(cx, |p, _| {
+                p.take_jobs()
+                    .into_iter()
+                    .map(|job| (target.clone(), project, job))
+                    .collect()
+            })
+        };
+        let Some(live) = &self.live else {
+            return;
+        };
+        for (target, project, job) in jobs {
+            live.uploads.upload(target, project, job);
+        }
+    }
+
+    /// 假資料模式沒有服務可以上傳：直接把圖片當成上傳完成，畫面才有縮圖。
+    fn queue_fake_uploads(&mut self, cx: &mut Context<Self>) {
+        let views: Vec<(u64, AttachmentView)> = self.pending.update(cx, |p, _| {
+            p.take_jobs()
+                .into_iter()
+                .map(|job| {
+                    let id = AttachmentId::new();
+                    (
+                        job.key,
+                        AttachmentView {
+                            id,
+                            mime: job.mime,
+                            bytes: job.bytes.len() as u64,
+                            width: None,
+                            height: None,
+                            filename: job.filename,
+                        },
+                    )
+                })
+                .collect()
+        });
+        for (key, view) in views {
+            self.pending.update(cx, |p, _| p.mark_local(key, view));
+        }
+    }
+
+    /// 上傳結果回來了：更新那張圖片的狀態，失敗的留在輸入框讓使用者移除。
+    fn on_uploaded(
+        &mut self,
+        key: u64,
+        result: Result<AttachmentView, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending.update(cx, |p, cx| {
+            p.finish(key, result);
+            cx.notify();
+        });
+    }
+
+    /// 貼上的內容交給待送圖片處理。`true` 代表這次貼上被吃掉（有圖片被收下），
+    /// 呼叫端不要讓文字插進輸入框。
+    pub fn accept_pasted(
+        &mut self,
+        item: &gpui_kit::ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let took = self.pending.update(cx, |p, cx| {
+            let took = p.accept_clipboard(item);
+            cx.notify();
+            took
+        });
+        if took {
+            self.drain_uploads(cx);
+        }
+        took
+    }
+
+    /// 有待上傳的工作就交給上傳執行緒（或假資料模式下直接完成）。
+    pub(crate) fn drain_uploads(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_some() {
+            self.queue_uploads(cx);
+        } else {
+            self.queue_fake_uploads(cx);
+        }
     }
 
     pub fn send_overseer(&mut self, window: &mut Window, cx: &mut Context<Self>) {

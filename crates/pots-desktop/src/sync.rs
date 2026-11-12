@@ -1658,7 +1658,7 @@ mod tests {
             snapshot(inst, project, ModelAuthView::SignedOut),
         );
         store.project_mut(inst, project).unwrap().agent_state = AgentState::Thinking;
-        store.send_to_project(inst, project, "嗨".into(), SendMode::Queue);
+        store.send_to_project(inst, project, "嗨".into(), SendMode::Queue, Vec::new());
         let (_, ClientCommand::Send { id, .. }) = store.outbox[0].clone() else {
             panic!("應該送出 Send");
         };
@@ -1699,7 +1699,7 @@ mod tests {
 
         // 「停止」清掉排隊：回到閒置時也不再標排隊中。
         store.project_mut(inst, project).unwrap().agent_state = AgentState::Thinking;
-        store.send_to_project(inst, project, "再一則".into(), SendMode::Queue);
+        store.send_to_project(inst, project, "再一則".into(), SendMode::Queue, Vec::new());
         sync.apply(
             &mut store,
             inst,

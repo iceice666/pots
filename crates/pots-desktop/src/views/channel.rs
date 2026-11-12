@@ -4,11 +4,12 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Textarea;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    relative,
+    AnyElement, Context, Div, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Window, div, img, px, relative,
 };
 
+use super::composer_attach::{PendingSnapshot, UploadState};
 use super::stream::Density;
 use super::widgets::*;
 use crate::app::{Panel, PotsApp};
@@ -39,6 +40,119 @@ pub fn empty_state(title: impl Into<SharedString>, body: impl Into<SharedString>
                 .line_height(relative(1.5))
                 .child(body.into()),
         )
+}
+
+/// 待送圖片列：縮圖、上傳中／失敗狀態、移除鈕。id 都帶 project 與 key 的 scope，
+/// 同一份圖片在別的地方顯示時不會共用 keyed state（見 Project Notes 的 markdown 慣例）。
+fn render_pending(pending: &PendingSnapshot, cx: &mut Context<PotsApp>) -> Div {
+    /// 縮圖邊長（含移除鈕的內距）。
+    const THUMB: f32 = 64.;
+    let items = pending
+        .items
+        .iter()
+        .map(|image| {
+            let key = image.key;
+            let mut thumb = div()
+                .id(SharedString::from(format!("composer-attach-{key}")))
+                .relative()
+                .flex_none()
+                .size(px(THUMB))
+                .rounded(px(8.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(match &image.state {
+                    UploadState::Failed(_) => theme::danger(),
+                    UploadState::Uploading => theme::border_strong(),
+                    UploadState::Uploaded(_) => theme::border(),
+                })
+                .bg(theme::subtle_bg())
+                .child(img(ImageSource::Image(image.preview.clone())).size_full());
+            // 上傳中／失敗：蓋一層半透明底色與圖示，滑過看得到原因。
+            match &image.state {
+                UploadState::Uploaded(_) => {}
+                UploadState::Uploading => {
+                    thumb = thumb.child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui_kit::black().opacity(0.35))
+                            .child(icon(IconName::LoaderCircle, 20., theme::white())),
+                    );
+                }
+                UploadState::Failed(_) => {
+                    thumb = thumb.child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(theme::danger_soft().opacity(0.85))
+                            .child(icon(IconName::CircleX, 20., theme::danger())),
+                    );
+                }
+            }
+            let tooltip = image
+                .failure()
+                .map(str::to_string)
+                .or_else(|| image.filename.clone())
+                .unwrap_or_else(|| format!("{} KiB", image.bytes.div_ceil(1024)));
+            div().relative().flex_none().child(thumb).child(
+                div()
+                    .id(SharedString::from(format!("composer-attach-remove-{key}")))
+                    .absolute()
+                    .top(px(-6.))
+                    .right(px(-6.))
+                    .size(px(18.))
+                    .rounded_full()
+                    .bg(theme::white())
+                    .border_1()
+                    .border_color(theme::border_strong())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::track()))
+                    .child(icon(IconName::X, 11., theme::text_muted()))
+                    .tip(tooltip)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pending.update(cx, |p, cx| {
+                            p.remove(key);
+                            cx.notify();
+                        });
+                    })),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut strip = div()
+        .flex()
+        .flex_wrap()
+        .items_end()
+        .gap(px(10.))
+        .px(px(10.))
+        .pb(px(8.))
+        .children(items);
+    if pending.uploading > 0 {
+        strip = strip.child(
+            div()
+                .text_size(px(12.))
+                .text_color(theme::text_muted())
+                .child(format!("{} 張上傳中…", pending.uploading)),
+        );
+    }
+    if let Some(error) = &pending.error {
+        strip = strip.child(
+            div()
+                .text_size(px(12.))
+                .text_color(theme::danger())
+                .child(error.clone()),
+        );
+    }
+    strip
 }
 
 /// 標題列右側的圖示按鈕（分頁切換與「成員」）：選取時是淡色底與強調色圖示，文字放在 tooltip。
@@ -293,6 +407,7 @@ impl PotsApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mode = self.send_mode;
+        let pending = self.pending.read(cx).snapshot();
         let segment =
             |id: &'static str, label: &'static str, value: SendMode, cx: &mut Context<Self>| {
                 super::widgets::segment(id, label, mode == value).on_click(cx.listener(
@@ -324,8 +439,11 @@ impl PotsApp {
                     .px(px(4.))
                     .pt(px(6.))
                     .text_size(px(15.))
-                    .child(Textarea::new(&self.composer).appearance(false)),
+                    .child(self.render_composer_input(cx)),
             )
+            .when(!pending.items.is_empty() || pending.error.is_some(), |d| {
+                d.child(render_pending(&pending, cx))
+            })
             .child(
                 div()
                     .flex()
@@ -351,6 +469,19 @@ impl PotsApp {
                         cx.listener(|this, _, window, cx| this.send_composer(window, cx)),
                     )),
             )
+    }
+
+    /// 輸入框本體。貼上由 `Textarea::on_paste` 攔截：剪貼簿裡有圖片就收進待送附件並
+    /// 吃掉這次貼上（回 `true`），否則回 `false` 讓一般文字照常插入。
+    fn render_composer_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        Textarea::new(&self.composer)
+            .appearance(false)
+            .on_paste(move |item, _window, cx| {
+                // hook 拿到的是 `&mut App`，要轉回 view 的 context。
+                this.update(cx, |app, cx| app.accept_pasted(item, cx))
+                    .unwrap_or(false)
+            })
     }
 
     /// 右欄「Goals」：這個 project 的 Goal 卡片，點了右欄換成那個 Goal。
