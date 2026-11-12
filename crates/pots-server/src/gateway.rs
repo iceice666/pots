@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, Request, State, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -84,7 +84,15 @@ pub(crate) fn router(app: Arc<App>, guard_state: Arc<Guard>) -> Router {
         .route("/healthz", get(healthz))
         .route("/ws", get(ws))
         .route("/projects/{id}/items", get(items))
-        .route("/attachments", post(upload_attachment))
+        // axum 的預設 body 上限是 2 MiB，圖片上限是 10 MiB；留一點餘裕，讓超過上限的
+        // 圖能走到 `attachments::upload` 回我們自己的中文訊息（而不是 axum 的 413）。
+        .route(
+            "/attachments",
+            post(upload_attachment).layer(DefaultBodyLimit::max(
+                usize::try_from(pots_proto::MAX_ATTACHMENT_BYTES).unwrap_or(usize::MAX)
+                    + 1024 * 1024,
+            )),
+        )
         .with_state(app.clone())
         .layer(middleware::from_fn_with_state(guard_state, guard))
         .merge(

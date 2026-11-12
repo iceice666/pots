@@ -360,6 +360,42 @@ pub async fn http_get(addr: SocketAddr, path: &str, headers: &[(&str, String)]) 
     (status, body)
 }
 
+/// 最簡單的 HTTP/1.1 POST（raw body）。`headers` 要自己帶 `Host`；
+/// `Content-Length` 這裡補。
+pub async fn http_post(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, String)],
+    body: &[u8],
+) -> (u16, String) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut req = format!("POST {path} HTTP/1.1\r\n");
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    req.push_str("Connection: close\r\n\r\n");
+    let mut bytes = req.into_bytes();
+    bytes.extend_from_slice(body);
+    stream.write_all(&bytes).await.unwrap();
+    let mut buf = Vec::new();
+    tokio::time::timeout(TIMEOUT, stream.read_to_end(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let text = String::from_utf8_lossy(&buf).to_string();
+    let status = text
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    (status, body)
+}
+
 /// 帶正確 `Host` 與 token 的標頭。
 pub fn auth_headers(srv: &TestServer) -> Vec<(&'static str, String)> {
     vec![
