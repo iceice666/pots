@@ -37,7 +37,9 @@ use uuid::Uuid;
 /// - 18：project 環境（`EnvSpec`、`ProjectEnvView`、`ProjectEnv`、`SetupProjectEnv`、`UseProjectEnv`、
 ///   `GoalView::env`、快照帶 project 的環境）；worker 只在容器裡執行。
 /// - 19：任務的 diff 與 trace（`TaskDiff`、`TaskTrace`）、在 Goal 留言給 Planner（`NoteGoal`）。
-pub const PROTOCOL_VERSION: u32 = 19;
+/// - 20：訊息帶圖片附件（`AttachmentId`、`AttachmentView`、`Msg::attachments`、`Send` 的
+///   `attachments`）。圖片先用 `POST /attachments` 上傳，訊息只帶 ID 與中介資料。
+pub const PROTOCOL_VERSION: u32 = 20;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -93,6 +95,7 @@ id_type!(
     ListenerId,
     ProviderId,
     ObservationId,
+    AttachmentId,
 );
 
 /// `$2`、`$1.40` 這類金額顯示。
@@ -425,6 +428,35 @@ pub struct ToolSummary {
     pub details: Vec<String>,
 }
 
+/// 圖片的 MIME 類型；只收這四種（`proposal/ux-and-frontend.md` 的圖片輸入）。
+pub const ATTACHMENT_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// 單張圖片的上限：10 MiB。上傳端點與訊息端都用它。
+pub const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 一則訊息最多帶幾張圖片。
+pub const MAX_ATTACHMENTS_PER_MSG: usize = 4;
+
+/// 訊息附的一張圖片。只帶中介資料與 [`AttachmentId`]，本體在服務的資料目錄裡
+/// （`<data_dir>/attachments/<sha256>`）；**任何地方都不要把 base64 塞進來**，
+/// 這個結構會原樣進訊息流、事件日誌與 `om_raw`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentView {
+    pub id: AttachmentId,
+    /// 四種 `image/*` 之一。
+    pub mime: String,
+    /// 本體大小（位元組）。
+    pub bytes: u64,
+    /// 像素寬高；上傳端解得出來時才有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// 使用者原本的檔名（拖放、選檔時有；貼上的圖沒有）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Msg {
     pub author: Author,
@@ -439,6 +471,9 @@ pub struct Msg {
     /// 訊息下方的內嵌卡片（例如 agent 回覆附帶的 Goal 或核准卡）。
     pub cards: Vec<Card>,
     pub steer: bool,
+    /// 這則訊息附的圖片（人類訊息才有；agent 目前不會回圖）。舊 client 送來的訊息沒有這欄。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentView>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2716,6 +2751,10 @@ pub enum ClientCommand {
         id: ItemId,
         text: String,
         mode: SendMode,
+        /// 已用 `POST /attachments` 上傳好的圖片。只帶 ID：中介資料由伺服器從
+        /// `attachments` 表查回來填進 `Msg::attachments`，不信任客戶端送的字串欄位。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentId>,
     },
     /// 停止這個 project 正在跑的 agent run。
     Stop {
@@ -3036,6 +3075,68 @@ mod tests {
         assert_eq!(format_dollars(5), "$0.05");
     }
 
+    fn attachment(id: u64) -> AttachmentView {
+        AttachmentView {
+            id: AttachmentId::from_u64(id),
+            mime: "image/png".into(),
+            bytes: 68,
+            width: Some(2),
+            height: Some(2),
+            filename: Some("cat.png".into()),
+        }
+    }
+
+    /// 圖片附件會原樣進 `stream_items.body` 與 `om_raw`：只帶 ID 與中介資料，
+    /// 序列化後不能出現本體（base64 或 bytes 陣列）。
+    #[test]
+    fn msg_with_attachments_round_trip() {
+        let msg = Msg {
+            author: Author::Human,
+            text: "這張圖是什麼？".into(),
+            status: MsgStatus::Done,
+            tools: None,
+            narration: Vec::new(),
+            cards: Vec::new(),
+            steer: false,
+            attachments: vec![attachment(7)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("base64"), "{json}");
+        let back: Msg = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.attachments, msg.attachments);
+        assert_eq!(back.text, msg.text);
+
+        let cmd = ClientCommand::Send {
+            project: ProjectId::from_u64(1),
+            id: ItemId::from_u64(2),
+            text: "看圖".into(),
+            mode: SendMode::Queue,
+            attachments: vec![AttachmentId::from_u64(7), AttachmentId::from_u64(8)],
+        };
+        let back: ClientCommand = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            ClientCommand::Send { attachments, .. }
+                if attachments == [AttachmentId::from_u64(7), AttachmentId::from_u64(8)]
+        ));
+    }
+
+    /// 舊 client（含 Android 純文字）的 JSON 沒有 `attachments` 欄，仍要能解析；
+    /// 反過來，沒有附件時序列化出來的字串也和舊版一樣（不新增欄位）。
+    #[test]
+    fn legacy_json_without_attachments() {
+        let json = r#"{"author":"Human","text":"嗨","status":"Done","tools":null,"cards":[],"steer":false}"#;
+        let msg: Msg = serde_json::from_str(json).unwrap();
+        assert!(msg.attachments.is_empty());
+        assert_eq!(serde_json::to_string(&msg).unwrap(), json);
+
+        let cmd: ClientCommand = serde_json::from_str(
+            r#"{"t":"Send","project":"00000000-0000-0000-0000-000000000001","id":"00000000-0000-0000-0000-000000000002","text":"嗨","mode":"Queue"}"#,
+        )
+        .unwrap();
+        assert!(matches!(cmd, ClientCommand::Send { attachments, .. } if attachments.is_empty()));
+    }
+
     #[test]
     fn protocol_is_tagged() {
         let cmd = ClientCommand::Send {
@@ -3043,6 +3144,7 @@ mod tests {
             id: ItemId::from_u64(2),
             text: "hi".into(),
             mode: SendMode::Steer,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_value(&cmd).unwrap();
         assert_eq!(json["t"], "Send");

@@ -297,6 +297,7 @@ mod tests {
             id,
             text: "hi".into(),
             mode: SendMode::Queue,
+            attachments: Vec::new(),
         }
     }
 

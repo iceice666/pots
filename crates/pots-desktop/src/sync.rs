@@ -1043,6 +1043,7 @@ mod tests {
                 narration: Vec::new(),
                 cards: vec![],
                 steer: false,
+                attachments: Vec::new(),
             }),
         }
     }

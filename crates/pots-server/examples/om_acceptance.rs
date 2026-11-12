@@ -168,6 +168,7 @@ impl Client {
             id: ItemId::new(),
             text: text.into(),
             mode: SendMode::Queue,
+            attachments: Vec::new(),
         })
         .await?;
         let mut reply = String::new();

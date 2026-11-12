@@ -2,10 +2,10 @@
 //! 被拒絕或失敗時只回給發出指令的連線一個 `Error`。
 
 use pots_proto::{
-    AgentState, ArtifactId, ArtifactKind, Author, Card, ClientCommand, GoalId, ItemId, Msg,
-    MsgStatus, ProjectId, ProjectSnapshot, SendMode, ServerEvent, StreamItemKind, StreamItemView,
-    StreamScope, TaskDiffView, TaskId, TaskRunView, TaskTraceView, Timestamp, TraceStepView,
-    WhyView, WorkDir,
+    AgentState, ArtifactId, ArtifactKind, AttachmentId, Author, Card, ClientCommand, GoalId, ItemId,
+    MAX_ATTACHMENTS_PER_MSG, Msg, MsgStatus, ProjectId, ProjectSnapshot, SendMode, ServerEvent,
+    StreamItemKind, StreamItemView, StreamScope, TaskDiffView, TaskId, TaskRunView, TaskTraceView,
+    Timestamp, TraceStepView, WhyView, WorkDir,
 };
 use tokio::sync::mpsc;
 
@@ -135,7 +135,8 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
             id,
             text,
             mode,
-        } => send(app, project, id, text, mode).await,
+            attachments,
+        } => send(app, project, id, text, mode, attachments).await,
         ClientCommand::Stop { project } => {
             if project == crate::store::OVERSIGHT_PROJECT_ID {
                 return Err("總管的對話請用 StopOverseer".into());
@@ -816,6 +817,7 @@ async fn send_overseer(app: &App, id: ItemId, text: String) -> Result<(), String
             narration: Vec::new(),
             cards: Vec::new(),
             steer: false,
+            attachments: Vec::new(),
         }),
     };
     let inserted: Result<Result<(), String>, crate::Error> = async {
@@ -1408,9 +1410,19 @@ async fn send(
     id: ItemId,
     text: String,
     mode: SendMode,
+    attachments: Vec<AttachmentId>,
 ) -> Result<(), String> {
-    if text.trim().is_empty() {
+    if text.trim().is_empty() && attachments.is_empty() {
         return Err("訊息是空的".into());
+    }
+    if attachments.len() > MAX_ATTACHMENTS_PER_MSG {
+        return Err(format!("一則訊息最多 {MAX_ATTACHMENTS_PER_MSG} 張圖片"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for a in &attachments {
+        if !seen.insert(*a) {
+            return Err("同一張圖片重複附了兩次".into());
+        }
     }
     if project == crate::store::OVERSIGHT_PROJECT_ID {
         return Err("總管的對話請用 SendOverseer".into());
@@ -1425,6 +1437,12 @@ async fn send(
         return Err("找不到這個 project".into());
     }
     let steer = mode == SendMode::Steer;
+    let attachments = async {
+        let mut conn = app.store.acquire().await.map_err(internal)?;
+        crate::attachments::resolve(&mut conn, project, &attachments).await
+    }
+    .await?;
+    // 只有 ID 與中介資料進訊息流；本體留在資料目錄（見 `attachments`）。
     let item = StreamItemView {
         id,
         at: Timestamp::now(),
@@ -1436,6 +1454,7 @@ async fn send(
             narration: Vec::new(),
             cards: Vec::new(),
             steer,
+            attachments,
         }),
     };
 

@@ -321,6 +321,7 @@ impl Store {
                 narration: Vec::new(),
                 cards: vec![],
                 steer: mode == SendMode::Steer,
+                attachments: Vec::new(),
             }),
         });
         if mode == SendMode::Steer {
@@ -333,6 +334,8 @@ impl Store {
                 id,
                 text,
                 mode,
+                // 圖片附件還沒接（任務 3／4）。
+                attachments: Vec::new(),
             },
         ));
     }
@@ -436,6 +439,7 @@ impl Store {
                     narration: Vec::new(),
                     cards: vec![],
                     steer: false,
+                    attachments: Vec::new(),
                 }),
             });
         }
@@ -458,6 +462,7 @@ impl Store {
                     narration: Vec::new(),
                     cards: vec![],
                     steer: false,
+                    attachments: Vec::new(),
                 }),
             });
         }

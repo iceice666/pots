@@ -316,6 +316,7 @@ impl Client {
             id,
             text: text.into(),
             mode,
+            attachments: Vec::new(),
         })
         .await;
         id

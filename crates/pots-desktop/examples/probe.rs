@@ -75,6 +75,7 @@ fn main() {
                         id: ItemId::new(),
                         text: script[i].clone(),
                         mode: SendMode::Queue,
+                        attachments: Vec::new(),
                     }),
                     None => println!("!! 還沒有 project"),
                 }
