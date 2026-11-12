@@ -94,7 +94,8 @@ fn explain(error: LlmError) -> LlmError {
     }
 }
 
-/// 錯誤訊息像不像「這個模型不接受圖片」。規則保守：一定要提到 image，再配上拒絕的字眼。///
+/// 錯誤訊息像不像「這個模型不接受圖片」。規則保守：一定要提到 image，再配上拒絕的字眼。
+///
 /// 已知的寫法（未逐一實測，之後遇到新的再補）：
 /// - OpenAI：「Invalid content type. image_url is only supported by certain models.」
 /// - OpenAI Responses：「The model does not support image input.」
