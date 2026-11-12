@@ -2,8 +2,8 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyElement, Context, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    AnyElement, Context, FontWeight, ImageSource, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledImage as _, div, img, px, relative,
 };
 

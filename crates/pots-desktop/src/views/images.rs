@@ -129,6 +129,22 @@ impl AttachmentImages {
         self.fetcher.is_some()
     }
 
+    /// 不啟執行緒的快取，回傳 fetcher 的收件端：測試可以直接看排了哪些工作，不必真的
+    /// 連服務（integration test 也用它）。
+    pub fn with_fake_fetcher() -> (
+        Self,
+        mpsc::UnboundedReceiver<(crate::connection::Target, FetchJob)>,
+    ) {
+        let (jobs, job_rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                entries: HashMap::new(),
+                fetcher: Some(Fetcher { jobs }),
+            },
+            job_rx,
+        )
+    }
+
     /// 這張圖現在能畫什麼；`None` 是還沒抓過（也沒有請求在跑）。
     pub fn state(&self, id: &AttachmentId) -> Option<&ImageState> {
         self.entries.get(id)
@@ -222,7 +238,7 @@ pub fn format_for_mime(mime: &str) -> Option<GpuiImageFormat> {
 
 /// 訊息要畫的圖片。沒有附件時是 `None`：呼叫端就不會多畫一層空的容器。
 pub fn message_images(msg: &Msg) -> Option<&[AttachmentView]> {
-    (!msg.attachments.is_empty()).then(|| msg.attachments.as_slice())
+    (!msg.attachments.is_empty()).then_some(msg.attachments.as_slice())
 }
 
 /// 目前畫面上可能出現的所有附圖（`(id, mime)`，已去重）。
@@ -255,7 +271,8 @@ pub fn wanted_images(store: &crate::model::Store) -> Vec<(AttachmentId, String)>
             for goal in &project.goals {
                 for task in &goal.tasks {
                     for item in &task.thread {
-                        if let StreamItemKind::Human(msg) | StreamItemKind::Agent(msg) = &item.kind {
+                        if let StreamItemKind::Human(msg) | StreamItemKind::Agent(msg) = &item.kind
+                        {
                             push(msg);
                         }
                     }
@@ -312,13 +329,11 @@ mod tests {
     }
 
     /// 不啟執行緒的 fetcher：測試直接看排了哪些工作。
-    fn fake() -> (AttachmentImages, mpsc::UnboundedReceiver<(Target, FetchJob)>) {
-        let (jobs, job_rx) = mpsc::unbounded_channel();
-        let images = AttachmentImages {
-            entries: HashMap::new(),
-            fetcher: Some(Fetcher { jobs }),
-        };
-        (images, job_rx)
+    fn fake() -> (
+        AttachmentImages,
+        mpsc::UnboundedReceiver<(Target, FetchJob)>,
+    ) {
+        AttachmentImages::with_fake_fetcher()
     }
 
     fn target() -> Target {
@@ -444,29 +459,49 @@ mod tests {
         assert_ne!(thumb_element_id(11, 0), thumb_element_id(12, 0));
     }
 
+    /// 浮點比較：縮圖尺寸是像素，差 0.01 以內就算一樣。
+    fn close(got: (f32, f32), want: (f32, f32)) {
+        assert!(
+            (got.0 - want.0).abs() < 0.01 && (got.1 - want.1).abs() < 0.01,
+            "得到 {got:?}，預期 {want:?}"
+        );
+    }
+
     #[test]
     fn thumb_box_follows_the_aspect_ratio_within_the_limit() {
         // 寬圖：貼齊寬度上限，高度等比。
-        let (w, h) = thumb_box(&view(1, "image/png", Some(400), Some(200)));
-        assert_eq!((w, h), (THUMB_MAX_W, THUMB_MAX_W / 2.));
+        close(
+            thumb_box(&view(1, "image/png", Some(400), Some(200))),
+            (THUMB_MAX_W, THUMB_MAX_W / 2.),
+        );
 
         // 高圖：貼齊高度上限。
-        let (w, h) = thumb_box(&view(1, "image/png", Some(200), Some(400)));
-        assert_eq!((w, h), (THUMB_MAX_H / 2., THUMB_MAX_H));
+        close(
+            thumb_box(&view(1, "image/png", Some(200), Some(400))),
+            (THUMB_MAX_H / 2., THUMB_MAX_H),
+        );
 
         // 很小的圖會被放大到框內（縮圖要看得見）。
-        assert_eq!(thumb_box(&view(1, "image/png", Some(20), Some(10))), (168., 84.));
+        close(
+            thumb_box(&view(1, "image/png", Some(20), Some(10))),
+            (THUMB_MAX_W, THUMB_MAX_W / 2.),
+        );
 
         // 超長條圖：短邊墊到下限，不會變成一條線。
-        let (w, h) = thumb_box(&view(1, "image/png", Some(1000), Some(1)));
-        assert_eq!((w, h), (THUMB_MAX_W, 48.));
+        close(
+            thumb_box(&view(1, "image/png", Some(1000), Some(1))),
+            (THUMB_MAX_W, THUMB_MIN),
+        );
 
         // 沒有寬高（上傳端解不出來）：正方形。
-        assert_eq!(thumb_box(&view(1, "image/png", None, None)), (120., 120.));
+        close(
+            thumb_box(&view(1, "image/png", None, None)),
+            (THUMB_MAX_H, THUMB_MAX_H),
+        );
         // 退化資料不 panic。
-        assert_eq!(
+        close(
             thumb_box(&view(1, "image/png", Some(0), Some(10))),
-            (120., 120.)
+            (THUMB_MAX_H, THUMB_MAX_H),
         );
     }
 }

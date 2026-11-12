@@ -332,8 +332,7 @@ impl PotsApp {
                     .children(narration)
                     .children(body)
                     .children(
-                        message_images(msg)
-                            .map(|images| self.render_msg_images(id, images, cx)),
+                        message_images(msg).map(|images| self.render_msg_images(id, images, cx)),
                     )
                     .children(
                         msg.cards
@@ -401,28 +400,25 @@ impl PotsApp {
                     .items_center()
                     .justify_center()
                     .when_some(clicking, |d, image| {
-                        d.cursor_pointer().on_click(cx.listener(
-                            move |this, _, _, cx| this.open_image_viewer(image.clone(), cx),
-                        ))
-                    })
-                    .when_some(retrying, |d, id| {
                         d.cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.retry_attachment_image(id, cx)
+                                this.open_image_viewer(image.clone(), cx)
                             }))
                     })
+                    .when_some(retrying, |d, id| {
+                        d.cursor_pointer().on_click(
+                            cx.listener(move |this, _, _, cx| this.retry_attachment_image(id, cx)),
+                        )
+                    })
                     .child(match state {
-                        Some(ImageState::Ready(image)) => {
-                            img(ImageSource::Image(image.clone()))
-                                .size_full()
-                                .into_any_element()
-                        }
+                        Some(ImageState::Ready(image)) => img(ImageSource::Image(image.clone()))
+                            .size_full()
+                            .into_any_element(),
                         Some(ImageState::Failed(_)) => muted("無法載入").into_any_element(),
                         // `Loading` 與還沒排到（沒有連線目標）都是灰塊。
-                        Some(ImageState::Loading) | None => div()
-                            .size_full()
-                            .bg(theme::track())
-                            .into_any_element(),
+                        Some(ImageState::Loading) | None => {
+                            div().size_full().bg(theme::track()).into_any_element()
+                        }
                     });
                 let hint = match (state, &image.filename) {
                     (Some(ImageState::Failed(reason)), _) => reason.clone(),
