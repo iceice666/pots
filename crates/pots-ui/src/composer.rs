@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine, actions, div,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, PaintQuad,
+    Pixels, Point, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine, actions, div,
     fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -26,8 +26,17 @@ actions!(
 const CONTEXT: &str = "Composer";
 
 pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys(bindings());
+}
+
+pub(crate) fn bindings() -> Vec<KeyBinding> {
     let c = Some(CONTEXT);
-    cx.bind_keys([
+    vec![
+        // gpui-component's `Root`, an ancestor of every view, binds Tab and
+        // Shift-Tab to focus traversal. Unbind them here so they reach the
+        // input handler as they did before `Root` existed.
+        KeyBinding::new("tab", NoAction, c),
+        KeyBinding::new("shift-tab", NoAction, c),
         KeyBinding::new("backspace", Backspace, c),
         KeyBinding::new("delete", Delete, c),
         KeyBinding::new("left", Left, c),
@@ -38,10 +47,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", SelectRight, c),
         KeyBinding::new("shift-up", SelectUp, c),
         KeyBinding::new("shift-down", SelectDown, c),
-        KeyBinding::new("secondary-a", SelectAll, c),
-        KeyBinding::new("secondary-v", Paste, c),
-        KeyBinding::new("secondary-c", Copy, c),
-        KeyBinding::new("secondary-x", Cut, c),
+        KeyBinding::new(secondary!("a"), SelectAll, c),
+        KeyBinding::new(secondary!("v"), Paste, c),
+        KeyBinding::new(secondary!("c"), Copy, c),
+        KeyBinding::new(secondary!("x"), Cut, c),
         KeyBinding::new("cmd-z", Undo, c),
         KeyBinding::new("ctrl-z", Undo, c),
         KeyBinding::new("cmd-shift-z", Redo, c),
@@ -52,7 +61,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-right", End, c),
         KeyBinding::new("shift-enter", Newline, c),
         KeyBinding::new("enter", Send, c),
-    ]);
+    ]
 }
 
 pub enum ComposerEvent {
@@ -403,7 +412,7 @@ impl Composer {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         self.is_selecting = true;
         let index = self.index_for_position(event.position);
         if event.modifiers.shift {
@@ -1027,5 +1036,53 @@ impl Element for ComposerText {
                 lines: if empty { Vec::new() } else { lines },
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{KeyContext, Keymap, Keystroke};
+
+    use super::*;
+
+    /// What a keystroke resolves to with focus in a composer under
+    /// gpui-component's `Root`, whose bindings are copied here from
+    /// `gpui_base::root::init` (they aren't public).
+    /// Root's actions are private too, so `Send` stands in for them.
+    fn resolve(key: &'static str) -> Vec<String> {
+        let root = Some("Root");
+        let mut bindings = vec![
+            KeyBinding::new("tab", Send, root),
+            KeyBinding::new("shift-tab", Send, root),
+            KeyBinding::new(secondary!("c"), Send, root),
+        ];
+        bindings.extend(super::bindings());
+        let keymap = Keymap::new(bindings);
+        let stack = [KeyContext::parse("Root").unwrap(), KeyContext::parse(CONTEXT).unwrap()];
+        keymap
+            .bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack)
+            .0
+            .iter()
+            .map(|b| b.action().name().to_string())
+            .collect()
+    }
+
+    /// `KeyBinding::new` panics on keystrokes it can't parse (gpui-pre
+    /// dropped the `secondary-` alias), and would do so at app startup.
+    #[test]
+    fn every_binding_parses() {
+        super::bindings();
+        crate::chat::bindings();
+    }
+
+    #[test]
+    fn root_tab_bindings_do_not_reach_the_composer() {
+        assert!(resolve("tab").is_empty());
+        assert!(resolve("shift-tab").is_empty());
+    }
+
+    #[test]
+    fn composer_copy_outranks_root_copy() {
+        assert_eq!(resolve(secondary!("c")).first().map(String::as_str), Some("composer::Copy"));
     }
 }

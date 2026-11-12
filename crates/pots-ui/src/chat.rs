@@ -41,14 +41,18 @@ const HIGHLIGHT_FOR: Duration = Duration::from_secs(3);
 const SEARCH_WIDTH: f32 = 560.;
 
 pub fn bind_keys(cx: &mut gpui::App) {
+    cx.bind_keys(bindings());
+}
+
+pub(crate) fn bindings() -> Vec<KeyBinding> {
     let c = Some(MESSAGES_CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("secondary-c", CopySelection, c),
-        KeyBinding::new("secondary-a", SelectAllMessages, c),
+    vec![
+        KeyBinding::new(secondary!("c"), CopySelection, c),
+        KeyBinding::new(secondary!("a"), SelectAllMessages, c),
         KeyBinding::new("escape", ClearSelection, c),
-        KeyBinding::new("secondary-,", OpenSettings, None),
-        KeyBinding::new("secondary-k", OpenSearch, None),
-    ]);
+        KeyBinding::new(secondary!(","), OpenSettings, None),
+        KeyBinding::new(secondary!("k"), OpenSearch, None),
+    ]
 }
 
 /// One scrollable, selectable message list (the channel, or the thread panel).
@@ -188,18 +192,18 @@ impl ChatApp {
             // Enter in the thread name field moves on to the message box.
             cx.subscribe_in(&thread_name, window, |this, _, event: &ComposerEvent, window, cx| {
                 if let ComposerEvent::Submit(_) = event {
-                    window.focus(&this.thread_composer.read(cx).focus_handle(cx))
+                    window.focus(&this.thread_composer.read(cx).focus_handle(cx), cx)
                 }
             }),
             // The channel dialog: Enter moves down the fields, then saves.
             cx.subscribe_in(&channel_name, window, |this, _, event: &ComposerEvent, window, cx| {
                 if let ComposerEvent::Submit(_) = event {
-                    window.focus(&this.channel_topic.read(cx).focus_handle(cx))
+                    window.focus(&this.channel_topic.read(cx).focus_handle(cx), cx)
                 }
             }),
             cx.subscribe_in(&channel_topic, window, |this, _, event: &ComposerEvent, window, cx| {
                 if let ComposerEvent::Submit(_) = event {
-                    window.focus(&this.channel_repo.read(cx).focus_handle(cx))
+                    window.focus(&this.channel_repo.read(cx).focus_handle(cx), cx)
                 }
             }),
             cx.subscribe_in(&channel_repo, window, |this, _, event: &ComposerEvent, window, cx| {
@@ -358,7 +362,7 @@ impl ChatApp {
             self.side.reset(0);
         }
         self.composer.update(cx, |c, cx| c.set_placeholder(placeholder, cx));
-        window.focus(&self.composer.read(cx).focus_handle(cx));
+        window.focus(&self.composer.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -391,7 +395,7 @@ impl ChatApp {
         });
         self.thread_composer
             .update(cx, |c, cx| c.set_placeholder("Enter a message to start the conversation!", cx));
-        window.focus(&self.thread_name.read(cx).focus_handle(cx));
+        window.focus(&self.thread_name.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -401,7 +405,7 @@ impl ChatApp {
         self.side.reset(self.ws.len(Conv::Thread(t)));
         let placeholder = format!("Message {}", self.ws.threads[t].name);
         self.thread_composer.update(cx, |c, cx| c.set_placeholder(placeholder, cx));
-        window.focus(&self.thread_composer.read(cx).focus_handle(cx));
+        window.focus(&self.thread_composer.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -425,7 +429,7 @@ impl ChatApp {
         self.panel = Panel::Closed;
         self.highlight = None;
         self.side.reset(0);
-        window.focus(&self.composer.read(cx).focus_handle(cx));
+        window.focus(&self.composer.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -441,7 +445,7 @@ impl ChatApp {
             self.search = Some(Search { hits: Vec::new(), selected: 0, scroll: ScrollHandle::new() });
             self.run_search(cx);
         }
-        window.focus(&self.search_box.read(cx).focus_handle(cx));
+        window.focus(&self.search_box.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -451,7 +455,7 @@ impl ChatApp {
             return;
         }
         self.search_box.update(cx, |c, cx| c.set_text("", cx));
-        window.focus(&self.composer.read(cx).focus_handle(cx));
+        window.focus(&self.composer.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -550,13 +554,13 @@ impl ChatApp {
             });
         }
         self.dialog = Some(ChannelDialog { editing, error: None });
-        window.focus(&self.channel_name.read(cx).focus_handle(cx));
+        window.focus(&self.channel_name.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
     fn close_channel_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog = None;
-        window.focus(&self.composer.read(cx).focus_handle(cx));
+        window.focus(&self.composer.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -612,7 +616,7 @@ impl ChatApp {
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
-        window.focus(&self.composer.read(cx).focus_handle(cx));
+        window.focus(&self.composer.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -1196,7 +1200,7 @@ impl ChatApp {
     // --- selection -------------------------------------------------------
 
     fn on_select_down(&mut self, pane: PaneId, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.pane(pane).focus);
+        window.focus(&self.pane(pane).focus, cx);
         let other = match pane {
             PaneId::Main => PaneId::Side,
             PaneId::Side => PaneId::Main,
@@ -1295,7 +1299,7 @@ impl ChatApp {
             return;
         }
         let composer = self.pane_composer(pane).clone();
-        window.focus(&composer.read(cx).focus_handle(cx));
+        window.focus(&composer.read(cx).focus_handle(cx), cx);
         composer.update(cx, |c, cx| c.replace_text_in_range(None, &text, window, cx));
         cx.stop_propagation();
     }
@@ -1833,7 +1837,7 @@ impl ChatApp {
                 _ => repo,
             };
             div()
-                .flex_shrink()
+                .flex_shrink(1.)
                 .min_w(px(80.))
                 .max_w(px(320.))
                 .overflow_hidden()
@@ -2168,7 +2172,7 @@ impl ChatApp {
         let frame = div()
             .mt_1()
             .flex_basis(px(520.))
-            .flex_shrink()
+            .flex_shrink(1.)
             .min_w_0()
             .p_3()
             .flex()

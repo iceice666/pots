@@ -64,3 +64,81 @@ colors! {
     cursor = rgb(0x1264a3);
     selection = rgba(0x1264a340);
 }
+
+/// Points gpui-component's global `Theme` at the palette above, so its
+/// widgets look like the rest of Pots. Call after `gpui_component::init`.
+///
+/// Only the light palette exists here, and nothing calls
+/// `Theme::sync_system_appearance`, so the theme never follows the OS into
+/// dark mode. Fields with no counterpart above keep the library's light
+/// defaults.
+pub fn install_component_theme(cx: &mut gpui::App) {
+    use gpui::px;
+    use gpui_component::{Theme, ThemeMode};
+
+    // Switch mode first: setting it loads that mode's stock palette, which
+    // would overwrite colors edited in the same `update`.
+    Theme::change(ThemeMode::Light, None, cx);
+    Theme::update(cx, |t| {
+        // gpui's text defaults, which the Pots views are laid out against.
+        // The root plugin turns `font_size` into the window's rem size.
+        t.font_family = ".SystemUIFont".into();
+        t.font_size = px(16.);
+        t.mono_font_family = MONO.into();
+
+        let c = &mut t.colors;
+        c.background = bg();
+        c.foreground = text();
+        c.border = border();
+        c.input = border();
+        c.ring = composer_focus();
+        c.caret = cursor();
+        c.selection = selection();
+        c.muted = hover();
+        c.muted_foreground = muted();
+        c.accent = hover();
+        c.accent_foreground = text();
+        c.popover = bg();
+        c.popover_foreground = text();
+        c.overlay = rgba(0x00000066).into();
+        c.window_border = panel_border();
+
+        c.primary = send();
+        c.primary_hover = send_hover();
+        c.primary_active = send_hover();
+        c.primary_foreground = bg();
+        c.button_primary = send();
+        c.button_primary_hover = send_hover();
+        c.button_primary_active = send_hover();
+        c.button_primary_foreground = bg();
+
+        c.link = link();
+        c.link_hover = link();
+        c.link_active = link();
+        c.danger = error();
+        c.button_danger = error();
+        c.success = online();
+        c.warning = busy();
+
+        c.list = bg();
+        c.list_hover = hover();
+        c.list_even = table_stripe();
+        c.list_head = table_header();
+        c.table = bg();
+        c.table_head = table_header();
+        c.table_head_foreground = text();
+        c.table_even = table_stripe();
+        c.table_hover = hover();
+        c.table_row_border = border();
+
+        c.title_bar = topbar();
+        c.title_bar_border = topbar();
+        c.sidebar = sidebar();
+        c.sidebar_foreground = sidebar_text();
+        c.sidebar_border = sidebar();
+        c.sidebar_accent = sidebar_hover();
+        c.sidebar_accent_foreground = sidebar_text();
+        c.sidebar_primary = sidebar_selected();
+        c.sidebar_primary_foreground = bg();
+    });
+}

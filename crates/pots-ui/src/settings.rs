@@ -97,7 +97,7 @@ impl Settings {
             subscriptions.push(cx.subscribe_in(field, window, move |this, _, event: &ComposerEvent, window, cx| {
                 if let ComposerEvent::Submit(_) = event {
                     match &next {
-                        Some(next) => window.focus(&next.read(cx).focus_handle(cx)),
+                        Some(next) => window.focus(&next.read(cx).focus_handle(cx), cx),
                         None => this.save(window, cx),
                     }
                 }
@@ -172,7 +172,7 @@ impl Settings {
             Some(name) => self.select(Selected::Provider(name), window, cx),
             None => {
                 self.selected = None;
-                window.focus(&self.focus);
+                window.focus(&self.focus, cx);
                 cx.notify();
             }
         }
@@ -201,9 +201,9 @@ impl Settings {
         self.selected = Some(selected);
         self.error = None;
         if new {
-            window.focus(&self.name.read(cx).focus_handle(cx));
+            window.focus(&self.name.read(cx).focus_handle(cx), cx);
         } else {
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
         }
         cx.notify();
     }
@@ -295,8 +295,8 @@ impl Settings {
         self.error = None;
         self.notice = None;
         match page {
-            Page::Agents if self.agent.is_some() => window.focus(&self.model.read(cx).focus_handle(cx)),
-            _ => window.focus(&self.focus),
+            Page::Agents if self.agent.is_some() => window.focus(&self.model.read(cx).focus_handle(cx), cx),
+            _ => window.focus(&self.focus, cx),
         }
         cx.notify();
     }
@@ -361,7 +361,7 @@ impl Settings {
                     (false, _) => format!("Saved. {} uses {} from its next reply.", choice.name, choice.model),
                 });
                 self.reload(None, window, cx);
-                window.focus(&self.model.read(cx).focus_handle(cx));
+                window.focus(&self.model.read(cx).focus_handle(cx), cx);
             }
             Err(e) => {
                 self.error = Some(e);
@@ -728,7 +728,7 @@ impl Settings {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.notice = None;
                 this.select_agent(Some(which.clone()), cx);
-                window.focus(&this.model.read(cx).focus_handle(cx));
+                window.focus(&this.model.read(cx).focus_handle(cx), cx);
             }))
     }
 
@@ -843,7 +843,7 @@ impl Settings {
                     .child(div().flex_none().text_size(px(12.)).text_color(theme::muted()).child(price_label(&price)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.model.update(cx, |f, cx| f.set_text(pick.clone(), cx));
-                        window.focus(&this.model.read(cx).focus_handle(cx));
+                        window.focus(&this.model.read(cx).focus_handle(cx), cx);
                     }))
             })))
         }))
