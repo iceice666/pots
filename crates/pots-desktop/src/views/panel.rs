@@ -856,12 +856,15 @@ impl PotsApp {
                             .flex()
                             .gap(px(8.))
                             .pb(px(12.))
-                            .child(div().flex_1().min_w_0().line_height(relative(1.4)).child(
-                                agent_text(
-                                    SharedString::from(format!("task-step-{}-{i}", tid.0)),
-                                    s.text.clone(),
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    agent_text(
+                                        SharedString::from(format!("task-step-{}-{i}", tid.0)),
+                                        s.text.clone(),
+                                    )
+                                    .line_height(relative(1.4)),
                                 ),
-                            ))
+                            )
                             .child(
                                 div()
                                     .flex_none()
