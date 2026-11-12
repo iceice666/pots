@@ -151,6 +151,8 @@ PM 用 `start_task` 分派工作時也會自動開 thread。
 - 有自己的 git clone（`~/.pots/tasks/t<編號>-<名稱>`）和 branch（`pots/t<編號>-<名稱>`），不會跟其他任務互相干擾。
 - agent 只看到這個 thread 自己最近的訊息，上下文不會被頻道裡的其他對話擠掉。
 
+**結案（Archive）：** 用不到的 thread 可以封存，讓它從左側欄消失。滑鼠移到左側欄的 thread 上點 ✓，或在 thread 面板標題列點 **Archive**。封存只是藏起來：訊息、clone 和 branch 都還在，頻道裡起頭訊息下面的 thread 卡片會標上 Archived，點進去按 **Unarchive** 就拿回來。有人（包括 agent）在封存的 thread 裡發新訊息時，它會自動回到側欄。
+
 ### DM
 
 - 不用 @，講什麼那個 agent 都會回。

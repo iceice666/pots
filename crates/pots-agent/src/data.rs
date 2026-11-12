@@ -205,6 +205,10 @@ pub struct Thread {
     /// Index of the starter message in the parent channel.
     pub starter: usize,
     pub messages: Vec<Message>,
+    /// Archived (closed) by the user: hidden from the sidebar, still reachable
+    /// from its card under the starter. A new message reopens it, as in Discord.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// A message list: a channel, or a thread. In a thread, item 0 is the
@@ -380,7 +384,11 @@ impl Workspace {
         self.next_id += 1;
         match conv {
             Conv::Channel(c) => self.channels[c].messages.push(msg),
-            Conv::Thread(t) => self.threads[t].messages.push(msg),
+            Conv::Thread(t) => {
+                let thread = &mut self.threads[t];
+                thread.messages.push(msg);
+                thread.archived = false;
+            }
         }
         len
     }
@@ -416,6 +424,7 @@ impl Workspace {
             channel,
             starter,
             messages: Vec::new(),
+            archived: false,
         });
         self.channels[channel].messages[starter].thread = Some(t);
         t
@@ -435,6 +444,13 @@ impl Workspace {
             .filter(|&t| self.threads[t].channel == channel)
             .collect();
         ts.sort_by_key(|&t| std::cmp::Reverse(self.message(Conv::Thread(t), self.len(Conv::Thread(t)) - 1).ts));
+        ts
+    }
+
+    /// Threads of `channel` that aren't archived, for the sidebar.
+    pub fn open_threads(&self, channel: usize) -> Vec<usize> {
+        let mut ts = self.channel_threads(channel);
+        ts.retain(|&t| !self.threads[t].archived);
         ts
     }
 }
@@ -635,6 +651,25 @@ mod tests {
         let t = ws.create_thread(eng, 5, "follow-ups");
         ws.post(Conv::Thread(t), ws.me, "on it");
         assert_eq!(ws.channel_threads(eng), vec![t, seeded[0]]);
+    }
+
+    #[test]
+    fn archived_threads_leave_the_sidebar_until_someone_posts() {
+        let mut ws = seed();
+        let eng = ws.find_channel("engineering").unwrap();
+        let t = ws.channel_threads(eng)[0];
+        ws.threads[t].archived = true;
+        assert!(!ws.open_threads(eng).contains(&t));
+        assert!(ws.channel_threads(eng).contains(&t), "still a thread of the channel");
+        ws.post(Conv::Thread(t), ws.me, "one more thing");
+        assert!(!ws.threads[t].archived, "a new message reopens it");
+        assert!(ws.open_threads(eng).contains(&t));
+    }
+
+    #[test]
+    fn threads_saved_before_archiving_load_as_open() {
+        let thread: Thread = serde_json::from_str(r#"{"name":"t","channel":0,"starter":0,"messages":[]}"#).unwrap();
+        assert!(!thread.archived);
     }
 
     #[test]

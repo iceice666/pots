@@ -361,6 +361,14 @@ impl ChatApp {
         self.open_thread(t, window, cx);
     }
 
+    /// Archive thread `t` (it leaves the sidebar) or bring it back. An open
+    /// panel stays open, so the user can change their mind.
+    fn set_archived(&mut self, t: usize, archived: bool, cx: &mut Context<Self>) {
+        self.ws.threads[t].archived = archived;
+        self.save();
+        cx.notify();
+    }
+
     fn close_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.panel = Panel::Closed;
         self.side.reset(0);
@@ -1283,7 +1291,7 @@ impl ChatApp {
                     )
                     .children(channels.map(|(i, c)| {
                         // Unlike Slack, Discord lists a channel's active threads under it.
-                        let threads = self.ws.channel_threads(i);
+                        let threads = self.ws.open_threads(i);
                         let last = threads.len().saturating_sub(1);
                         div()
                             .flex()
@@ -1335,8 +1343,29 @@ impl ChatApp {
     fn render_thread_row(&self, t: usize, last: bool, cx: &Context<Self>) -> impl IntoElement {
         let selected = self.panel == Panel::Thread(t);
         let line = theme::thread_line();
+        let group: SharedString = format!("thread-row-{t}").into();
+        let archive = div()
+            .id(("archive-thread-row", t))
+            .flex_none()
+            .size(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .text_size(px(12.))
+            .text_color(theme::sidebar_heading())
+            .invisible()
+            .group_hover(group.clone(), |s| s.visible())
+            .hover(|s| s.text_color(gpui::white()))
+            .tooltip(|_, cx| Tooltip::view("Archive thread", cx))
+            .child("✓")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.set_archived(t, true, cx);
+            }));
         div()
             .id(("thread", t))
+            .group(group)
             .relative()
             .h(px(28.))
             .mx_2()
@@ -1376,14 +1405,18 @@ impl ChatApp {
                             d.text_color(theme::sidebar_text()).hover(|s| s.bg(theme::sidebar_hover()))
                         }
                     })
+                    .pr_1()
+                    .gap_1()
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
                             .child(self.ws.threads[t].name.clone()),
-                    ),
+                    )
+                    .child(archive),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.select_thread(t, window, cx)))
     }
@@ -1944,6 +1977,7 @@ impl ChatApp {
                             .text_ellipsis()
                             .child(thread.name.clone()),
                     )
+                    .when(thread.archived, |d| d.child(archived_tag()))
                     .child(
                         div()
                             .flex_none()
@@ -2125,6 +2159,33 @@ impl ChatApp {
             Panel::Closed => unreachable!("render_panel called with the panel closed"),
         };
         let new = matches!(self.panel, Panel::NewThread { .. });
+        // Archive ("close the case") or reopen the thread shown.
+        let archive = match self.panel {
+            Panel::Thread(t) => {
+                let archived = self.ws.threads[t].archived;
+                Some(
+                    div()
+                        .id("archive-thread")
+                        .flex_none()
+                        .h(px(28.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_size(px(13.))
+                        .text_color(theme::muted())
+                        .hover(|s| s.bg(theme::reaction_bg()).text_color(theme::text()))
+                        .tooltip(move |_, cx| {
+                            Tooltip::view(if archived { "Bring it back to the sidebar" } else { "Hide it from the sidebar" }, cx)
+                        })
+                        .child(if archived { "Unarchive" } else { "Archive" })
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_archived(t, !archived, cx))),
+                )
+            }
+            _ => None,
+        };
+        let archived = matches!(self.panel, Panel::Thread(t) if self.ws.threads[t].archived);
         div()
             .w(px(400.))
             .flex_none()
@@ -2167,23 +2228,32 @@ impl ChatApp {
                                     .text_size(px(13.))
                                     .text_color(theme::muted())
                                     .child(format!("# {}", self.ws.channels[channel].name)),
-                            ),
+                            )
+                            .when(archived, |d| d.child(archived_tag())),
                     )
                     .child(
                         div()
-                            .id("close-thread")
                             .flex_none()
-                            .size(px(28.))
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_color(theme::muted())
-                            .hover(|s| s.bg(theme::reaction_bg()).text_color(theme::text()))
-                            .tooltip(|_, cx| Tooltip::view("Close", cx))
-                            .child("✕")
-                            .on_click(cx.listener(|this, _, window, cx| this.close_panel(window, cx))),
+                            .gap_1()
+                            .children(archive)
+                            .child(
+                                div()
+                                    .id("close-thread")
+                                    .flex_none()
+                                    .size(px(28.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(theme::muted())
+                                    .hover(|s| s.bg(theme::reaction_bg()).text_color(theme::text()))
+                                    .tooltip(|_, cx| Tooltip::view("Close", cx))
+                                    .child("✕")
+                                    .on_click(cx.listener(|this, _, window, cx| this.close_panel(window, cx))),
+                            ),
                     ),
             )
             .when(new, |d| {
@@ -2285,6 +2355,19 @@ fn usage_line(msg: &Message) -> String {
         parts.push(cost::dollars(c));
     }
     parts.join(" · ")
+}
+
+/// The small "Archived" label on an archived thread's card and panel.
+fn archived_tag() -> impl IntoElement {
+    div()
+        .flex_none()
+        .px(px(6.))
+        .rounded_sm()
+        .bg(theme::reaction_bg())
+        .text_size(px(11.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::muted())
+        .child("Archived")
 }
 
 /// The action bar that floats over the top-right of a hovered message.
