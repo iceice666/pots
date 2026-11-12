@@ -9,7 +9,9 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 
-use super::text::{agent_stream, agent_text, agent_text_muted, agent_text_prefixed};
+use super::text::{
+    agent_stream, agent_text, agent_text_muted, agent_text_prefixed, fact_note,
+};
 use super::widgets::*;
 use crate::app::{AutomationSection, GoalTab, Panel, PotsApp};
 use crate::model::*;
@@ -895,20 +897,21 @@ impl PotsApp {
                             .flex_col()
                             .gap(px(4.))
                             .children(a.facts.iter().enumerate().map(|(i, f)| {
-                                // facts 是平台組的字（PR、sha、動作、「你的理由：」）：
-                                // 後面接的是使用者的原話時只有那一段走 Markdown。
-                                match f.split_once("你的理由：") {
+                                // facts 是平台組的字（PR、sha、動作）：只有拒絕／回答時
+                                // 附上的「你的理由：」後面那段才是使用者寫的原文。
+                                match fact_note(f) {
                                     Some((prefix, note)) => agent_text_prefixed(
-                                        format!("{prefix}你的理由："),
+                                        prefix,
                                         agent_text_muted(
                                             SharedString::from(format!(
                                                 "approval-fact-{}-{i}",
                                                 id.0
                                             )),
-                                            note.to_string(),
+                                            note,
                                         ),
-                                    ),
-                                    None => muted(f.clone()),
+                                    )
+                                    .into_any_element(),
+                                    None => muted(f.clone()).into_any_element(),
                                 }
                             })),
                     )

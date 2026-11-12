@@ -4,10 +4,11 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px, relative,
+    StatefulInteractiveElement as _, Styled as _, div, px,
 };
 
 use super::channel::empty_state;
+use super::text::{agent_text, agent_text_muted, agent_text_prefixed, fact_note};
 use super::widgets::*;
 use crate::app::{InboxFilter, PotsApp};
 use crate::model::*;
@@ -188,6 +189,39 @@ impl PotsApp {
             )
     }
 
+    /// 核准理由以外的 facts（PR、sha、動作、時間）：平台組的結構化欄位，維持 chip；
+    /// 只有拒絕／回答時附上的「你的理由：」後面那段是使用者原文，拆出來走 Markdown。
+    fn render_facts(&self, item: &InboxItem, scope: &str, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .children(item.facts.iter().enumerate().map(|(i, f)| {
+                match fact_note(f) {
+                    Some((prefix, note)) => agent_text_prefixed(
+                        prefix,
+                        agent_text_muted(
+                            gpui_kit::SharedString::from(format!("{scope}-fact-{}-{i}", item.id.0)),
+                            note,
+                        ),
+                    )
+                    .into_any_element(),
+                    None => div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .child(chip(f.clone()))
+                        .into_any_element(),
+                }
+            }))
+            .when_some(super::preferences::approval_diff(item), |d, diff| {
+                d.child(super::preferences::diff_block(
+                    diff,
+                    cx.theme().mono_font_family.clone(),
+                ))
+            })
+    }
+
     fn render_inbox_item(
         &self,
         item: &InboxItem,
@@ -218,11 +252,26 @@ impl PotsApp {
                 d.child(chip(instance.map_or("?", |i| i.name.as_str()).to_string()))
             })
             .child(div().font_weight(FontWeight::SEMIBOLD).child(source))
+            // context 是 Goal 標題或專案名（使用者／agent 取的），可能帶行內 Markdown；
+            // 「·」是平台的分隔字，留在純文字。
             .when(!item.context.is_empty(), |d| {
                 d.child(
                     div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
                         .text_color(theme::text_muted())
-                        .child(format!("· {}", item.context)),
+                        .child("·")
+                        .child(
+                            agent_text(
+                                gpui_kit::SharedString::from(format!(
+                                    "inbox-context-{}",
+                                    item.id.0
+                                )),
+                                item.context.clone(),
+                            )
+                            .text_size(px(13.)),
+                        ),
                 )
             })
             .child(
@@ -233,39 +282,32 @@ impl PotsApp {
                     .child(item.at.relative_to(self.store.now)),
             );
 
-        let body = if item.detail.is_empty() && !item.facts.is_empty() {
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(px(6.))
-                .children(item.facts.iter().map(|f| chip(f.clone())))
+        // 沒有 detail 的項目（例如 listener 提案）直接列 facts；有 detail 就畫理由。
+        let facts_only = item.detail.is_empty() && !item.facts.is_empty();
+        let body = if facts_only {
+            self.render_facts(item, "inbox", cx).into_any_element()
         } else {
+            // 核准理由、任務「需要你」的原因都是 agent 寫的 Markdown。
             div()
-                .text_size(px(14.))
-                .line_height(relative(1.5))
                 .text_color(theme::text_muted())
-                .child(item.detail.clone())
+                .child(
+                    agent_text(
+                        gpui_kit::SharedString::from(format!("inbox-detail-{}", item.id.0)),
+                        item.detail.clone(),
+                    )
+                    .text_size(px(14.)),
+                )
+                .into_any_element()
         };
         // 服務的核准：理由之外也列出具體的動作（PR、sha、方式）與修改的 diff。
-        let body = if item.approval.is_some() {
+        let body = if item.approval.is_some() && !facts_only {
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
                 .child(body)
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .children(item.facts.iter().map(|f| chip(f.clone()))),
-                )
-                .when_some(super::preferences::approval_diff(item), |d, diff| {
-                    d.child(super::preferences::diff_block(
-                        diff,
-                        cx.theme().mono_font_family.clone(),
-                    ))
-                })
+                .child(self.render_facts(item, "inbox", cx))
+                .into_any_element()
         } else {
             body
         };

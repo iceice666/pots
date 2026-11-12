@@ -71,6 +71,16 @@ pub fn agent_text_prefixed(prefix: impl Into<SharedString>, body: TextView) -> D
         .child(body)
 }
 
+/// `facts` 裡夾帶使用者原話的那一條（「你的理由：…」）。
+///
+/// 核准與 Inbox 的 facts 是平台組的結構化欄位（PR、sha、動作、時間），本身是純文字，
+/// 只有拒絕／回答時附上的理由是使用者自己寫的；那一條拆成「前綴（純文字）」與「原話
+/// （Markdown）」。不是這一條就回 `None`，呼叫端照舊當 chip 或淡色文字畫。
+pub fn fact_note(fact: &str) -> Option<(String, String)> {
+    let (prefix, note) = fact.split_once("你的理由：")?;
+    Some((format!("{prefix}你的理由："), note.to_string()))
+}
+
 /// 把 Markdown 原文截到最多 `max_lines` 行，被截掉時在最後補「…」。
 ///
 /// `TextView` 的 `max_lines` 只把版面高度夾住、不會畫省略號，所以截斷在原文這一層
