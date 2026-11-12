@@ -12,6 +12,7 @@ mod overlay;
 mod overseer;
 mod panel;
 mod preferences;
+mod project_env;
 mod roles;
 mod settings;
 mod stream;

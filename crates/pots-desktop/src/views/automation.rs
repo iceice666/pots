@@ -276,13 +276,14 @@ impl PotsApp {
             .child(body)
     }
 
-    /// 右欄「自動化」：這個 project 的監看設定、排程與 listener。
+    /// 右欄「自動化」：這個 project 的監看設定、環境、排程與 listener。
     pub fn render_project_automations(
         &self,
         p: &ProjectView,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let watch = self.render_project_watch(p, cx);
+        let env = self.render_project_env(p, cx);
         let body: Vec<AnyElement> = if self.current_instance().automation_count(p.id) == 0 {
             vec![
                 empty_state(
@@ -305,6 +306,7 @@ impl PotsApp {
             .flex_col()
             .gap(px(24.))
             .child(watch)
+            .child(env)
             .children(body)
             .into_any_element()
     }

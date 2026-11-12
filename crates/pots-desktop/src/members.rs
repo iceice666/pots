@@ -121,7 +121,8 @@ pub fn members(
     });
 
     for goal in project.goals.iter().filter(|g| g.state.is_active()) {
-        if !goal.quick {
+        // 快速修改與環境分析沒有 Planner。
+        if !goal.quick && !goal.env {
             all.push(Member {
                 kind: MemberKind::Planner,
                 name: format!("Planner · {}", goal.title),
@@ -355,6 +356,7 @@ mod tests {
             team: Vec::new(),
             brief: String::new(),
             quick: false,
+            env: false,
         }
     }
 
@@ -376,6 +378,7 @@ mod tests {
             repos: Vec::new(),
             workdir: None,
             merge_method: MergeMethod::default(),
+            env: ProjectEnvView::default(),
         }
     }
 
@@ -596,6 +599,28 @@ mod tests {
         assert_eq!(
             sections[0].members[0].model.as_deref(),
             Some("還沒有可用的 provider")
+        );
+    }
+
+    #[test]
+    fn env_goal_has_no_planner() {
+        let mut env = goal(
+            1,
+            "分析環境",
+            GoalState::Active,
+            vec![task(1, "建立環境", "env", TaskStateView::Planned)],
+        );
+        env.env = true;
+        let sections = members(
+            &project(AgentState::Idle, vec![env]),
+            &providers(),
+            &WorkerSettingsView::default(),
+        );
+        assert!(
+            sections
+                .iter()
+                .flat_map(|s| &s.members)
+                .all(|m| m.kind != MemberKind::Planner)
         );
     }
 

@@ -352,6 +352,7 @@ mod tests {
                     repos: vec![],
                     workdir: None,
                     merge_method: Default::default(),
+                    env: Default::default(),
                 }],
                 model_auth: ModelAuthView::SignedOut,
                 providers: ProvidersView::default(),

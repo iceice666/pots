@@ -28,8 +28,8 @@ mod shots {
     use pots_desktop::members::MemberTarget;
     use pots_desktop::mock;
     use pots_desktop::model::{
-        ArtifactKind, ClientCommand, ExecKind, GoalState, InboxAction, ModelRole, ProviderId,
-        ProviderKind, TaskId, ThinkingLevel, WorkerBackendKind,
+        ArtifactKind, ClientCommand, GoalState, InboxAction, ModelRole, ProviderId, ProviderKind,
+        TaskId, ThinkingLevel, WorkerBackendKind,
     };
 
     struct Shooter {
@@ -1025,6 +1025,48 @@ mod shots {
             app.toggle_panel(Panel::Automations, cx);
         });
         s.shot("10-channel-automations");
+        // 「環境」區塊：展開使用中的規格；打開「重新分析」的表單；換成第 1 版。
+        s.update(|app, _, cx| {
+            let auth = app.current_project().unwrap().id;
+            assert_eq!(app.current_project().unwrap().env.current, Some(2));
+            app.toggle_env_detail(auth, cx);
+        });
+        s.shot("10a-channel-env-detail");
+        s.update(|app, window, cx| {
+            let auth = app.current_project().unwrap().id;
+            app.toggle_env_detail(auth, cx);
+            app.edit_project_env(auth, window, cx);
+            app.use_project_env(auth, Some(1), cx);
+            assert!(app.store.outbox.iter().any(|(_, c)| matches!(
+                c,
+                ClientCommand::UseProjectEnv { project, rev: Some(1) } if *project == auth
+            )));
+        });
+        s.shot("10b-channel-env-setup");
+        // 分析中：按鈕換成「環境分析進行中…」。之後改回原樣。
+        s.update(|app, _, cx| {
+            let instance = app.instance;
+            let auth = app.current_project().unwrap().id;
+            let goal = app.current_project().unwrap().goals[0].id;
+            app.cancel_project_env(cx);
+            app.use_project_env(auth, Some(2), cx);
+            app.store
+                .project_mut(instance, auth)
+                .unwrap()
+                .env
+                .setup_goal = Some(goal);
+        });
+        s.shot("10c-channel-env-running");
+        s.update(|app, _, cx| {
+            let instance = app.instance;
+            let auth = app.current_project().unwrap().id;
+            app.store
+                .project_mut(instance, auth)
+                .unwrap()
+                .env
+                .setup_goal = None;
+            cx.notify();
+        });
         s.update(|app, _, cx| {
             let auth = app.current_project().unwrap().id;
             let schedule = app
@@ -1116,19 +1158,15 @@ mod shots {
             app.cancel_role_model_edit(cx);
         });
 
-        // 「Worker」：家用伺服器是內建 worker；改成 Claude Code、本機執行時出現登入指令與警告。
+        // 「Worker」：家用伺服器是內建 worker；改成 Claude Code 時出現登入指令。worker 只在容器裡執行。
         s.update(|app, _, cx| app.open_settings(SettingsTab::Worker, cx));
         s.shot("10e-settings-worker");
         s.update(|app, window, cx| {
             app.edit_worker(window, cx);
             app.set_worker_backend(WorkerBackendKind::ClaudeCode, cx);
-            app.set_worker_exec(ExecKind::Local, cx);
         });
         s.shot("10f-settings-worker-edit");
-        s.update(|app, _, cx| {
-            app.set_worker_exec(ExecKind::Container, cx);
-            app.save_worker(cx);
-        });
+        s.update(|app, _, cx| app.save_worker(cx));
         s.update(|app, _, _| {
             assert!(
                 app.store.outbox.iter().all(|(_, c)| !matches!(

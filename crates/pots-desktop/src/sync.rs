@@ -50,6 +50,8 @@ pub struct Applied {
     pub workdir_changed: Option<ProjectId>,
     /// 這個 project 的負責人改名了（`ProjectAgentName`）。
     pub agent_name_changed: Option<ProjectId>,
+    /// 這個 project 的環境有變（`ProjectEnv`）。
+    pub env_changed: Option<ProjectId>,
     /// 要不要彈桌面通知的事（新的核准、需要你處理的任務、Goal 完成）。快照不產生通知。
     pub notices: Vec<Notice>,
     /// 通知設定有變（`Notifications` 事件或快照）。
@@ -307,7 +309,15 @@ impl Sync {
             repos: p.repos,
             workdir: p.workdir,
             merge_method: p.merge_method,
+            env: self.localize_env(p.env),
         }
+    }
+
+    fn localize_env(&self, mut env: ProjectEnvView) -> ProjectEnvView {
+        for r in &mut env.revs {
+            r.created_at = self.local(r.created_at);
+        }
+        env
     }
 
     /// 服務的核准 → Inbox 項目。
@@ -811,6 +821,13 @@ impl Sync {
                 }
                 out.workdir_changed = Some(project);
             }
+            ServerEvent::ProjectEnv { project, env, .. } => {
+                let env = self.localize_env(env);
+                if let Some(p) = store.project_mut(instance, project) {
+                    p.env = env;
+                }
+                out.env_changed = Some(project);
+            }
             ServerEvent::ProjectAgentName {
                 project,
                 agent_name,
@@ -1023,6 +1040,7 @@ mod tests {
                     repos: vec![],
                     workdir: None,
                     merge_method: Default::default(),
+                    env: Default::default(),
                 }],
                 model_auth: auth,
                 providers: chatgpt_active(),
@@ -1110,7 +1128,7 @@ mod tests {
 
         let worker = WorkerSettingsView {
             backend: WorkerBackendKind::ClaudeCode,
-            exec: ExecKind::Local,
+            exec: ExecKind::Container,
             runtime: "podman".into(),
             image: "pots-worker:latest".into(),
             claude_model: String::new(),
@@ -1267,6 +1285,7 @@ mod tests {
             team: vec![],
             brief: String::new(),
             quick: false,
+            env: false,
         }
     }
 
@@ -1439,6 +1458,31 @@ mod tests {
             store.project(inst, project).unwrap().merge_method,
             MergeMethod::Rebase
         );
+        // project 的環境整份替換。
+        let out = sync.apply(
+            &mut store,
+            inst,
+            ServerEvent::ProjectEnv {
+                seq: 12,
+                project,
+                env: ProjectEnvView {
+                    current: Some(1),
+                    revs: vec![EnvRevView {
+                        rev: 1,
+                        spec: EnvSpec {
+                            prepare: "cargo fetch".into(),
+                            ..Default::default()
+                        },
+                        summary: "Rust".into(),
+                        created_at: Timestamp::now(),
+                    }],
+                    setup_goal: None,
+                },
+            },
+        );
+        assert_eq!(out.env_changed, Some(project));
+        let env = &store.project(inst, project).unwrap().env;
+        assert_eq!(env.current_rev().unwrap().spec.prepare, "cargo fetch");
     }
 
     fn text_of(store: &Store, instance: InstanceId, project: ProjectId, item: ItemId) -> String {

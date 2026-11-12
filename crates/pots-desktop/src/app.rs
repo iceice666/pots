@@ -155,7 +155,6 @@ pub enum GithubTest {
 /// 設定視窗「Worker」類別正在改的設定。
 pub struct WorkerEditor {
     pub backend: WorkerBackendKind,
-    pub exec: ExecKind,
     pub runtime: Entity<InputState>,
     pub image: Entity<InputState>,
     /// 留空用 Claude Code CLI 的預設模型。
@@ -305,6 +304,33 @@ pub struct RepoEditor {
     pub saving: bool,
     pub error: Option<String>,
     _subscription: Subscription,
+}
+
+/// 頻道「自動化」分頁「環境」區塊的「分析並建立環境」表單。
+pub struct EnvEditor {
+    pub project: ProjectId,
+    /// 給環境 worker 的說明（可留白）。
+    pub note: Entity<InputState>,
+    /// 已送出 `SetupProjectEnv`、等服務回 `ProjectEnv`。
+    pub saving: bool,
+    pub error: Option<String>,
+    _subscription: Subscription,
+}
+
+impl EnvEditor {
+    pub(crate) fn new(
+        project: ProjectId,
+        note: Entity<InputState>,
+        subscription: Subscription,
+    ) -> Self {
+        Self {
+            project,
+            note,
+            saving: false,
+            error: None,
+            _subscription: subscription,
+        }
+    }
 }
 
 /// 設定視窗「記憶」類別正在改的整理記憶模型。
@@ -740,6 +766,9 @@ pub struct PotsApp {
     pub listener_form: Option<ListenerForm>,
     pub source_editor: Option<SourceEditor>,
     pub repo_editor: Option<RepoEditor>,
+    pub env_editor: Option<EnvEditor>,
+    /// 「環境」區塊展開了目前規格的 project。
+    pub env_detail: Option<ProjectId>,
     pub notification_editor: Option<NotificationEditor>,
     pub user_md_editor: Option<UserMdEditor>,
     pub reject_dialog: Option<RejectDialog>,
@@ -869,6 +898,8 @@ impl PotsApp {
             listener_form: None,
             source_editor: None,
             repo_editor: None,
+            env_editor: None,
+            env_detail: None,
             notification_editor: None,
             user_md_editor: None,
             reject_dialog: None,
@@ -1008,6 +1039,7 @@ impl PotsApp {
                     listener: &mut self.listener_form,
                     source: &mut self.source_editor,
                     repo: &mut self.repo_editor,
+                    env: &mut self.env_editor,
                     notifications: &mut self.notification_editor,
                     user_md: &mut self.user_md_editor,
                     panel: &mut self.panel,
@@ -1053,6 +1085,7 @@ impl PotsApp {
                         listener: &mut self.listener_form,
                         source: &mut self.source_editor,
                         repo: &mut self.repo_editor,
+                        env: &mut self.env_editor,
                         notifications: &mut self.notification_editor,
                         user_md: &mut self.user_md_editor,
                         panel: &mut self.panel,
@@ -1307,6 +1340,7 @@ impl PotsApp {
             listener: &mut self.listener_form,
             source: &mut self.source_editor,
             repo: &mut self.repo_editor,
+            env: &mut self.env_editor,
             notifications: &mut self.notification_editor,
             user_md: &mut self.user_md_editor,
             panel: &mut self.panel,

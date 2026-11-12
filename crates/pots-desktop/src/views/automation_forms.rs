@@ -3,7 +3,8 @@
 //! （畫面在 `worker_settings.rs`）。
 //!
 //! 送出的指令都經 `Store::outbox`；服務接受後以 `Github`、`Worker`、`Automation`、
-//! `ProjectRepos`、`ProjectAgentName` 事件回來時收起表單，被拒絕時（`Error`）把原因留在表單裡。
+//! `ProjectRepos`、`ProjectAgentName`、`ProjectEnv` 事件回來時收起表單，被拒絕時（`Error`）把
+//! 原因留在表單裡。
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -18,8 +19,8 @@ use super::panel::{panel_frame, white_box};
 use super::settings::{card, detail_row, field};
 use super::widgets::*;
 use crate::app::{
-    GithubEditor, GithubTest, ListenerActionKind, ListenerForm, NotificationEditor, Panel, PotsApp,
-    ProjectField, RepoEditor, SourceEditor, UserMdEditor, WorkerEditor,
+    EnvEditor, GithubEditor, GithubTest, ListenerActionKind, ListenerForm, NotificationEditor,
+    Panel, PotsApp, ProjectField, RepoEditor, SourceEditor, UserMdEditor, WorkerEditor,
 };
 use crate::model::*;
 use crate::sync::{Applied, month_day_time};
@@ -117,6 +118,7 @@ pub(crate) struct Forms<'a> {
     pub listener: &'a mut Option<ListenerForm>,
     pub source: &'a mut Option<SourceEditor>,
     pub repo: &'a mut Option<RepoEditor>,
+    pub env: &'a mut Option<EnvEditor>,
     pub notifications: &'a mut Option<NotificationEditor>,
     pub user_md: &'a mut Option<UserMdEditor>,
     pub panel: &'a mut Option<Panel>,
@@ -169,6 +171,12 @@ impl Forms<'_> {
         {
             s.saving = false;
             s.error = Some("連線中斷，請再儲存一次".into());
+        }
+        if let Some(e) = self.env
+            && e.saving
+        {
+            e.saving = false;
+            e.error = Some("連線中斷，請再送出一次".into());
         }
     }
 
@@ -223,6 +231,14 @@ impl Forms<'_> {
             s.error = Some(toast);
             return None;
         }
+        // 例如已經有環境分析在跑、還沒設定工作資料夾。
+        if let Some(e) = self.env
+            && e.saving
+        {
+            e.saving = false;
+            e.error = Some(toast);
+            return None;
+        }
         Some(toast)
     }
 
@@ -269,6 +285,13 @@ impl Forms<'_> {
             }
         {
             *self.repo = None;
+        }
+        // 環境分析開始了（`ProjectEnv` 帶著 `setup_goal`）就收起表單。
+        if let Some(e) = &self.env
+            && e.saving
+            && applied.env_changed == Some(e.project)
+        {
+            *self.env = None;
         }
         // 來源清單有變（儲存成功）就收起表單。
         if applied.automation_changed && self.source.as_ref().is_some_and(|e| e.saving) {
@@ -1712,6 +1735,6 @@ impl PotsApp {
     }
 }
 
-fn small_button(button: gpui_kit::Stateful<Div>) -> gpui_kit::Stateful<Div> {
+pub(super) fn small_button(button: gpui_kit::Stateful<Div>) -> gpui_kit::Stateful<Div> {
     button.text_size(px(13.)).px(px(12.)).py(px(5.))
 }

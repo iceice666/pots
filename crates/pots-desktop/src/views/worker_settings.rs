@@ -1,11 +1,11 @@
-//! 設定視窗的「Worker」類別：coding worker 的後端（內建或 Claude Code）、執行環境（容器或
-//! 本機）、容器執行檔與 image、Claude Code 的模型、同時執行的 worker 數，以及登入 Claude Code
-//! 的指令。
+//! 設定視窗的「Worker」類別：coding worker 的後端（內建或 Claude Code）、容器執行檔與
+//! image、Claude Code 的模型、同時執行的 worker 數，以及登入 Claude Code 的指令。worker
+//! 一律在容器裡執行（沒有本機模式）；project 有「環境」時改用環境建出的 image（見頻道的
+//! 「自動化」分頁）。
 //!
 //! 「儲存」送 `SaveWorkerSettings`；服務回 `Worker` 時收起表單，被拒絕時（`Error`）原因留在
 //! 表單裡（見 `automation_forms::Forms`）。設定只影響之後開始的任務。
 
-use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -27,8 +27,6 @@ pub const IMAGE_BUILD_COMMAND: &str = "docker build -t pots-worker:latest docker
 const CLAUDE_LOGIN_NOTE: &str = "Claude Code 由你自己官方登入：在終端機執行下面的指令，在 Claude Code \
      裡輸入 /login 完成登入後離開。Pots 不會讀取或轉存你的 Claude 憑證。";
 
-const LOCAL_WARNING: &str = "本機執行沒有沙箱：worker 可以執行任何指令。";
-
 fn muted_text(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(13.))
@@ -44,27 +42,11 @@ fn card_title(text: &str) -> Div {
         .child(text.to_string())
 }
 
-fn warning(text: &str) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .px(px(14.))
-        .py(px(10.))
-        .rounded(px(8.))
-        .bg(theme::warn_soft())
-        .text_color(theme::warn_text())
-        .text_size(px(13.))
-        .child(icon(IconName::CircleAlert, 16., theme::warn_text()))
-        .child(text.to_string())
-}
-
 impl PotsApp {
     pub fn edit_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let w = self.current_instance().worker.clone();
         self.worker_editor = Some(WorkerEditor {
             backend: w.backend,
-            exec: w.exec,
             runtime: input(w.runtime, "docker", false, window, cx),
             image: input(w.image, "pots-worker:latest", false, window, cx),
             claude_model: input(
@@ -94,14 +76,6 @@ impl PotsApp {
         cx.notify();
     }
 
-    pub fn set_worker_exec(&mut self, exec: ExecKind, cx: &mut Context<Self>) {
-        if let Some(e) = &mut self.worker_editor {
-            e.exec = exec;
-            e.error = None;
-        }
-        cx.notify();
-    }
-
     pub fn set_worker_parallel(&mut self, n: u8, cx: &mut Context<Self>) {
         if let Some(e) = &mut self.worker_editor {
             e.max_parallel = n;
@@ -116,7 +90,8 @@ impl PotsApp {
         };
         let draft = WorkerSettingsDraft {
             backend: e.backend,
-            exec: e.exec,
+            // worker 只在容器裡執行。
+            exec: ExecKind::Container,
             runtime: value(&e.runtime, cx),
             image: value(&e.image, cx),
             claude_model: value(&e.claude_model, cx),
@@ -198,20 +173,7 @@ impl PotsApp {
                         .items_center()
                         .gap(px(8.))
                         .child(card_title("目前的設定"))
-                        .child(tag(w.backend.label(), theme::chip_text(), theme::chip_bg()))
-                        .child(tag(
-                            w.exec.label(),
-                            if w.exec == ExecKind::Local {
-                                theme::warn_text()
-                            } else {
-                                theme::chip_text()
-                            },
-                            if w.exec == ExecKind::Local {
-                                theme::warn_soft()
-                            } else {
-                                theme::chip_bg()
-                            },
-                        )),
+                        .child(tag(w.backend.label(), theme::chip_text(), theme::chip_bg())),
                 )
                 .child(
                     div()
@@ -229,10 +191,7 @@ impl PotsApp {
                                 }
                             },
                         ))
-                        .child(detail_row("執行環境", w.exec.label()))
-                        .when(w.exec == ExecKind::Container, |d| {
-                            d.child(detail_row("容器", format!("{} · {}", w.runtime, w.image)))
-                        })
+                        .child(detail_row("容器", format!("{} · {}", w.runtime, w.image)))
                         .when(w.backend == WorkerBackendKind::ClaudeCode, |d| {
                             d.child(detail_row("模型", model))
                         })
@@ -241,9 +200,6 @@ impl PotsApp {
                             format!("最多 {} 個 worker", w.max_parallel),
                         )),
                 )
-                .when(w.exec == ExecKind::Local, |d| {
-                    d.child(warning(LOCAL_WARNING))
-                })
                 .when(editor.is_none(), |d| {
                     d.child(div().flex().child(
                         secondary_button("worker-edit", "修改").on_click(
@@ -261,32 +217,27 @@ impl PotsApp {
         let claude = w.backend == WorkerBackendKind::ClaudeCode
             || editor.is_some_and(|e| e.backend == WorkerBackendKind::ClaudeCode);
         if claude {
-            let changed = editor.is_some_and(|e| e.exec != w.exec);
             out = out.child(
                 card()
                     .child(card_title("登入 Claude Code"))
                     .child(muted_text(CLAUDE_LOGIN_NOTE))
-                    .child(self.command_box("login", w.login_command.clone(), cx))
-                    .when(changed, |d| {
-                        d.child(muted_text("儲存後指令會依新的執行環境更新。"))
-                    }),
+                    .child(self.command_box("login", w.login_command.clone(), cx)),
             );
         }
 
-        let container =
-            w.exec == ExecKind::Container || editor.is_some_and(|e| e.exec == ExecKind::Container);
-        if container {
-            out = out.child(
-                card()
-                    .child(card_title("Worker 的容器 image"))
-                    .child(muted_text(
-                        "容器模式每個任務起一個容器，只掛任務的工作目錄（Claude Code 另外掛它專屬的 home）。\
-                         image 用 repo 附的 docker/worker/Dockerfile 建立，在 repo 根目錄執行：",
-                    ))
-                    .child(self.command_box("image", IMAGE_BUILD_COMMAND.to_string(), cx)),
-            );
-        }
-        out
+        out.child(
+            card()
+                .child(card_title("Worker 的容器 image"))
+                .child(muted_text(
+                    "每個任務起一個容器，只掛任務的工作目錄（Claude Code 另外掛它專屬的 home）。\
+                     image 用 repo 附的 docker/worker/Dockerfile 建立，在 repo 根目錄執行：",
+                ))
+                .child(self.command_box("image", IMAGE_BUILD_COMMAND.to_string(), cx))
+                .child(muted_text(
+                    "project 建立了「環境」時，worker 改用環境以這個 image 為基底建出的 image\
+                     （在頻道的「自動化」分頁管理）。",
+                )),
+        )
     }
 
     fn render_worker_editor(&self, e: &WorkerEditor, cx: &mut Context<Self>) -> Div {
@@ -298,16 +249,6 @@ impl PotsApp {
                     e.backend == b,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.set_worker_backend(b, cx)))
-            }),
-        );
-        let exec_chips = div().flex().flex_wrap().gap(px(8.)).children(
-            [ExecKind::Container, ExecKind::Local].map(|x| {
-                chip(
-                    SharedString::from(format!("worker-exec-{x:?}")),
-                    x.label(),
-                    e.exec == x,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.set_worker_exec(x, cx)))
             }),
         );
         let parallel_chips = div()
@@ -339,26 +280,15 @@ impl PotsApp {
                 backend_chips.into_any_element(),
             ))
             .child(field(
-                "執行環境",
-                Some(match e.exec {
-                    ExecKind::Container => "每個任務一個 Docker／Podman 容器",
-                    ExecKind::Local => "直接在這台電腦上執行",
-                }),
-                exec_chips.into_any_element(),
+                "容器執行檔",
+                Some("每個任務一個容器；docker 或 podman，也可以是完整路徑"),
+                Input::new(&e.runtime).into_any_element(),
             ))
-            .when(e.exec == ExecKind::Local, |d| d.child(warning(LOCAL_WARNING)))
-            .when(e.exec == ExecKind::Container, |d| {
-                d.child(field(
-                    "容器執行檔",
-                    Some("docker 或 podman，也可以是完整路徑"),
-                    Input::new(&e.runtime).into_any_element(),
-                ))
-                .child(field(
-                    "Image",
-                    Some("用 repo 的 docker/worker/Dockerfile 建立：docker build -t pots-worker:latest docker/worker"),
-                    Input::new(&e.image).into_any_element(),
-                ))
-            })
+            .child(field(
+                "Image",
+                Some("用 repo 的 docker/worker/Dockerfile 建立：docker build -t pots-worker:latest docker/worker"),
+                Input::new(&e.image).into_any_element(),
+            ))
             .when(e.backend == WorkerBackendKind::ClaudeCode, |d| {
                 d.child(field(
                     "Claude Code 模型",

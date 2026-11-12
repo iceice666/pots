@@ -464,6 +464,9 @@ impl PotsApp {
                     .when(g.quick, |d| {
                         d.child(tag("快速修改", theme::violet(), theme::violet_soft()).flex_none())
                     })
+                    .when(g.env, |d| {
+                        d.child(tag("環境分析", theme::ok(), theme::ok_soft()).flex_none())
+                    })
                     .when(g.state.is_draft(), |d| {
                         d.child(tag("草稿", theme::text_muted(), theme::track()).flex_none())
                     })

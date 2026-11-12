@@ -43,6 +43,58 @@ fn mock_worker(backend: WorkerBackendKind, data_dir: &str) -> WorkerSettingsView
     }
 }
 
+/// auth-service 的環境：兩個版本，使用中的是第 2 版。
+fn auth_env() -> ProjectEnvView {
+    let v1 = EnvSpec {
+        base_image: String::new(),
+        install: "apt-get update && apt-get install -y pkg-config libssl-dev".into(),
+        prepare: "cargo fetch".into(),
+        verify: "cargo test --workspace --no-run".into(),
+        env: vec![("CARGO_TERM_COLOR".into(), "never".into())],
+        caches: vec!["/home/pots/.cargo/registry".into()],
+    };
+    let v2 = EnvSpec {
+        install: "apt-get update && apt-get install -y pkg-config libssl-dev postgresql-client\n\
+                  rustup component add clippy rustfmt"
+            .into(),
+        prepare: "cargo fetch\nsqlx database setup --source migrations".into(),
+        env: vec![
+            ("CARGO_TERM_COLOR".into(), "never".into()),
+            (
+                "DATABASE_URL".into(),
+                "postgres://pots@localhost/auth_test".into(),
+            ),
+        ],
+        caches: vec![
+            "/home/pots/.cargo/registry".into(),
+            "/workspace/target".into(),
+        ],
+        ..v1.clone()
+    };
+    ProjectEnvView {
+        current: Some(2),
+        revs: vec![
+            EnvRevView {
+                rev: 2,
+                spec: v2,
+                summary:
+                    "Rust workspace（edition 2024）。整合測試要 Postgres：裝了 postgresql-client，\
+                          prepare 跑 migration；target 放進快取，第二次 run 的建置快很多。"
+                        .into(),
+                created_at: at(9, 12),
+            },
+            EnvRevView {
+                rev: 1,
+                spec: v1,
+                summary: "Rust workspace，openssl 需要 libssl-dev；cargo fetch 預先抓 crate。"
+                    .into(),
+                created_at: at(8, 30),
+            },
+        ],
+        setup_goal: None,
+    }
+}
+
 /// auth-service 對話 agent 的記憶。
 fn auth_memory(ids: &mut Ids) -> MemoryView {
     let mut obs =
@@ -512,6 +564,7 @@ pub fn store() -> Store {
                 後端 callback、前端按鈕、整合測試都合併到 main。"
             .into(),
         quick: false,
+        env: false,
     };
 
     let mut tool_reply = agent(
@@ -639,8 +692,11 @@ pub fn store() -> Store {
             },
         ],
         repos: vec![],
-        workdir: None,
+        workdir: Some(WorkDir::Github {
+            repo: "github.com/acme/auth-service".into(),
+        }),
         merge_method: MergeMethod::Squash,
+        env: auth_env(),
     };
 
     // ---- 家用伺服器 · 其他 project ----------------------------------------
@@ -722,6 +778,7 @@ pub fn store() -> Store {
             }],
             brief: "結帳頁改版：新版地址表單與付款步驟。".into(),
             quick: false,
+            env: false,
         }],
         artifacts: vec![
             doc(
@@ -757,6 +814,7 @@ pub fn store() -> Store {
         repos: vec![],
         workdir: None,
         merge_method: MergeMethod::Squash,
+        env: ProjectEnvView::default(),
     };
 
     let infra = ProjectView {
@@ -805,6 +863,7 @@ pub fn store() -> Store {
         repos: vec![],
         workdir: None,
         merge_method: MergeMethod::Squash,
+        env: ProjectEnvView::default(),
     };
     let infra_id = infra.id;
 
@@ -833,6 +892,7 @@ pub fn store() -> Store {
         repos: vec![],
         workdir: None,
         merge_method: MergeMethod::Squash,
+        env: ProjectEnvView::default(),
     };
     let docs_id = docs.id;
     let auth_id = auth;
@@ -1005,6 +1065,7 @@ pub fn store() -> Store {
             team: vec![],
             brief: "合併重複的 alias，移除過期的 PATH 設定。".into(),
             quick: true,
+            env: false,
         }],
         artifacts: vec![doc(
             ArtifactId::from_u64(ids.next()),
@@ -1018,6 +1079,7 @@ pub fn store() -> Store {
         repos: vec![],
         workdir: None,
         merge_method: MergeMethod::Squash,
+        env: ProjectEnvView::default(),
     };
     let side_id = ProjectId::from_u64(ids.next());
     let side = ProjectView {
@@ -1047,6 +1109,7 @@ pub fn store() -> Store {
         repos: vec![],
         workdir: None,
         merge_method: MergeMethod::Squash,
+        env: ProjectEnvView::default(),
     };
 
     // ---- 家用伺服器 · 自動化 -------------------------------------------------

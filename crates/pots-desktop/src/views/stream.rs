@@ -795,6 +795,9 @@ impl PotsApp {
                     .when(goal.quick, |d| {
                         d.child(tag("快速修改", theme::violet(), theme::violet_soft()).flex_none())
                     })
+                    .when(goal.env, |d| {
+                        d.child(tag("環境分析", theme::ok(), theme::ok_soft()).flex_none())
+                    })
                     .when(!goal.state.is_active(), |d| {
                         d.child(
                             tag(goal.state.label(), theme::text_muted(), theme::track())
