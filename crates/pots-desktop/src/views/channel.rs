@@ -4,9 +4,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Textarea;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Div, FontWeight, ImageSource, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, div, img, px, relative,
+    AnyElement, Context, Div, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Window, div, img, px, relative,
 };
 
 use super::composer_attach::{PendingSnapshot, UploadState};
@@ -66,10 +66,7 @@ fn render_pending(pending: &PendingSnapshot, cx: &mut Context<PotsApp>) -> Div {
                     UploadState::Uploaded(_) => theme::border(),
                 })
                 .bg(theme::subtle_bg())
-                .child(
-                    img(ImageSource::Image(image.preview.clone()))
-                        .size_full()
-                );
+                .child(img(ImageSource::Image(image.preview.clone())).size_full());
             // 上傳中／失敗：蓋一層半透明底色與圖示，滑過看得到原因。
             match &image.state {
                 UploadState::Uploaded(_) => {}
@@ -103,37 +100,31 @@ fn render_pending(pending: &PendingSnapshot, cx: &mut Context<PotsApp>) -> Div {
                 .map(str::to_string)
                 .or_else(|| image.filename.clone())
                 .unwrap_or_else(|| format!("{} KiB", image.bytes.div_ceil(1024)));
-            div()
-                .relative()
-                .flex_none()
-                .child(thumb)
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "composer-attach-remove-{key}"
-                        )))
-                        .absolute()
-                        .top(px(-6.))
-                        .right(px(-6.))
-                        .size(px(18.))
-                        .rounded_full()
-                        .bg(theme::white())
-                        .border_1()
-                        .border_color(theme::border_strong())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::track()))
-                        .child(icon(IconName::X, 11., theme::text_muted()))
-                        .tip(tooltip)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.pending.update(cx, |p, cx| {
-                                p.remove(key);
-                                cx.notify();
-                            });
-                        })),
-                )
+            div().relative().flex_none().child(thumb).child(
+                div()
+                    .id(SharedString::from(format!("composer-attach-remove-{key}")))
+                    .absolute()
+                    .top(px(-6.))
+                    .right(px(-6.))
+                    .size(px(18.))
+                    .rounded_full()
+                    .bg(theme::white())
+                    .border_1()
+                    .border_color(theme::border_strong())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::track()))
+                    .child(icon(IconName::X, 11., theme::text_muted()))
+                    .tip(tooltip)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pending.update(cx, |p, cx| {
+                            p.remove(key);
+                            cx.notify();
+                        });
+                    })),
+            )
         })
         .collect::<Vec<_>>();
 

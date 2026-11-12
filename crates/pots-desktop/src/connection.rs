@@ -138,7 +138,7 @@ impl Uploads {
                         Ok(client) => client,
                         Err(e) => {
                             let _ = res_tx
-                            .unbounded_send((0, Err(format!("無法建立 HTTP client：{e}"))));
+                                .unbounded_send((0, Err(format!("無法建立 HTTP client：{e}"))));
                             return;
                         }
                     };
@@ -193,10 +193,7 @@ async fn upload_one(
             .await
             .map_err(|e| format!("看不懂服務的回應：{e}"));
     }
-    let message = response
-        .text()
-        .await
-        .unwrap_or_else(|_| status.to_string());
+    let message = response.text().await.unwrap_or_else(|_| status.to_string());
     Err(if message.trim().is_empty() {
         format!("上傳失敗（HTTP {}）", status.as_u16())
     } else {

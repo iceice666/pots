@@ -1967,10 +1967,16 @@ mod tests {
         assert_eq!(m.attachments, views);
 
         let (_, command) = store.outbox.last().unwrap();
-        let ClientCommand::Send { attachments, text, .. } = command else {
+        let ClientCommand::Send {
+            attachments, text, ..
+        } = command
+        else {
             panic!("應該送出 Send");
         };
-        assert_eq!(*attachments, [AttachmentId::from_u64(7), AttachmentId::from_u64(8)]);
+        assert_eq!(
+            *attachments,
+            [AttachmentId::from_u64(7), AttachmentId::from_u64(8)]
+        );
         assert_eq!(text, "這兩張圖");
     }
 
@@ -1992,7 +1998,13 @@ mod tests {
         let mut store = store();
         let home = InstanceId::from_u64(2);
         let auth = store.instances[1].projects[0].id;
-        store.send_to_project(home, auth, "加上 GitHub 登入".into(), SendMode::Queue, Vec::new());
+        store.send_to_project(
+            home,
+            auth,
+            "加上 GitHub 登入".into(),
+            SendMode::Queue,
+            Vec::new(),
+        );
         let p = store.project(home, auth).unwrap();
         let StreamItemKind::Human(m) = &p.items.last().unwrap().kind else {
             panic!("expected human message");

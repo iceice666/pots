@@ -16,7 +16,7 @@ use std::sync::Arc;
 use gpui_kit::{ClipboardEntry, ClipboardItem, Image as GpuiImage, ImageFormat as GpuiImageFormat};
 
 use crate::connection::UploadJob;
-use crate::model::{AttachmentView, MAX_ATTACHMENTS_PER_MSG, MAX_ATTACHMENT_BYTES};
+use crate::model::{AttachmentView, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MSG};
 
 /// 這裡用到的常數都來自協定，不在客戶端另立一套。
 pub const MAX_BYTES: u64 = MAX_ATTACHMENT_BYTES;
@@ -190,11 +190,7 @@ impl PendingAttachments {
         }
     }
 
-    fn push_image(
-        &mut self,
-        bytes: Vec<u8>,
-        filename: Option<String>,
-    ) -> Result<u64, String> {
+    fn push_image(&mut self, bytes: Vec<u8>, filename: Option<String>) -> Result<u64, String> {
         if self.items.len() >= MAX_ITEMS {
             return Err(format!("一則訊息最多 {MAX_ITEMS} 張圖片，請先移除一張"));
         }
@@ -283,9 +279,7 @@ fn prepare(bytes: Vec<u8>) -> Result<(String, Vec<u8>), String> {
             ("image/png".to_string(), png)
         }
         other => {
-            return Err(format!(
-                "只支援 png、jpeg、webp、gif；這個檔案是 {other:?}"
-            ));
+            return Err(format!("只支援 png、jpeg、webp、gif；這個檔案是 {other:?}"));
         }
     };
     Ok((mime, bytes))
@@ -451,7 +445,10 @@ mod tests {
 
         // 失敗的圖片擋住送出，原因照伺服器原文顯示。
         let key = pending.accept_bytes(tiny_png(), None).expect("收下");
-        pending.finish(key, Err("只支援 png、jpeg、webp、gif；收到的是「image/svg+xml」".into()));
+        pending.finish(
+            key,
+            Err("只支援 png、jpeg、webp、gif；收到的是「image/svg+xml」".into()),
+        );
         let err = pending.ready_views().expect_err("失敗要擋");
         assert!(err.contains("image/svg+xml"), "{err}");
     }

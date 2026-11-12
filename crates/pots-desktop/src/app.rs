@@ -3044,13 +3044,8 @@ impl PotsApp {
         if text.is_empty() && attachments.is_empty() {
             return;
         }
-        self.store.send_to_project(
-            self.instance,
-            project,
-            text,
-            self.send_mode,
-            attachments,
-        );
+        self.store
+            .send_to_project(self.instance, project, text, self.send_mode, attachments);
         self.send_mode = SendMode::Queue;
         self.pending.update(cx, |p, cx| {
             p.clear();
@@ -3073,13 +3068,12 @@ impl PotsApp {
             let Screen::Project(project) = self.screen else {
                 return;
             };
-            self.pending
-                .update(cx, |p, _| {
-                    p.take_jobs()
-                        .into_iter()
-                        .map(|job| (target.clone(), project, job))
-                        .collect()
-                })
+            self.pending.update(cx, |p, _| {
+                p.take_jobs()
+                    .into_iter()
+                    .map(|job| (target.clone(), project, job))
+                    .collect()
+            })
         };
         let Some(live) = &self.live else {
             return;
@@ -3111,13 +3105,17 @@ impl PotsApp {
                 .collect()
         });
         for (key, view) in views {
-            self.pending
-                .update(cx, |p, _| p.mark_local(key, view));
+            self.pending.update(cx, |p, _| p.mark_local(key, view));
         }
     }
 
     /// 上傳結果回來了：更新那張圖片的狀態，失敗的留在輸入框讓使用者移除。
-    fn on_uploaded(&mut self, key: u64, result: Result<AttachmentView, String>, cx: &mut Context<Self>) {
+    fn on_uploaded(
+        &mut self,
+        key: u64,
+        result: Result<AttachmentView, String>,
+        cx: &mut Context<Self>,
+    ) {
         self.pending.update(cx, |p, cx| {
             p.finish(key, result);
             cx.notify();

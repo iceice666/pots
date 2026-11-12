@@ -85,7 +85,10 @@ fn pasting_an_image_adds_it_to_the_composer_without_inserting_text(cx: &mut Test
         assert_eq!(pending.len(), 1, "貼上的圖應該進待送附件");
         let image = &pending.items()[0];
         assert_eq!(image.mime, "image/png");
-        assert!(image.is_uploaded(), "假資料模式沒有服務，圖片直接算上傳完成");
+        assert!(
+            image.is_uploaded(),
+            "假資料模式沒有服務，圖片直接算上傳完成"
+        );
         // 輸入框裡沒有被塞進任何文字（圖片不會變成路徑或 base64）。
         assert_eq!(app.composer.read(cx).value().as_ref(), "");
     });
@@ -123,7 +126,11 @@ fn pasting_a_second_image_appends_and_the_fifth_is_rejected(cx: &mut TestAppCont
         let pending = app.pending.read(cx);
         assert_eq!(pending.len(), 4, "第 5 張不該進來");
         assert!(
-            pending.error.as_deref().unwrap_or_default().contains("最多 4 張"),
+            pending
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("最多 4 張"),
             "要說清楚為什麼沒收：{:?}",
             pending.error
         );
@@ -158,7 +165,10 @@ fn a_non_image_file_on_the_clipboard_is_rejected_with_a_reason(cx: &mut TestAppC
             pending.error
         );
         // 全部被拒 ⇒ hook 回 false ⇒ 走原本的文字貼上（檔案路徑），這是 brief 指定的行為。
-        assert_eq!(app.composer.read(cx).value().as_ref(), path.to_string_lossy());
+        assert_eq!(
+            app.composer.read(cx).value().as_ref(),
+            path.to_string_lossy()
+        );
     });
 }
 
