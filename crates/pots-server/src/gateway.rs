@@ -221,6 +221,11 @@ fn internal(e: crate::Error) -> Response {
 ///
 /// 「DB 有列但檔案不在」回 500 而不是 404：404 會讓客戶端以為這個 id 不存在、
 /// 可能去重新上傳或把訊息裡的圖藏起來；檔案不見是伺服器端資料損毀，要留下痕跡。
+///
+/// 刻意**不**驗附件的 project 歸屬：本服務只綁 loopback、每個實例只有一個使用者，
+/// 能拿到 id 就代表已通過 token 守衛，沒有跨使用者的可利用面（`items` 等端點驗 project
+/// 是因為 project 由客戶端指定，而這裡 id 本身就是唯一的存取鍵）。若之後要多使用者
+/// 或遠端部署，這裡要補 project 歸屬與 project 狀態的檢查。
 async fn attachment_body(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
     let Ok(id) = id.parse::<AttachmentId>() else {
         return (StatusCode::NOT_FOUND, "找不到這個附件").into_response();
