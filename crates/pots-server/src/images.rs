@@ -124,6 +124,8 @@ mod tests {
     use super::*;
     use crate::store::{AttachmentRow, ProjectRow};
 
+    const PROJECT: ProjectId = ProjectId::from_u64(7);
+
     /// 一張最小的附件：寫檔案 + `attachments` 一列（`attachments.project_id` 指向它）。
     async fn attachment(store: &Store, dir: &std::path::Path, bytes: &[u8]) -> AttachmentId {
         let sha256 = hex::encode(Sha256::digest(bytes));
@@ -145,8 +147,6 @@ mod tests {
         tx.commit().await.unwrap();
         row.id
     }
-
-    const PROJECT: ProjectId = ProjectId::from_u64(7);
 
     async fn store(dir: &std::path::Path) -> Store {
         let store = Store::open_sqlite(&dir.join("pots.db")).await.unwrap();
