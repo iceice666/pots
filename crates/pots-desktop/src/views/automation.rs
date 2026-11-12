@@ -815,6 +815,8 @@ impl PotsApp {
         let action = white_box()
             .gap(px(6.))
             .child(box_title("動作"))
+            // action_detail 是伺服器依動作種類產生的固定說明（「開一個 Goal，Brief 用下面
+            // 的模板加上事件內容」……），是平台的字，維持純文字。
             .child(
                 div()
                     .text_size(px(13.))

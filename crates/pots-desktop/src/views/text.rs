@@ -20,6 +20,7 @@
 //! 串流中的訊息另外處理游標，見 [`agent_stream`]／[`streaming_markdown`]。
 
 use gpui_kit::component::text::TextView;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Div, ElementId, ParentElement as _, SharedString, Styled as _, div, px, relative};
 
 use crate::theme;
@@ -63,11 +64,13 @@ pub fn agent_text_muted(id: impl Into<ElementId>, text: impl Into<SharedString>)
 /// 或誤判成語法。前綴與內文分成兩行（Markdown 是區塊層渲染，接不成同一行）。
 ///
 /// 字級與顏色下在回傳的 `Div` 上：前綴吃得到，`body` 沒有自己指定顏色時也會沿用。
+/// 前綴是空的（表示整段都是 agent 原文）時不會多出一行空白。
 pub fn agent_text_prefixed(prefix: impl Into<SharedString>, body: TextView) -> Div {
+    let prefix = prefix.into();
     div()
         .flex()
         .flex_col()
-        .child(div().child(prefix.into()))
+        .when(!prefix.is_empty(), |d| d.child(div().child(prefix)))
         .child(body)
 }
 
