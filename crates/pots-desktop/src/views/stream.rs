@@ -9,7 +9,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 
-use super::text::{agent_stream, agent_text};
+use super::text::{agent_stream, agent_text, agent_text_muted, agent_text_prefixed};
 use super::widgets::*;
 use crate::app::{AutomationSection, GoalTab, Panel, PotsApp};
 use crate::model::*;
@@ -105,20 +105,17 @@ fn goal_progress(goal: &GoalView) -> Div {
         .child(seg(goal.count(TaskBucket::Waiting), theme::warn_strong()))
 }
 
-/// Goal 卡片最後一行：Planner 備註（結束的 Goal 是結果），有預算時加上已用比例。
-pub fn goal_note(goal: &GoalView) -> String {
-    let mut note = match &goal.state {
-        GoalState::Draft | GoalState::Active => goal.planner_note.clone(),
-        GoalState::Done { summary } => format!("已完成：{summary}"),
-        GoalState::Cancelled { reason } => format!("已取消：{reason}"),
-    };
-    if goal.budget_used_pct > 0 {
-        if !note.is_empty() {
-            note.push_str(" · ");
-        }
-        note.push_str(&format!("預算已用 {}%", goal.budget_used_pct));
+/// Goal 卡片最後一行：Planner 備註（結束的 Goal 是結果）的「前綴」與「原文」。
+///
+/// 「已完成：」「已取消：」是平台的字，後面的 summary／reason 才是模型或使用者寫的
+/// Markdown；前綴留純文字，只有原文交給 Markdown 渲染（見 [`agent_text_prefixed`]）。
+/// 預算用量那一行由呼叫端另外接（純數字，沒有 Markdown）。
+pub fn goal_note_parts(goal: &GoalView) -> (&'static str, &str) {
+    match &goal.state {
+        GoalState::Draft | GoalState::Active => ("", goal.planner_note.as_str()),
+        GoalState::Done { summary } => ("已完成：", summary.as_str()),
+        GoalState::Cancelled { reason } => ("已取消：", reason.as_str()),
     }
-    note
 }
 
 pub fn goal_counts(goal: &GoalView) -> Div {
@@ -276,6 +273,7 @@ impl PotsApp {
             });
 
         // 旁白：agent 在工具呼叫之間說的話，只在串流中由伺服器帶來，用淡色顯示它正在做什麼。
+        // 每一行都是模型自己寫的一句話（可能含行內 Markdown），逐行渲染；顏色沿用外層的淡色。
         let narration = (!msg.narration.is_empty()).then(|| {
             div()
                 .flex()
@@ -287,7 +285,13 @@ impl PotsApp {
                 .text_size(px(density.body() - 1.))
                 .line_height(relative(1.5))
                 .text_color(theme::text_muted())
-                .children(msg.narration.iter().map(|line| div().child(line.clone())))
+                .children(msg.narration.iter().enumerate().map(|(i, line)| {
+                    agent_text(
+                        SharedString::from(format!("msg-narration-{}-{i}", id.0)),
+                        line.clone(),
+                    )
+                    .text_size(px(density.body() - 1.))
+                }))
         });
 
         let body = (!msg.text.is_empty()).then(|| {
@@ -346,9 +350,13 @@ impl PotsApp {
     }
 
     pub fn render_card(&self, item: ItemId, card: &Card, cx: &mut Context<Self>) -> AnyElement {
+        // 同一個 Goal 可能同時出現在對話卡片與右欄列表，元素 id 要加上來源才唯一。
+        let scope = SharedString::from(format!("msg-{}", item.0));
         match card {
             Card::GoalCreated { goal } => match self.store.goal(self.instance, *goal) {
-                Some(g) => self.render_goal_card(g, cx).into_any_element(),
+                Some(g) => self
+                    .render_goal_card(&scope, g, cx)
+                    .into_any_element(),
                 None => muted("Goal 已不存在").into_any_element(),
             },
             // listener 依外部事件開的 Goal：上面註明是哪個事件觸發的。
@@ -358,7 +366,7 @@ impl PotsApp {
                 .gap(px(6.))
                 .child(muted(format!("listener 觸發：{event}")))
                 .child(match self.store.goal(self.instance, *goal) {
-                    Some(g) => self.render_goal_card(g, cx).into_any_element(),
+                    Some(g) => self.render_goal_card(&scope, g, cx).into_any_element(),
                     None => muted("Goal 已不存在").into_any_element(),
                 })
                 .into_any_element(),
@@ -443,7 +451,10 @@ impl PotsApp {
                             .flex_col()
                             .gap(px(2.))
                             .child(muted(format!("Planner · {title}")))
-                            .child(div().child(text.clone())),
+                            .child(agent_text(
+                                SharedString::from(format!("milestone-text-{}", item.0)),
+                                text.clone(),
+                            )),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.store.goal(this.instance, gid).is_some() {
@@ -491,7 +502,10 @@ impl PotsApp {
                         .child(icon(IconName::Clock, 15., theme::text_muted()))
                         .child("你不在期間"),
                 )
-                .child(div().line_height(relative(1.5)).child(summary.clone()))
+                .child(agent_text(
+                    SharedString::from(format!("catchup-summary-{}", item.0)),
+                    summary.clone(),
+                ))
                 .into_any_element(),
             Card::Digest {
                 title,
@@ -512,7 +526,7 @@ impl PotsApp {
                         .flex()
                         .flex_col()
                         .gap(px(6.))
-                        .children(rows.iter().map(|(k, v)| {
+                        .children(rows.iter().enumerate().map(|(i, (k, v))| {
                             div()
                                 .flex()
                                 .gap(px(12.))
@@ -523,10 +537,17 @@ impl PotsApp {
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(k.clone()),
                                 )
-                                .child(div().text_color(theme::text_muted()).child(v.clone()))
+                                // 右邊是 agent 寫的一句話，可能帶行內 Markdown。
+                                .child(agent_text_muted(
+                                    SharedString::from(format!("digest-row-{}-{i}", item.0)),
+                                    v.clone(),
+                                ))
                         })),
                 )
-                .child(muted(footer.clone()))
+                .child(agent_text_muted(
+                    SharedString::from(format!("digest-footer-{}", item.0)),
+                    footer.clone(),
+                ))
                 .into_any_element(),
             Card::Notice {
                 title,
@@ -545,7 +566,10 @@ impl PotsApp {
                         .child(icon(IconName::CircleCheck, 16., theme::ok()))
                         .child(title.clone()),
                 )
-                .child(muted(body.clone()))
+                .child(agent_text_muted(
+                    SharedString::from(format!("notice-body-{}", item.0)),
+                    body.clone(),
+                ))
                 .child(
                     div()
                         .flex()
@@ -586,13 +610,20 @@ impl PotsApp {
         }
     }
 
-    pub fn render_goal_card(&self, goal: &GoalView, cx: &mut Context<Self>) -> impl IntoElement {
-        self.goal_card(goal, true, cx)
+    pub fn render_goal_card(
+        &self,
+        scope: &str,
+        goal: &GoalView,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.goal_card(scope, goal, true, cx)
     }
 
     /// Goal 卡片。`hint` 是對話裡的「在右側開啟」提示；右欄的 Goals 列表本身就在右側，不顯示。
+    /// `scope` 讓同一個 Goal 出現在不同容器時（對話卡片、右欄列表）元素 id 不撞。
     pub(super) fn goal_card(
         &self,
+        scope: &str,
         goal: &GoalView,
         hint: bool,
         cx: &mut Context<Self>,
@@ -650,9 +681,30 @@ impl PotsApp {
             .when(!goal.state.is_draft(), |d| {
                 d.child(goal_progress(goal)).child(goal_counts(goal))
             })
-            .child(muted(goal_note(goal)))
+            .child({
+                // 「已完成：」「已取消：」是平台的前綴，只有後面的 summary／reason 是
+                // agent 或使用者寫的 Markdown；有預算時多一行淡色的用量。
+                let (prefix, body) = goal_note_parts(goal);
+                div()
+                    .flex()
+                    .flex_col()
+                    .text_size(px(13.))
+                    .text_color(theme::text_muted())
+                    .child(agent_text_prefixed(
+                            prefix,
+                            agent_text(
+                                SharedString::from(format!("goal-card-note-{scope}-{}", gid.0)),
+                                body.to_string(),
+                            )
+                        .text_size(px(13.))
+                        .text_color(theme::text_muted()),
+                    ))
+                    .when(goal.budget_used_pct > 0, |d| {
+                        d.child(format!("預算已用 {}%", goal.budget_used_pct))
+                    })
+            })
             .when(goal.state.is_draft(), |d| {
-                d.child(self.render_draft_actions("card", gid, cx))
+                d.child(self.render_draft_actions("card", &format!("card-{scope}"), gid, cx))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 let tab = if this
@@ -669,9 +721,13 @@ impl PotsApp {
     }
 
     /// 草稿 Goal 的按鈕：開始（交給 Planner）、看 Brief（只在卡片上）、捨棄。
+    ///
+    /// `scope` 決定要不要顯示「看 Brief」（只有卡片需要，右欄 Goal 面板本身就有那個分頁）；
+    /// `key` 是元素 id 的前綴，同一個 Goal 同時出現在對話卡片與右欄列表時靠它區分。
     pub fn render_draft_actions(
         &self,
         scope: &str,
+        key: &str,
         gid: GoalId,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -681,7 +737,7 @@ impl PotsApp {
             .gap(px(8.))
             .child(
                 primary_button(
-                    SharedString::from(format!("{scope}-goal-start-{}", gid.0)),
+                    SharedString::from(format!("{key}-goal-start-{}", gid.0)),
                     "開始",
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -693,7 +749,7 @@ impl PotsApp {
             .when(scope == "card", |d| {
                 d.child(
                     secondary_button(
-                        SharedString::from(format!("{scope}-goal-brief-{}", gid.0)),
+                        SharedString::from(format!("{key}-goal-brief-{}", gid.0)),
                         "看 Brief",
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -704,7 +760,7 @@ impl PotsApp {
             })
             .child(
                 secondary_button(
-                    SharedString::from(format!("{scope}-goal-discard-{}", gid.0)),
+                    SharedString::from(format!("{key}-goal-discard-{}", gid.0)),
                     "捨棄",
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -809,26 +865,52 @@ impl PotsApp {
                     .gap(px(10.))
                     .px(px(16.))
                     .py(px(14.))
-                    .child(
-                        div()
+                    .child(match question {
+                        // ask_user 的問題是 agent 寫的 Markdown：字級與粗體沿用標題樣式。
+                        Some((q, _, _)) => agent_text(
+                            SharedString::from(format!("approval-question-{}", id.0)),
+                            q.to_string(),
+                        )
+                        .text_size(px(16.))
+                        .font_weight(FontWeight::BOLD)
+                        .line_height(relative(1.4))
+                        .into_any_element(),
+                        None => div()
                             .text_size(px(16.))
                             .font_weight(FontWeight::BOLD)
                             .line_height(relative(1.4))
-                            .child(
-                                question
-                                    .map(|(q, _, _)| q.to_string())
-                                    .unwrap_or_else(|| a.title.clone()),
-                            ),
-                    )
+                            .child(a.title.clone())
+                            .into_any_element(),
+                    })
+                    // ask_user 的問題與核准的理由都是 agent 寫的 Markdown。
                     .when(!a.detail.is_empty() && a.approval.is_some(), |d| {
-                        d.child(div().line_height(relative(1.5)).child(a.detail.clone()))
+                        d.child(agent_text(
+                            SharedString::from(format!("approval-detail-{}", id.0)),
+                            a.detail.clone(),
+                        ))
                     })
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .children(a.facts.iter().map(|f| muted(f.clone()))),
+                            .children(a.facts.iter().enumerate().map(|(i, f)| {
+                                // facts 是平台組的字（PR、sha、動作、「你的理由：」）：
+                                // 後面接的是使用者的原話時只有那一段走 Markdown。
+                                match f.split_once("你的理由：") {
+                                    Some((prefix, note)) => agent_text_prefixed(
+                                        format!("{prefix}你的理由："),
+                                        agent_text_muted(
+                                            SharedString::from(format!(
+                                                "approval-fact-{}-{i}",
+                                                id.0
+                                            )),
+                                            note.to_string(),
+                                        ),
+                                    ),
+                                    None => muted(f.clone()),
+                                }
+                            })),
                     )
                     .when_some(super::preferences::approval_diff(a), |d, diff| {
                         d.child(super::preferences::diff_block(

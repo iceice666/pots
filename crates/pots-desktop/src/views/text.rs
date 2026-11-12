@@ -20,10 +20,7 @@
 //! 串流中的訊息另外處理游標，見 [`agent_stream`]／[`streaming_markdown`]。
 
 use gpui_kit::component::text::TextView;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{
-    Div, ElementId, ParentElement as _, SharedString, Styled as _, div, px, relative,
-};
+use gpui_kit::{Div, ElementId, ParentElement as _, SharedString, Styled as _, div, px, relative};
 
 use crate::theme;
 

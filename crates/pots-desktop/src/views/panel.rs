@@ -438,7 +438,7 @@ impl PotsApp {
                                 .text_color(theme::text_muted())
                                 .child("這是草稿：看一下 Brief，可以直接改，或在對話裡和 agent 再討論。按「開始」才交給 Planner。"),
                         )
-                        .child(self.render_draft_actions("panel", gid, cx)),
+                        .child(self.render_draft_actions("panel", "panel", gid, cx)),
                 )
             })
             .child(

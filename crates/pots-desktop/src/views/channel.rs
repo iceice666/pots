@@ -367,7 +367,7 @@ impl PotsApp {
             .children(
                 p.goals
                     .iter()
-                    .map(|g| self.goal_card(g, false, cx).into_any_element()),
+                    .map(|g| self.goal_card("list", g, false, cx).into_any_element()),
             )
             .into_any_element()
     }
