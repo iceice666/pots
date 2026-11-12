@@ -216,9 +216,12 @@ impl InstanceView {
             .filter(move |l| project.is_none_or(|p| l.project.is_none() || l.project == Some(p)))
     }
 
-    /// 頻道「自動化」分頁上的數字。
+    /// 頻道「自動化」分頁上的數字；已結束的排程不算（見 [`ScheduleView::active`]）。
     pub fn automation_count(&self, project: ProjectId) -> usize {
-        self.schedules_for(Some(project)).count() + self.listeners_for(Some(project)).count()
+        self.schedules_for(Some(project))
+            .filter(|s| s.active())
+            .count()
+            + self.listeners_for(Some(project)).count()
     }
 
     /// 這個 project 有沒有被單獨暫停。
@@ -961,6 +964,16 @@ pub struct ScheduleView {
     /// 單次排程已觸發、或週期排程已過期。
     #[serde(default)]
     pub finished: bool,
+}
+
+impl ScheduleView {
+    /// 還會再觸發：啟用中且未結束。
+    ///
+    /// 單次排程觸發完後 `finished = true` 但 `enabled` 仍是 true（server 不會自動停用），
+    /// 所以計數只看 `enabled` 會把已結束的也算進去、數字只增不減。
+    pub fn active(&self) -> bool {
+        self.enabled && !self.finished
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2990,6 +3003,30 @@ mod tests {
         assert!(!s.is_quiet_at(14 * 60));
         s.quiet_end = "13:00".into();
         assert!(!s.is_quiet_at(13 * 60), "開始等於結束視為沒有靜音");
+    }
+
+    #[test]
+    fn finished_schedule_is_not_active() {
+        let schedule = |enabled, finished| ScheduleView {
+            id: ScheduleId::from_u64(1),
+            project: None,
+            prompt: String::new(),
+            note: String::new(),
+            creator: ScheduleCreator::Planner,
+            cadence: "單次".into(),
+            next: "—".into(),
+            next_after_pause: None,
+            enabled,
+            history: Vec::new(),
+            next_at: None,
+            expires_at: None,
+            goal: None,
+            finished,
+        };
+        assert!(schedule(true, false).active(), "還會再觸發");
+        // 已結束的單次排程 server 不會自動停用，`enabled` 仍是 true。
+        assert!(!schedule(true, true).active());
+        assert!(!schedule(false, false).active());
     }
 
     #[test]
