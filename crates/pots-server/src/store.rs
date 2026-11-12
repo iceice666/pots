@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use pots_llm::Item;
 use pots_proto::{
-    Author, InstanceId, ItemId, ObservationId, Priority, ProjectId, ProviderHeader, ProviderId,
-    ProviderKind, ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp, WorkDir,
+    AttachmentId, Author, InstanceId, ItemId, ObservationId, Priority, ProjectId, ProviderHeader,
+    ProviderId, ProviderKind, ServerEvent, StreamItemKind, StreamItemView, StreamScope, Timestamp,
+    WorkDir,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -196,6 +197,21 @@ impl ObservationState {
             _ => Err(Error::Corrupt(format!("觀察的狀態不對：{s}"))),
         }
     }
+}
+
+/// `attachments` 的一列：圖片的**中介資料**，本體在 `<data_dir>/attachments/<sha256>`。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachmentRow {
+    pub id: AttachmentId,
+    pub project: ProjectId,
+    /// 本體的 sha256（hex），也是落地檔名。
+    pub sha256: String,
+    pub mime: String,
+    pub bytes: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub filename: Option<String>,
+    pub created_at: Timestamp,
 }
 
 /// `om_observations` 的一列。
@@ -981,6 +997,66 @@ impl Store {
     }
 
     // -----------------------------------------------------------------------
+    // attachments
+
+    /// 同一個 project 裡這個 sha256 的附件（去重用）。
+    pub async fn attachment_by_sha(
+        conn: &mut SqliteConnection,
+        project: ProjectId,
+        sha256: &str,
+    ) -> Result<Option<AttachmentRow>, Error> {
+        let row = sqlx::query(
+            "SELECT id, project_id, sha256, mime, bytes, width, height, filename, created_at \
+             FROM attachments WHERE project_id = ? AND sha256 = ?",
+        )
+        .bind(project.to_string())
+        .bind(sha256)
+        .fetch_optional(conn)
+        .await?;
+        row.as_ref().map(attachment_from_row).transpose()
+    }
+
+    pub async fn attachment(
+        conn: &mut SqliteConnection,
+        id: AttachmentId,
+    ) -> Result<Option<AttachmentRow>, Error> {
+        let row = sqlx::query(
+            "SELECT id, project_id, sha256, mime, bytes, width, height, filename, created_at \
+             FROM attachments WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(conn)
+        .await?;
+        row.as_ref().map(attachment_from_row).transpose()
+    }
+
+    /// 寫入一列。同一張圖被同時上傳兩次時另一條 transaction 會先寫進同一列，
+    /// `ON CONFLICT DO NOTHING` 讓呼叫端之後重讀就能拿到同一個 id。
+    pub async fn insert_attachment(
+        conn: &mut SqliteConnection,
+        row: &AttachmentRow,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "INSERT INTO attachments \
+             (id, project_id, sha256, mime, bytes, width, height, filename, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (project_id, sha256) DO NOTHING",
+        )
+        .bind(row.id.to_string())
+        .bind(row.project.to_string())
+        .bind(&row.sha256)
+        .bind(&row.mime)
+        .bind(i64::try_from(row.bytes).map_err(|_| Error::Corrupt("附件太大".into()))?)
+        .bind(row.width.map(i64::from))
+        .bind(row.height.map(i64::from))
+        .bind(row.filename.as_deref())
+        .bind(row.created_at.0)
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // om_raw
 
     /// 追加一筆原始歷史，`seq` 接在這個 project 的最後一筆之後，順便記下估計的 token 數。
@@ -1454,6 +1530,25 @@ fn workdir_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Option<WorkDir>, Er
         (Some("github"), Some(repo)) => Some(WorkDir::Github { repo }),
         (Some("local"), Some(path)) => Some(WorkDir::Local { path }),
         _ => None,
+    })
+}
+
+fn attachment_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<AttachmentRow, Error> {
+    Ok(AttachmentRow {
+        id: parse_id(row.try_get("id")?)?,
+        project: parse_id(row.try_get("project_id")?)?,
+        sha256: row.try_get("sha256")?,
+        mime: row.try_get("mime")?,
+        bytes: u64::try_from(row.try_get::<i64, _>("bytes")?)
+            .map_err(|_| Error::Corrupt("附件的位元組數不對".into()))?,
+        width: row
+            .try_get::<Option<i64>, _>("width")?
+            .and_then(|w| u32::try_from(w).ok()),
+        height: row
+            .try_get::<Option<i64>, _>("height")?
+            .and_then(|h| u32::try_from(h).ok()),
+        filename: row.try_get("filename")?,
+        created_at: Timestamp(row.try_get("created_at")?),
     })
 }
 

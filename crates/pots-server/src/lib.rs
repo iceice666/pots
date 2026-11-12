@@ -11,6 +11,7 @@
 
 mod approvals;
 mod artifacts;
+mod attachments;
 mod automation;
 mod budget;
 mod commands;
@@ -586,6 +587,7 @@ mod tests {
             narration: Vec::new(),
             cards: Vec::new(),
             steer: false,
+            attachments: Vec::new(),
         }
     }
 

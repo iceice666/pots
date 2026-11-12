@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use pots_proto::{ItemId, ProjectId};
+use pots_proto::{AttachmentView, ItemId, ProjectId};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
@@ -84,6 +84,7 @@ pub(crate) fn router(app: Arc<App>, guard_state: Arc<Guard>) -> Router {
         .route("/healthz", get(healthz))
         .route("/ws", get(ws))
         .route("/projects/{id}/items", get(items))
+        .route("/attachments", post(upload_attachment))
         .with_state(app.clone())
         .layer(middleware::from_fn_with_state(guard_state, guard))
         .merge(
@@ -155,6 +156,45 @@ async fn items(
         Ok(Some(items)) => axum::Json(items).into_response(),
         Ok(None) => (StatusCode::BAD_REQUEST, "before 不在這個 project 裡").into_response(),
         Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    project: String,
+    filename: Option<String>,
+}
+
+/// `POST /attachments?project=<id>&filename=<name>`：raw body 是圖片本體，
+/// `Content-Type` 是 MIME。回 [`AttachmentView`]（只中介資料，不含本體）。
+///
+/// 用 raw body 而不是 multipart：少一個依賴，客戶端也只是把讀到的 bytes 直接送出。
+/// 上限與格式在 [`crate::attachments::upload`] 驗；同一個 project 內同一張圖回同一個 ID。
+async fn upload_attachment(
+    State(app): State<Arc<App>>,
+    Query(q): Query<UploadQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Ok(project) = q.project.parse::<ProjectId>() else {
+        return (StatusCode::BAD_REQUEST, "project 不是合法的 ID").into_response();
+    };
+    match app.store.project(project).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "找不到這個 project").into_response(),
+        Err(e) => return internal(e),
+    }
+    let mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default();
+    let dir = app.watcher.data_dir().to_path_buf();
+    match crate::attachments::upload(&app.store, &dir, project, mime, q.filename, &body).await {
+        Ok(view) => axum::Json::<AttachmentView>(view).into_response(),
+        Err(e) => {
+            let (status, message) = e.response();
+            (status, message).into_response()
+        }
     }
 }
 
