@@ -161,12 +161,15 @@ impl ModelProvider for OpenAiCompatProvider {
             };
             match response {
                 Ok(response) => {
-                    return Ok(Box::pin(event_stream(
-                        response,
-                        ChatCompletionsMapper::new(),
-                        cancel,
-                        &self.api_key,
-                    )));
+                    return Ok(crate::image::explain_stream(
+                        Box::pin(event_stream(
+                            response,
+                            ChatCompletionsMapper::new(),
+                            cancel,
+                            &self.api_key,
+                        )),
+                        &request,
+                    ));
                 }
                 Err(error) if !downgraded && !requested_off && tools_need_no_reasoning(&error) => {
                     tracing::warn!(

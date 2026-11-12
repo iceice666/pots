@@ -250,10 +250,10 @@ impl ModelProvider for ResponsesProvider {
             () = cancel.cancelled() => return Err(LlmError::Cancelled),
             response = send => response?,
         };
-        Ok(Box::pin(event_stream(
-            response.bytes_stream().boxed(),
-            cancel,
-        )))
+        Ok(crate::image::explain_stream(
+            Box::pin(event_stream(response.bytes_stream().boxed(), cancel)),
+            &request,
+        ))
     }
 }
 

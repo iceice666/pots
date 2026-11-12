@@ -64,9 +64,25 @@ pub async fn payloads_for(
 /// 只在這個請求真的帶圖片時才轉譯；比對的是 provider 的錯誤字串（各家寫法不同，見
 /// [`looks_like_unsupported_image`]）。其他錯誤原樣回傳。
 pub fn explain_unsupported(error: LlmError, request: &ModelRequest) -> LlmError {
-    if !has_images(&request.input) {
-        return error;
+    if has_images(&request.input) {
+        explain(error)
+    } else {
+        error
     }
+}
+
+/// 串流中的錯誤也要轉譯：有些 provider 把「模型不支援圖片」放在串流的 error 事件裡，
+/// 而不是 HTTP 狀態碼。這個請求沒有圖片時原樣回傳，一個位元組都不動。
+pub fn explain_stream(stream: crate::EventStream, request: &ModelRequest) -> crate::EventStream {
+    if !has_images(&request.input) {
+        return stream;
+    }
+    use futures::StreamExt as _;
+    Box::pin(stream.map(|event| event.map_err(explain)))
+}
+
+/// 把「看不懂圖片」的 provider 錯誤換成 [`LlmError::UnsupportedImage`]。
+fn explain(error: LlmError) -> LlmError {
     let text = match &error {
         LlmError::Unsupported(message) | LlmError::Other(message) => message,
         _ => return error,
@@ -198,6 +214,95 @@ pub fn base64_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_image_errors_become_the_friendly_message() {
+        let with_image = ModelRequest {
+            input: vec![Item::Image {
+                attachment_id: "a".into(),
+                mime: "image/png".into(),
+            }],
+            ..ModelRequest::default()
+        };
+        for message in [
+            "Invalid content type. image_url is only supported by certain models.",
+            "The model does not support image input.",
+            "this model does not support image input",
+            "unknown variant `image_url`",
+        ] {
+            assert_eq!(
+                explain_unsupported(LlmError::Unsupported(message.into()), &with_image),
+                LlmError::UnsupportedImage,
+                "{message}"
+            );
+            assert_eq!(
+                explain_unsupported(LlmError::Other(message.into()), &with_image),
+                LlmError::UnsupportedImage,
+                "{message}"
+            );
+        }
+        // 沒有圖片的請求不轉譯：同樣的錯誤照舊回報。
+        let text_only = ModelRequest {
+            input: vec![Item::User { text: "hi".into() }],
+            ..ModelRequest::default()
+        };
+        assert_eq!(
+            explain_unsupported(
+                LlmError::Unsupported("image input is not supported".into()),
+                &text_only
+            ),
+            LlmError::Unsupported("image input is not supported".into())
+        );
+        // 跟圖片無關的錯誤原樣保留。
+        assert_eq!(
+            explain_unsupported(LlmError::Unsupported("bad tools".into()), &with_image),
+            LlmError::Unsupported("bad tools".into())
+        );
+        assert_eq!(
+            explain_unsupported(LlmError::Unavailable("slow".into()), &with_image),
+            LlmError::Unavailable("slow".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_errors_are_translated_only_for_image_requests() {
+        use futures::StreamExt as _;
+        let request = ModelRequest {
+            input: vec![Item::Image {
+                attachment_id: "a".into(),
+                mime: "image/png".into(),
+            }],
+            ..ModelRequest::default()
+        };
+        let stream: crate::EventStream = Box::pin(futures::stream::iter(vec![
+            Ok(crate::StreamEvent::TextDelta("x".into())),
+            Err(LlmError::Unsupported(
+                "the model does not support image input".into(),
+            )),
+        ]));
+        let events: Vec<_> = explain_stream(stream, &request).collect().await;
+        assert_eq!(
+            events,
+            vec![
+                Ok(crate::StreamEvent::TextDelta("x".into())),
+                Err(LlmError::UnsupportedImage),
+            ]
+        );
+        let text_only = ModelRequest {
+            input: vec![Item::User { text: "hi".into() }],
+            ..ModelRequest::default()
+        };
+        let stream: crate::EventStream = Box::pin(futures::stream::iter(vec![Err(
+            LlmError::Unsupported("the model does not support image input".into()),
+        )]));
+        let events: Vec<_> = explain_stream(stream, &text_only).collect().await;
+        assert_eq!(
+            events,
+            vec![Err(LlmError::Unsupported(
+                "the model does not support image input".into()
+            ))]
+        );
+    }
 
     #[test]
     fn mime_is_normalized() {

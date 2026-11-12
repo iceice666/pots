@@ -346,12 +346,15 @@ impl ModelProvider for AnthropicProvider {
                 response
             }
         };
-        Ok(Box::pin(event_stream(
-            response,
-            MessagesEventMapper::new(),
-            cancel,
-            &self.api_key,
-        )))
+        Ok(crate::image::explain_stream(
+            Box::pin(event_stream(
+                response,
+                MessagesEventMapper::new(),
+                cancel,
+                &self.api_key,
+            )),
+            &request,
+        ))
     }
 }
 
