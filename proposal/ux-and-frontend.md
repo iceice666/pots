@@ -28,7 +28,7 @@ agent 忙碌時插話。 輸入框旁有兩個動作：預設「排隊」，等�
 
 ## 桌面客戶端現況
 
-桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）；M4 接上 Goal 面板的任務狀態（執行中、需要決定、完成、失敗）、指派、分支與 PR 連結、worker 的最後一句進度、「重試」、Team 分頁、快速修改的標籤，以及設定的「Worker」類別（後端、執行環境、image、Claude Code 的登入指令）；M5 接上 Inbox 與對話裡的核准卡片（核准、拒絕附理由、看 PR 與提案的 diff）、「需要你處理」的任務、系統通知、設定的「通知」（靜音時段）與「USER.md」類別，以及頻道「自動化」分頁的 merge 方式。M6a 接上總管（live 的全域對話、專案概況與記憶）、每一則 agent 訊息的「為什麼這樣回答」面板（觸發來源、記憶版本、模型、用量與工具順序）、真實的 Goal 預算百分比，以及服務產生的「你不在期間」摘要卡片。M9 接上 project onboarding 與工作資料夾（進行中）：新增專案改成精靈（名稱加上 GitHub repo 或本機 git repo 的絕對路徑，先驗證再建立，也可以「稍後再設定」），沒設定時頻道顯示提示，按「設定」在同一個對話框補上，自動化分頁也能改；設定後對話 agent 也知道工作資料夾，使用者也可以直接請它用 `set_workdir` 設定。`--mock` 模式用假資料展示其他畫面：實例直列、任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
+桌面畫面以 [`crates/pots-desktop/`](../crates/pots-desktop/) 為準。它預設連到本機的內嵌服務：M0 接上的是 project 列表與建立、頻道對話（排隊／改方向、串流回覆、工具摘要、停止）與 Inbox 裡的 ChatGPT 登入；M1 接上頻道的「記憶」分頁（查看、釘選、修正、刪除觀察）與設定的「記憶」類別（整理記憶的模型）；M2 接上 Goal 卡片與里程碑、右欄 Goal 面板（任務、Brief、Ledger、取消任務）、「Artifacts」分頁與編輯器（草稿按「儲存」才送出、版本紀錄與還原）；M4 接上 Goal 面板的任務狀態（執行中、需要決定、完成、失敗）、指派、分支與 PR 連結、worker 的最後一句進度、「重試」、Team 分頁、快速修改的標籤，以及設定的「Worker」類別（後端、執行環境、image、Claude Code 的登入指令）；M5 接上 Inbox 與對話裡的核准卡片（核准、拒絕附理由、看 PR 與提案的 diff）、「需要你處理」的任務、系統通知、設定的「通知」（靜音時段）與「USER.md」類別，以及頻道「自動化」分頁的 merge 方式。M6a 接上總管（live 的全域對話、專案概況與記憶）、每一則 agent 訊息的「為什麼這樣回答」面板（觸發來源、記憶版本、模型、用量與工具順序）、真實的 Goal 預算百分比，以及服務產生的「你不在期間」摘要卡片。協定 v19 接上任務 thread 的「看 diff」（`TaskDiff`：服務從自己的鏡像讀任務分支相對基準分支的改動，不碰 worker 的工作目錄；Inbox 與核准卡片的「看 diff」也開它，本機資料夾的套用因此在核准前看得到改動）與「看 trace」（`TaskTrace`：這個任務每一次 run 的模型說的話與工具呼叫，點一列展開參數與結果），以及 Goal 面板與任務 thread 的留言（`NoteGoal`：Team 分頁記一則你的問題並叫醒 Planner，像改方向；快速修改與環境分析沒有 Planner，不顯示留言框）。任務的耗時由客戶端依開始時間計算，旁邊是任務用掉的 token；內建 worker 說的話與用的工具即時寫成任務的進度（Claude Code 原本就是）。M9 接上 project onboarding 與工作資料夾（進行中）：新增專案改成精靈（名稱加上 GitHub repo 或本機 git repo 的絕對路徑，先驗證再建立，也可以「稍後再設定」），沒設定時頻道顯示提示，按「設定」在同一個對話框補上，自動化分頁也能改；設定後對話 agent 也知道工作資料夾，使用者也可以直接請它用 `set_workdir` 設定。`--mock` 模式用假資料展示其他畫面：實例直列、任務 thread 的 worker 對話、完整的 Inbox、總管與自動化；各畫面可以做什麼、哪些按鈕還沒實作，見該目錄的 README。用 `cargo test -p pots-desktop --test screenshots` 可以輸出主要畫面的截圖。
 
 下方[介面配置](#介面配置)的桌面欄位與客戶端一致；還沒實作的區塊（電腦、project 移交）是預定的位置。手機欄位對應 [`android/`](../android/) 的客戶端，目前也是假資料。
 
@@ -51,7 +51,7 @@ Artifact 編輯器用 [gpui-kit-markdown-editor](https://docs.rs/crate/gpui-kit-
 
 | 區塊 | 桌面 | 手機 | 內容 |
 | --- | --- | --- | --- |
-| 狀態面板 | 右欄 | 對話頁的上拉抽屜 | Goal 面板（任務依狀態分組、Brief、Ledger、Team 分頁，留言給 Planner）；點任務進任務 thread（狀態、分支、PR 與 CI、進度、直接對 worker 說話） |
+| 狀態面板 | 右欄 | 對話頁的上拉抽屜 | Goal 面板（任務依狀態分組、Brief、Ledger、Team 分頁，留言給 Planner）；點任務進任務 thread（狀態、分支、PR 與 CI、進度、看 diff 與 trace、留言給 Planner；直接插話給執行中的 worker 還沒做） |
 | 成員 | 右欄，由頻道標題列的「成員」按鈕切換，和狀態面板二選一 | 尚未接上 | 像 Discord／Slack 的成員欄：你、對話 agent、每個進行中 Goal 的 Planner、手上有任務的 worker，分成「工作中」「等待中」「待命」。每一列顯示狀態或最後一句進度，以及它用的模型與思考強度。點 worker 進任務 thread、點 Planner 開 Goal 面板、點對話 agent 開設定的「角色」。完全由客戶端從 project、provider 與 worker 設定推導，沒有額外的協定 |
 | Inbox | 實例直列最上方（全域）；左欄裡的 Inbox 只看目前實例 | 底部分頁「Inbox」 | 所有已連線實例、所有 project 的待處理事項，依時間排序並標示所屬實例，可依實例與類型（核准、需要你處理、找你的訊息）篩選 |
 | 記憶 | project 頻道的「記憶」分頁 | 同左 | 觀察紀錄與「目前在做什麼」，可修正、釘選、刪除；整理失敗時顯示原因 |
