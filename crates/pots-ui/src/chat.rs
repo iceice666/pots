@@ -272,14 +272,17 @@ impl ChatApp {
             highlight_seq: 0,
             _subscriptions: subscriptions,
         };
-        // An edit still waiting to be saved isn't lost by quitting.
+        // An edit still waiting to be saved isn't lost by closing the window
+        // or quitting. Closing saves while the window is still there: by the
+        // time the app quits after it, this view may be gone. Quitting saves
+        // too, in case it gets that far without the window closing first.
+        let app = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            app.update(cx, |app, cx| app.save_open_artifact(Some(window), cx)).ok();
+            true
+        });
         this._subscriptions.push(cx.on_app_quit(|this, cx| {
-            if let MainView::Artifact { frame, .. } = &this.view {
-                let frame = frame.clone();
-                if let Some(content) = frame.update(cx, |f, cx| f.unsaved(cx)) {
-                    this.save_artifact(frame.read(cx).id, content);
-                }
-            }
+            this.save_open_artifact(None, cx);
             async {}
         }));
         this.select_channel(active, window, cx);
@@ -640,6 +643,21 @@ impl ChatApp {
         }
         if let Some(a) = self.ws.artifact_mut(id) {
             a.content = Some(content);
+        }
+    }
+
+    /// Save what the open artifact has that isn't saved yet, the edit in
+    /// progress included, leaving it open. With a window, that edit is
+    /// committed first; without one (quitting) it is saved as it stands.
+    pub fn save_open_artifact(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let MainView::Artifact { frame, .. } = &self.view else { return };
+        let frame = frame.clone();
+        let content = match window {
+            Some(window) => frame.update(cx, |f, cx| f.flush(window, cx)),
+            None => frame.update(cx, |f, cx| f.unsaved(cx)),
+        };
+        if let Some(content) = content {
+            self.save_artifact(frame.read(cx).id, content);
         }
     }
 
@@ -3326,13 +3344,34 @@ fn selection_text(ws: &Workspace, messages: &[&Message], start: Pos, end: Pos) -
 mod tests {
     use super::*;
 
+    /// A temporary data directory for the app, removed when dropped. Tests
+    /// holding one run one at a time, as `POTS_HOME` is process-wide.
+    struct TempHome {
+        dir: std::path::PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    fn temp_home() -> TempHome {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("pots-ui-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: only tests holding the lock read or write the environment.
+        unsafe { std::env::set_var("POTS_HOME", &dir) };
+        TempHome { dir, _lock: lock }
+    }
+
     /// The app in mock mode (seed data, nothing saved) in a test window,
-    /// with its data directory in a temporary folder.
-    fn mock_app(cx: &mut gpui::TestAppContext) -> (Entity<ChatApp>, &mut gpui::VisualTestContext) {
-        let home = std::env::temp_dir().join(format!("pots-ui-test-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        // SAFETY: the only test in this binary that reads or writes the environment.
-        unsafe { std::env::set_var("POTS_HOME", &home) };
+    /// with its data directory in a temporary folder, removed when the
+    /// returned `TempHome` is dropped.
+    fn mock_app(cx: &mut gpui::TestAppContext) -> (Entity<ChatApp>, &mut gpui::VisualTestContext, TempHome) {
+        let home = temp_home();
         cx.update(|cx| {
             gpui_component::init(cx);
             composer::bind_keys(cx);
@@ -3342,7 +3381,7 @@ mod tests {
         let (app, cx) = cx.add_window_view(|window, cx| ChatApp::new(true, window, cx));
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        (app, cx)
+        (app, cx, home)
     }
 
     fn draw(cx: &mut gpui::VisualTestContext) {
@@ -3359,7 +3398,7 @@ mod tests {
 
     #[gpui::test]
     fn a_table_is_made_named_edited_kept_and_deleted(cx: &mut gpui::TestAppContext) {
-        let (app, cx) = mock_app(cx);
+        let (app, cx, _home) = mock_app(cx);
         draw(cx);
 
         app.update_in(cx, |app, window, cx| app.create_artifact(ArtifactKind::Table, window, cx));
@@ -3416,6 +3455,69 @@ mod tests {
         });
         draw(cx);
         assert!(app.read_with(cx, |app, cx| app.ws.artifact(id).is_none() && app.open_artifact_id(cx).is_none()));
+    }
+
+    /// A new table, open with its first cell selected and nothing saved
+    /// in it yet.
+    fn new_table(app: &Entity<ChatApp>, cx: &mut gpui::VisualTestContext) -> usize {
+        draw(cx);
+        app.update_in(cx, |app, window, cx| app.create_artifact(ArtifactKind::Table, window, cx));
+        draw(cx);
+        cx.simulate_keystrokes("enter"); // keep the default title
+        draw(cx);
+        app.read_with(cx, |app, cx| app.open_artifact_id(cx).unwrap())
+    }
+
+    #[gpui::test]
+    fn closing_the_window_keeps_the_cell_being_typed_in(cx: &mut gpui::TestAppContext) {
+        let (app, cx, _home) = mock_app(cx);
+        let id = new_table(&app, cx);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("typed");
+        assert_eq!(cell(&app, id, 0, cx), "");
+        assert!(cx.simulate_close());
+        assert_eq!(cell(&app, id, 0, cx), "typed");
+    }
+
+    #[gpui::test]
+    fn closing_the_window_keeps_an_edit_not_yet_saved(cx: &mut gpui::TestAppContext) {
+        let (app, cx, _home) = mock_app(cx);
+        let id = new_table(&app, cx);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("done");
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert_eq!(cell(&app, id, 0, cx), "", "within the save delay");
+        assert!(cx.simulate_close());
+        assert_eq!(cell(&app, id, 0, cx), "done");
+    }
+
+    #[gpui::test]
+    fn quitting_keeps_the_cell_being_typed_in_and_unsaved_edits(cx: &mut gpui::TestAppContext) {
+        let (app, cx, _home) = mock_app(cx);
+        let id = new_table(&app, cx);
+        // One cell committed within the save delay, the next still typed in.
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("first");
+        cx.simulate_keystrokes("enter enter");
+        cx.simulate_input("second");
+        draw(cx);
+        assert_eq!(cell(&app, id, 0, cx), "");
+        // What the app's Quit action does before asking the platform to quit.
+        app.update(cx, |app, cx| app.save_open_artifact(None, cx));
+        assert_eq!((cell(&app, id, 0, cx), cell(&app, id, 1, cx)), ("first".into(), "second".into()));
+    }
+
+    #[gpui::test]
+    fn the_quit_hook_keeps_the_cell_being_typed_in(cx: &mut gpui::TestAppContext) {
+        let (app, cx, _home) = mock_app(cx);
+        let id = new_table(&app, cx);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("last");
+        draw(cx);
+        // The app shutting down runs its quit hooks (nothing else saved it).
+        cx.quit();
+        assert_eq!(cell(&app, id, 0, cx), "last");
     }
 
     fn pos(msg: usize, frag: usize, offset: usize) -> Pos {

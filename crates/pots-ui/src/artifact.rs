@@ -29,8 +29,13 @@ pub enum EditorEvent {
 
 /// An editor for one kind of artifact, shown under the frame's title bar.
 pub trait ArtifactEditor: Render + Focusable + EventEmitter<EditorEvent> {
-    /// The content as edited so far.
+    /// The content as edited so far, including an edit still in progress
+    /// (a cell being typed in): saving must not need a window, since the
+    /// app may be quitting.
     fn content(&self, cx: &App) -> ArtifactContent;
+    /// Whether an edit in progress would change `content`; it emits no
+    /// `Changed` until it is committed.
+    fn has_pending_edit(&self, cx: &App) -> bool;
     /// Finish any edit in progress (a cell being typed in), so `content`
     /// has it. Called before saving on close. Returns whether that changed
     /// the content (its `Changed` would only arrive after the save).
@@ -43,6 +48,7 @@ pub trait ArtifactEditor: Render + Focusable + EventEmitter<EditorEvent> {
 trait AnyEditor {
     fn view(&self) -> AnyView;
     fn content(&self, cx: &App) -> ArtifactContent;
+    fn has_pending_edit(&self, cx: &App) -> bool;
     fn commit(&self, window: &mut Window, cx: &mut App) -> bool;
     fn focus(&self, window: &mut Window, cx: &mut App);
 }
@@ -54,6 +60,10 @@ impl<E: ArtifactEditor> AnyEditor for Entity<E> {
 
     fn content(&self, cx: &App) -> ArtifactContent {
         self.read(cx).content(cx)
+    }
+
+    fn has_pending_edit(&self, cx: &App) -> bool {
+        self.read(cx).has_pending_edit(cx)
     }
 
     fn commit(&self, window: &mut Window, cx: &mut App) -> bool {
@@ -165,9 +175,13 @@ impl ArtifactFrame {
         self.take_unsaved(cx)
     }
 
-    /// What isn't saved yet, without a window to finish an edit with (when
-    /// the app quits).
+    /// What isn't saved yet, including an edit still in progress, without
+    /// a window to finish that edit with (when the app quits). The edit
+    /// stays open; committing it later saves again.
     pub fn unsaved(&mut self, cx: &mut Context<Self>) -> Option<ArtifactContent> {
+        if self.editor.has_pending_edit(cx) {
+            self.dirty = true;
+        }
         self.take_unsaved(cx)
     }
 

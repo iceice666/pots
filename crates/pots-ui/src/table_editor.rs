@@ -195,6 +195,21 @@ impl TableEditor {
         self.state.read(cx).delegate().table.clone()
     }
 
+    /// The table with the edit in progress, if any, applied: what saving
+    /// now should keep, when there is no window to commit the edit with
+    /// (the app is quitting).
+    fn table_with_edit(&self, cx: &App) -> Table {
+        let mut table = self.table(cx);
+        if let Some(editing) = self.editing(cx) {
+            let text = self.input.read(cx).value().to_string();
+            match editing {
+                Editing::Cell(row, col) => table.set_cell(row, col, &text),
+                Editing::Column(col) => table.rename_column(col, &text),
+            };
+        }
+        table
+    }
+
     fn editing(&self, cx: &App) -> Option<Editing> {
         self.state.read(cx).delegate().editing
     }
@@ -493,7 +508,11 @@ impl TableEditor {
 
 impl ArtifactEditor for TableEditor {
     fn content(&self, cx: &App) -> ArtifactContent {
-        ArtifactContent::Table(self.table(cx))
+        ArtifactContent::Table(self.table_with_edit(cx))
+    }
+
+    fn has_pending_edit(&self, cx: &App) -> bool {
+        self.editing(cx).is_some() && self.table_with_edit(cx) != self.table(cx)
     }
 
     fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
