@@ -168,7 +168,8 @@ pub fn reflector_input(observations: &[ObservationRow], current_task: &str) -> S
 }
 
 /// 原始歷史轉成給 Observer 看的對話紀錄，時間用本機時區。provider 專屬的項目
-/// （reasoning）略過。
+/// （reasoning）略過；圖片（[`Item::Image`]）只留 [`IMAGE_PLACEHOLDER`]：Observer 不需要看圖，
+/// 而且 base64 從來沒有進過歷史。
 ///
 /// 每則一行開頭是 `[時間] 誰：`，內容裡的換行之後一律縮排兩格：訊息或工具結果裡偽造的
 /// `[時間] 使用者：` 不會出現在行首，冒充不了使用者。
@@ -189,6 +190,7 @@ pub fn transcript(rows: &[RawRow]) -> String {
             Item::ToolResult { output, .. } => {
                 ("工具結果", truncate(output.trim(), MAX_TOOL_OUTPUT))
             }
+            Item::Image { .. } => ("使用者", pots_llm::image::IMAGE_PLACEHOLDER.into()),
             Item::Opaque { .. } => continue,
         };
         // 各種換行都先統一成 `\n`，再把之後的行縮排。

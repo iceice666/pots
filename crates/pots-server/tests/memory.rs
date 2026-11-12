@@ -230,6 +230,7 @@ fn chars(input: &[Item]) -> usize {
             Item::User { text } | Item::Assistant { text } => text.chars().count(),
             Item::ToolCall(c) => c.arguments.chars().count(),
             Item::ToolResult { output, .. } => output.chars().count(),
+            Item::Image { .. } => 0,
             Item::Opaque { .. } => 0,
         })
         .sum()

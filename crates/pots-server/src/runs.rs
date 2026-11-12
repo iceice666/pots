@@ -1030,6 +1030,7 @@ pub(crate) fn explain(e: &LlmError) -> String {
         LlmError::UsageLimit => "（ChatGPT plan 的額度已用完，請稍後再試。）".into(),
         LlmError::Unavailable(m) => format!("（模型暫時無法使用，請稍後再試：{m}）"),
         LlmError::Unsupported(m) => format!("（模型不支援這個請求：{m}）"),
+        LlmError::UnsupportedImage => "（目前選用的模型不支援圖片輸入，請換一個支援圖片的模型。）".into(),
         LlmError::Interrupted(m) => format!("（回覆串流中斷，請再試一次：{m}）"),
         LlmError::Cancelled => "（已停止）".into(),
         LlmError::NotConfigured => {

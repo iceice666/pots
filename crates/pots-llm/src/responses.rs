@@ -55,6 +55,8 @@ pub struct ResponsesProvider {
     headers: HeaderMap,
     /// 有設定時，把 [`ModelRequest::session_id`] 放進這個 header。
     session_header: Option<HeaderName>,
+    /// 圖片附件的內容來源（`Item::Image` 只有參照）；沒有設定時，歷史裡出現圖片就回錯誤。
+    images: Option<Arc<dyn crate::image::ImageLoader>>,
 }
 
 impl ResponsesProvider {
@@ -69,7 +71,15 @@ impl ResponsesProvider {
             include_rejected: AtomicBool::new(false),
             headers: HeaderMap::new(),
             session_header: None,
+            images: None,
         }
+    }
+
+    /// 圖片附件的內容來源：歷史裡的 [`Item::Image`](crate::Item::Image) 只有附件參照，
+    /// 送出前由它讀出 base64（見 [`crate::image`]）。
+    pub fn with_images(mut self, loader: Arc<dyn crate::image::ImageLoader>) -> Self {
+        self.images = Some(loader);
+        self
     }
 
     /// 每次請求額外送出的 header。排在 `Authorization` 後面，所以可以覆寫預設值。
@@ -182,7 +192,10 @@ impl ResponsesProvider {
             Err(error) => error,
         };
         if !(options.include_encrypted_reasoning && error.rejects_include()) {
-            return Err(error.into_llm_error());
+            return Err(crate::image::explain_unsupported(
+                error.into_llm_error(),
+                request,
+            ));
         }
         self.include_rejected.store(true, Ordering::Relaxed);
         tracing::info!(
@@ -193,7 +206,7 @@ impl ResponsesProvider {
         options.include_encrypted_reasoning = false;
         self.post_responses(url, request, &options)
             .await?
-            .map_err(ApiError::into_llm_error)
+            .map_err(|error| crate::image::explain_unsupported(error.into_llm_error(), request))
     }
 
     async fn post_responses(
@@ -202,7 +215,9 @@ impl ResponsesProvider {
         request: &ModelRequest,
         options: &ResponsesOptions,
     ) -> Result<Result<reqwest::Response, ApiError>, LlmError> {
-        let body = build_request_body(request, options);
+        // base64 只在這裡、從本機附件檔讀出來；歷史裡存的是附件參照。
+        let images = crate::image::payloads_for(self.images.as_deref(), &request.input)?;
+        let body = build_request_body(request, options, &images)?;
         self.send_checked(
             |token| {
                 self.http

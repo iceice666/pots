@@ -973,6 +973,8 @@ fn cut_point(rows: &[RawRow], keep_recent: usize, max_chunk: u64) -> Option<usiz
             Item::ToolResult { call_id, .. } => {
                 open.remove(call_id.as_str());
             }
+            // 圖片只是一則參照，不會開著等待結果。
+            Item::Image { .. } => {}
             _ => {}
         }
         let Some(next) = rows.get(i) else { break };
@@ -982,6 +984,7 @@ fn cut_point(rows: &[RawRow], keep_recent: usize, max_chunk: u64) -> Option<usiz
                 true
             }
             Item::ToolResult { .. } => false,
+            Item::Image { .. } => false,
             _ => matches!(prev.item, Item::ToolResult { .. }) && open.is_empty(),
         };
         if !boundary {

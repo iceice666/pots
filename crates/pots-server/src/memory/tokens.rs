@@ -29,6 +29,8 @@ pub fn item(item: &Item) -> u64 {
             Item::User { text } | Item::Assistant { text } => estimate(text),
             Item::ToolCall(call) => estimate(&call.name) + estimate(&call.arguments),
             Item::ToolResult { output, .. } => estimate(output),
+            // 歷史裡只有附件參照，base64 不進歷史；token 用量由 provider 計帳，這裡只估佔位符。
+            Item::Image { .. } => estimate(pots_llm::image::IMAGE_PLACEHOLDER),
             Item::Opaque { value, .. } => estimate(&value.to_string()),
         }
 }

@@ -1214,6 +1214,7 @@ fn describe(e: &LlmError, key: Option<&ApiKey>) -> String {
         LlmError::UsageLimit => "額度已用完".into(),
         LlmError::Unavailable(m) => format!("無法連線：{m}"),
         LlmError::Unsupported(m) => format!("不支援：{m}"),
+        LlmError::UnsupportedImage => pots_llm::image::UNSUPPORTED_MESSAGE.into(),
         LlmError::Interrupted(m) => format!("連線中斷：{m}"),
         LlmError::Cancelled => "已取消".into(),
         LlmError::NotConfigured => "還沒設定 provider".into(),

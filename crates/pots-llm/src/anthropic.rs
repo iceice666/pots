@@ -64,6 +64,8 @@ pub struct AnthropicProvider {
     session_header: Option<HeaderName>,
     /// 各模型已經確認要用的 thinking 後備（見模組說明）。key 是模型 ID。
     thinking_fallbacks: Mutex<HashMap<String, ThinkingFallback>>,
+    /// 圖片附件的內容來源（`Item::Image` 只有參照）；沒有設定時，歷史裡出現圖片就回錯誤。
+    images: Option<std::sync::Arc<dyn crate::image::ImageLoader>>,
 }
 
 /// 一個模型被拒絕過、重送成功的 thinking 設定。
@@ -99,7 +101,18 @@ impl AnthropicProvider {
             headers: HeaderMap::new(),
             session_header: None,
             thinking_fallbacks: Mutex::new(HashMap::new()),
+            images: None,
         }
+    }
+
+    /// 圖片附件的內容來源：歷史裡的 [`Item::Image`](crate::Item::Image) 只有附件參照，
+    /// 送出前由它讀出 base64（見 [`crate::image`]）。
+    pub fn with_images(
+        mut self,
+        loader: std::sync::Arc<dyn crate::image::ImageLoader>,
+    ) -> Self {
+        self.images = Some(loader);
+        self
     }
 
     /// 每次請求額外送出的 header。排在認證 header 後面，所以可以覆寫預設值。
@@ -306,13 +319,15 @@ impl ModelProvider for AnthropicProvider {
     ) -> Result<EventStream, LlmError> {
         let url = endpoint(&self.base_url, "messages");
         let session = request.session_id.as_deref();
+        // base64 只在這裡、從本機附件檔讀出來；歷史裡存的是附件參照。
+        let images = crate::image::payloads_for(self.images.as_deref(), &request.input)?;
         let first = self.initial_thinking(&request);
-        let body = build_request_body_with_thinking(&request, self.max_tokens, first);
+        let body = build_request_body_with_thinking(&request, self.max_tokens, first, &images)?;
         let response = match self.post(&url, &body, session, &cancel).await {
             Ok(response) => response,
             Err(error) => {
                 let Some(retry) = thinking_retry(first, request.reasoning, &error) else {
-                    return Err(error);
+                    return Err(crate::image::explain_unsupported(error, &request));
                 };
                 tracing::warn!(
                     model = %request.model,
@@ -320,8 +335,12 @@ impl ModelProvider for AnthropicProvider {
                     retry = ?retry,
                     "Anthropic 不接受這個 thinking 設定，改用後備重送"
                 );
-                let body = build_request_body_with_thinking(&request, self.max_tokens, retry);
-                let response = self.post(&url, &body, session, &cancel).await?;
+                let body =
+                    build_request_body_with_thinking(&request, self.max_tokens, retry, &images)?;
+                let response = self
+                    .post(&url, &body, session, &cancel)
+                    .await
+                    .map_err(|error| crate::image::explain_unsupported(error, &request))?;
                 // 重送成功才記住，之後這個模型直接用後備。
                 self.remember(&request.model, |fallback| match first {
                     ThinkingConfig::Adaptive { .. } => fallback.budget_instead_of_adaptive = true,

@@ -46,6 +46,8 @@ pub struct OpenAiCompatProvider {
     headers: HeaderMap,
     /// 有設定時，把 [`ModelRequest::session_id`] 放進這個 header。
     session_header: Option<HeaderName>,
+    /// 圖片附件的內容來源（`Item::Image` 只有參照）；沒有設定時，歷史裡出現圖片就回錯誤。
+    images: Option<std::sync::Arc<dyn crate::image::ImageLoader>>,
 }
 
 impl std::fmt::Debug for OpenAiCompatProvider {
@@ -67,7 +69,18 @@ impl OpenAiCompatProvider {
             tools_without_reasoning: AtomicBool::new(false),
             headers: HeaderMap::new(),
             session_header: None,
+            images: None,
         }
+    }
+
+    /// 圖片附件的內容來源：歷史裡的 [`Item::Image`](crate::Item::Image) 只有附件參照，
+    /// 送出前由它讀出 base64（見 [`crate::image`]）。
+    pub fn with_images(
+        mut self,
+        loader: std::sync::Arc<dyn crate::image::ImageLoader>,
+    ) -> Self {
+        self.images = Some(loader);
+        self
     }
 
     /// 每次請求額外送出的 header。排在 `Authorization` 後面，所以可以覆寫預設值。
@@ -122,14 +135,16 @@ impl ModelProvider for OpenAiCompatProvider {
     ) -> Result<EventStream, LlmError> {
         let url = endpoint(&self.base_url, "chat/completions");
         let session = request.session_id.clone();
+        // base64 只在這裡、從本機附件檔讀出來；歷史裡存的是附件參照。
+        let images = crate::image::payloads_for(self.images.as_deref(), &request.input)?;
         // 已經送 `none`（使用者選 `Off`）就不必再降級重送。
         let requested_off = request.reasoning == Some(Reasoning::Off);
         let mut downgraded =
             !request.tools.is_empty() && self.tools_without_reasoning.load(Ordering::Relaxed);
         let mut body = if downgraded {
-            build_request_body_with_effort(&request, "none")
+            build_request_body_with_effort(&request, "none", &images)?
         } else {
-            build_request_body(&request)
+            build_request_body(&request, &images)?
         };
         loop {
             let builder = self
@@ -163,16 +178,17 @@ impl ModelProvider for OpenAiCompatProvider {
                     );
                     self.tools_without_reasoning.store(true, Ordering::Relaxed);
                     downgraded = true;
-                    body = build_request_body_with_effort(&request, "none");
+                    body = build_request_body_with_effort(&request, "none", &images)?;
                 }
                 Err(error) => {
-                    return Err(if downgraded {
+                    let error = if downgraded {
                         explain_none_rejected(error, NONE_REJECTED_WITH_TOOLS)
                     } else if requested_off {
                         explain_none_rejected(error, NONE_REJECTED_OFF)
                     } else {
                         error
-                    });
+                    };
+                    return Err(crate::image::explain_unsupported(error, &request));
                 }
             }
         }
