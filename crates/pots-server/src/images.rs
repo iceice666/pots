@@ -25,8 +25,10 @@ use crate::store::Store;
 /// [`start`](crate::start) 開好資料庫之後把 [`StoreImages`] 填進去。provider 建好之後仍共用
 /// 同一個槽，所以填進去的來源就是正式推論路徑用的來源（見 [`Deps::images`](crate::Deps::images)）。
 ///
-/// 沒有被填時回「沒有設定圖片來源」：歷史裡沒有圖片的一般對話不受影響，有圖片則整個請求
-/// 失敗，不會默默送出一份少了圖的歷史。
+/// 沒有被填時回「伺服器還沒有接上圖片來源」：歷史裡沒有圖片的一般對話不受影響，有圖片則整個
+/// 請求失敗，不會默默送出一份少了圖的歷史。錯誤型別用 [`LlmError::Other`] 而不是
+/// `Unsupported`：這是伺服器端的組裝問題，不是模型不支援圖片（後者才是
+/// [`LlmError::UnsupportedImage`]），訊息才不會被顯示成「模型不支援這個請求」。
 #[derive(Clone, Default)]
 pub struct ImageSlot {
     loader: Arc<OnceLock<Arc<dyn ImageLoader>>>,
@@ -55,8 +57,8 @@ impl ImageLoader for ImageSlot {
     async fn base64(&self, attachment_id: &str) -> Result<String, LlmError> {
         match self.get() {
             Some(loader) => loader.base64(attachment_id).await,
-            None => Err(LlmError::Unsupported(
-                "這個 provider 沒有設定圖片來源，無法送出圖片".into(),
+            None => Err(LlmError::Other(
+                "伺服器還沒有接上圖片來源，無法送出圖片（請回報這個問題）".into(),
             )),
         }
     }
@@ -64,6 +66,12 @@ impl ImageLoader for ImageSlot {
 
 /// 從資料目錄讀附件的 [`ImageLoader`]：attachment id → `attachments` 表的中介資料 →
 /// `<data_dir>/attachments/<sha256>` → base64。
+///
+/// **不檢查附件屬於哪個 project**：`om_raw` 的 `Item::Image` 只帶附件 id，而 provider 的
+/// `ImageLoader` 介面也只有 id（`pots_llm::image::ImageLoader`）。與 `GET /attachments/{id}`
+/// 的取捨一致（`gateway::attachment_body` 同樣只查 id）：本服務只綁 loopback、每個實例只有
+/// 一個使用者，拿到 id 就代表已通過 token 守衛。若之後要多使用者或遠端部署，這裡要跟那個
+/// 端點一起補 project 歸屬檢查。
 #[derive(Clone)]
 pub struct StoreImages {
     store: Store,
@@ -100,18 +108,19 @@ impl ImageLoader for StoreImages {
                 "找不到圖片附件「{attachment_id}」，請重新上傳"
             )));
         };
-        let path = attachments::body_path(&self.data_dir, &row.sha256);
-        let bytes = tokio::fs::read(&path).await.map_err(|e| {
-            tracing::error!(
-                error = %e,
-                path = %path.display(),
-                attachment = %attachment_id,
-                "讀不到圖片附件的內容"
-            );
-            LlmError::Other(format!(
-                "讀不到圖片附件的內容（附件「{attachment_id}」），請重新上傳"
-            ))
-        })?;
+        let bytes = attachments::read_body(&self.data_dir, &row.sha256)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    path = %attachments::body_path(&self.data_dir, &row.sha256).display(),
+                    attachment = %attachment_id,
+                    "讀不到圖片附件的內容"
+                );
+                LlmError::Other(format!(
+                    "讀不到圖片附件的內容（附件「{attachment_id}」），請重新上傳"
+                ))
+            })?;
         Ok(base64_bytes(&bytes))
     }
 }
@@ -190,7 +199,7 @@ mod tests {
         assert!(slot.get().is_none());
         let error = slot.base64("anything").await.unwrap_err();
         assert!(
-            matches!(&error, LlmError::Unsupported(m) if m.contains("沒有設定圖片來源")),
+            matches!(&error, LlmError::Other(m) if m.contains("沒有接上圖片來源")),
             "{error:?}"
         );
 

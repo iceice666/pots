@@ -364,7 +364,7 @@ async fn the_empty_slot_reports_a_missing_image_source() {
     use pots_llm::image::ImageLoader as _;
     let error = slot.base64("whatever").await.unwrap_err();
     assert!(
-        matches!(&error, pots_llm::LlmError::Unsupported(m) if m.contains("沒有設定圖片來源")),
+        matches!(&error, pots_llm::LlmError::Other(m) if m.contains("沒有接上圖片來源")),
         "{error:?}"
     );
 }
