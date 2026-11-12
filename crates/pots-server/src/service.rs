@@ -50,18 +50,12 @@ pub async fn chatgpt_deps(data_dir: &Path, model: Option<String>) -> Result<Deps
     let base = Url::parse(DEFAULT_BASE_URL).map_err(|e| Error::Config(e.to_string()))?;
     let provider = ResponsesProvider::new(base, auth.clone(), http.clone());
     let control = SiwcControl::new(auth);
-    // 圖片附件放在資料目錄下（見 `attachments`）；base64 只在送出請求時才從這裡讀。
-    let images = Arc::new(pots_llm::image::DirectoryImages::new(
-        crate::attachments::dir(data_dir),
-    ));
-    let auto = Arc::new(
-        AutoModel::new(provider, model.is_none(), control.status()).with_images(images.clone()),
-    );
+    let auto = Arc::new(AutoModel::new(provider, model.is_none(), control.status()));
     Ok(Deps {
         provider: auto.clone(),
         model: model.unwrap_or_else(|| AUTO_MODEL.into()),
         model_auth: Arc::new(control),
-        api_providers: Arc::new(HttpApiProviders::new(http, Some(auto)).with_images(images)),
+        api_providers: Arc::new(HttpApiProviders::new(http, Some(auto))),
     })
 }
 
@@ -280,7 +274,8 @@ impl AutoModel {
         }
     }
 
-    /// 圖片附件的內容來源；見 [`crate::attachments`]。
+    /// 圖片附件的內容來源：歷史裡的 [`pots_llm::Item::Image`] 只有附件參照，送出前由它讀出
+    /// base64（見 [`pots_llm::image`]）。附件儲存接上去之後由組裝端呼叫。
     pub fn with_images(mut self, loader: Arc<dyn pots_llm::image::ImageLoader>) -> Self {
         self.inner = self.inner.with_images(loader);
         self
@@ -341,7 +336,7 @@ impl ModelProvider for AutoModel {
 pub struct HttpApiProviders {
     http: pots_llm::reqwest::Client,
     chatgpt: Option<Arc<AutoModel>>,
-    /// 圖片附件的內容來源；見 [`crate::attachments`]。
+    /// 圖片附件的內容來源；見 [`pots_llm::image`]。
     images: Option<Arc<dyn pots_llm::image::ImageLoader>>,
 }
 
@@ -354,8 +349,8 @@ impl HttpApiProviders {
         }
     }
 
-    /// 圖片附件的內容來源（資料目錄的 `attachments/`）。沒有設定時，歷史裡出現
-    /// [`pots_llm::Item::Image`] 會回錯誤而不是默默送一個少了圖的請求。
+    /// 圖片附件的內容來源。沒有設定時，歷史裡出現 [`pots_llm::Item::Image`] 會回錯誤，
+    /// 而不是默默送一個少了圖的請求。
     pub fn with_images(mut self, loader: Arc<dyn pots_llm::image::ImageLoader>) -> Self {
         self.images = Some(loader);
         self

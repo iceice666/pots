@@ -133,7 +133,7 @@ impl ModelProvider for OpenAiCompatProvider {
         let url = endpoint(&self.base_url, "chat/completions");
         let session = request.session_id.clone();
         // base64 只在這裡、從本機附件檔讀出來；歷史裡存的是附件參照。
-        let images = crate::image::payloads_for(self.images.as_deref(), &request.input)?;
+        let images = crate::image::payloads_for(self.images.as_deref(), &request.input).await?;
         // 已經送 `none`（使用者選 `Off`）就不必再降級重送。
         let requested_off = request.reasoning == Some(Reasoning::Off);
         let mut downgraded =

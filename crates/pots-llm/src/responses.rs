@@ -216,7 +216,7 @@ impl ResponsesProvider {
         options: &ResponsesOptions,
     ) -> Result<Result<reqwest::Response, ApiError>, LlmError> {
         // base64 只在這裡、從本機附件檔讀出來；歷史裡存的是附件參照。
-        let images = crate::image::payloads_for(self.images.as_deref(), &request.input)?;
+        let images = crate::image::payloads_for(self.images.as_deref(), &request.input).await?;
         let body = build_request_body(request, options, &images)?;
         self.send_checked(
             |token| {

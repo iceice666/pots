@@ -317,7 +317,7 @@ impl ModelProvider for AnthropicProvider {
         let url = endpoint(&self.base_url, "messages");
         let session = request.session_id.as_deref();
         // base64 只在這裡、從本機附件檔讀出來；歷史裡存的是附件參照。
-        let images = crate::image::payloads_for(self.images.as_deref(), &request.input)?;
+        let images = crate::image::payloads_for(self.images.as_deref(), &request.input).await?;
         let first = self.initial_thinking(&request);
         let body = build_request_body_with_thinking(&request, self.max_tokens, first, &images)?;
         let response = match self.post(&url, &body, session, &cancel).await {

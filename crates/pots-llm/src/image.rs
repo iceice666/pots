@@ -31,12 +31,12 @@ pub fn has_images(items: &[Item]) -> bool {
 ///
 /// 沒有掛 loader 時：歷史裡沒有圖片就回空的（一般文字對話不受影響）；有圖片時回
 /// [`LlmError::Unsupported`]，不會默默把圖丟掉送出一個少了圖的請求。
-pub fn payloads_for(
+pub async fn payloads_for(
     loader: Option<&dyn ImageLoader>,
     items: &[Item],
 ) -> Result<ImagePayloads, LlmError> {
     match loader {
-        Some(loader) => payloads(loader, items),
+        Some(loader) => payloads(loader, items).await,
         None if has_images(items) => Err(LlmError::Unsupported(
             "這個 provider 沒有設定圖片來源，無法送出圖片".into(),
         )),
@@ -102,17 +102,18 @@ pub fn normalize_mime(mime: &str) -> &str {
     }
 }
 
-/// 把 [`Item::Image`] 的參照變成 base64。實作由呼叫端提供（讀本機附件檔）。
+/// 把 [`Item::Image`] 的參照變成 base64。實作由呼叫端提供：伺服器的附件儲存用
+/// attachment id 查檔案位置（可能是 DB 查詢），所以介面是非同步的。
 ///
-/// 這是同步介面：provider 在組請求時呼叫，讀的是本機小檔案（單張上限 10 MiB），
-/// 和後面把 base64 序列化成 JSON 的成本同一個量級。
+/// provider 只在真正送出請求前呼叫它（歷史每一輪都重送，不能快取跨輪的結果）。
+#[async_trait::async_trait]
 pub trait ImageLoader: Send + Sync {
     /// `attachment_id` 的 base64；讀不到時回錯誤，整個請求不要送出。
-    fn base64(&self, attachment_id: &str) -> Result<String, LlmError>;
+    async fn base64(&self, attachment_id: &str) -> Result<String, LlmError>;
 }
 
 /// 依歷史順序把圖片讀成 [`ImagePayloads`]；同一個附件只讀一次。
-pub fn payloads(loader: &dyn ImageLoader, items: &[Item]) -> Result<ImagePayloads, LlmError> {
+pub async fn payloads(loader: &dyn ImageLoader, items: &[Item]) -> Result<ImagePayloads, LlmError> {
     let mut payloads = ImagePayloads::new();
     for item in items {
         let Item::Image { attachment_id, .. } = item else {
@@ -121,7 +122,7 @@ pub fn payloads(loader: &dyn ImageLoader, items: &[Item]) -> Result<ImagePayload
         if payloads.contains_key(attachment_id) {
             continue;
         }
-        payloads.insert(attachment_id.clone(), loader.base64(attachment_id)?);
+        payloads.insert(attachment_id.clone(), loader.base64(attachment_id).await?);
     }
     Ok(payloads)
 }
@@ -157,11 +158,12 @@ impl DirectoryImages {
     }
 }
 
+#[async_trait::async_trait]
 impl ImageLoader for DirectoryImages {
-    fn base64(&self, attachment_id: &str) -> Result<String, LlmError> {
+    async fn base64(&self, attachment_id: &str) -> Result<String, LlmError> {
         use base64::Engine as _;
         let path = self.dir.join(attachment_id);
-        let bytes = std::fs::read(&path).map_err(|error| {
+        let bytes = tokio::fs::read(&path).await.map_err(|error| {
             LlmError::Unsupported(format!("讀不到圖片附件「{attachment_id}」：{error}"))
         })?;
         Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
@@ -182,28 +184,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn directory_loader_reads_by_attachment_id() {
+    #[tokio::test]
+    async fn directory_loader_reads_by_attachment_id() {
         let dir = tempfile_dir();
         std::fs::write(dir.join("att-1"), b"png").unwrap();
         let loader = DirectoryImages::new(dir.clone());
         use base64::Engine as _;
         assert_eq!(
-            loader.base64("att-1").unwrap(),
+            loader.base64("att-1").await.unwrap(),
             base64::engine::general_purpose::STANDARD.encode(b"png")
         );
         assert!(matches!(
-            loader.base64("missing"),
+            loader.base64("missing").await,
             Err(LlmError::Unsupported(m)) if m.contains("讀不到圖片附件")
         ));
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn payloads_deduplicate_and_only_read_images() {
+    #[tokio::test]
+    async fn payloads_deduplicate_and_only_read_images() {
         struct Fixed;
+        #[async_trait::async_trait]
         impl ImageLoader for Fixed {
-            fn base64(&self, id: &str) -> Result<String, LlmError> {
+            async fn base64(&self, id: &str) -> Result<String, LlmError> {
                 Ok(format!("<{id}>"))
             }
         }
@@ -224,11 +227,11 @@ mod tests {
                 mime: "image/jpeg".into(),
             },
         ];
-        let map = payloads(&Fixed, &items).unwrap();
+        let map = payloads(&Fixed, &items).await.unwrap();
         assert_eq!(map.len(), 2);
         assert_eq!(map["a"], "<a>");
         assert_eq!(map["b"], "<b>");
-        assert!(payloads(&Fixed, &items[..1]).unwrap().is_empty());
+        assert!(payloads(&Fixed, &items[..1]).await.unwrap().is_empty());
     }
 
     /// 測試用的暫存目錄，不引入額外依賴。
