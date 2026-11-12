@@ -82,9 +82,9 @@ impl StoreImages {
 #[async_trait::async_trait]
 impl ImageLoader for StoreImages {
     async fn base64(&self, attachment_id: &str) -> Result<String, LlmError> {
-        let id: AttachmentId = attachment_id.parse().map_err(|_| {
-            LlmError::Other(format!("圖片附件的 ID 格式不對：「{attachment_id}」"))
-        })?;
+        let id: AttachmentId = attachment_id
+            .parse()
+            .map_err(|_| LlmError::Other(format!("圖片附件的 ID 格式不對：「{attachment_id}」")))?;
         let row = {
             let mut conn = self.store.acquire().await.map_err(|e| {
                 tracing::error!(error = %e, "讀取圖片附件時無法取得資料庫連線");
@@ -118,8 +118,8 @@ impl ImageLoader for StoreImages {
 
 #[cfg(test)]
 mod tests {
-    use sha2::{Digest as _, Sha256};
     use pots_proto::{ProjectId, Timestamp};
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
     use crate::store::{AttachmentRow, ProjectRow};
@@ -199,11 +199,17 @@ mod tests {
         let store = store(tmp.path()).await;
         let id = attachment(&store, tmp.path(), b"png").await;
         slot.fill(Arc::new(StoreImages::new(store, tmp.path())));
-        assert_eq!(slot.base64(&id.to_string()).await.unwrap(), base64_bytes(b"png"));
-        slot.fill(Arc::new(pots_llm::image::FnImages::new(|_: String| async move {
-            Ok("之後填的不會生效".into())
-        })));
-        assert_eq!(slot.base64(&id.to_string()).await.unwrap(), base64_bytes(b"png"));
+        assert_eq!(
+            slot.base64(&id.to_string()).await.unwrap(),
+            base64_bytes(b"png")
+        );
+        slot.fill(Arc::new(pots_llm::image::FnImages::new(
+            |_: String| async move { Ok("之後填的不會生效".into()) },
+        )));
+        assert_eq!(
+            slot.base64(&id.to_string()).await.unwrap(),
+            base64_bytes(b"png")
+        );
     }
 
     #[tokio::test]
