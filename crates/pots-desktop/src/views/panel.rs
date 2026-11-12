@@ -183,6 +183,21 @@ fn team_post(post: &TeamPost, id: SharedString) -> Div {
         )
 }
 
+/// 「動態」的一筆：時間在上、內容在下。
+fn activity_row(a: &GoalActivity) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(theme::text_muted())
+                .child(crate::sync::month_day_time(a.at)),
+        )
+        .child(div().line_height(relative(1.5)).child(a.text.clone()))
+}
+
 pub(super) fn white_box() -> Div {
     div()
         .flex()
@@ -498,6 +513,12 @@ impl PotsApp {
                         cx,
                     ))
                     .child(tab_item(
+                        "goal-tab-activity",
+                        format!("動態 {}", g.activity.len()),
+                        GoalTab::Activity,
+                        cx,
+                    ))
+                    .child(tab_item(
                         "goal-tab-brief",
                         "Brief".into(),
                         GoalTab::Brief,
@@ -620,6 +641,11 @@ impl PotsApp {
                         );
                     }
                 }
+                if let Some(latest) = g.activity.last() {
+                    col = col
+                        .child(section_label("最新動態").pt(px(20.)))
+                        .child(white_box().child(activity_row(latest)));
+                }
                 if !g.team.is_empty() {
                     col = col
                         .child(section_label("最新 Team 貼文").pt(px(20.)))
@@ -633,6 +659,20 @@ impl PotsApp {
                         )));
                 }
                 col.into_any_element()
+            }
+            GoalTab::Activity => {
+                if g.activity.is_empty() {
+                    empty_state(
+                        "還沒有動態",
+                        "Planner 的進展（規劃完成、改派、排程）記在這裡，不會貼到對話；Goal 結束或需要你處理時才會出現在對話裡。",
+                    )
+                    .into_any_element()
+                } else {
+                    white_box()
+                        .gap(px(14.))
+                        .children(g.activity.iter().rev().map(activity_row))
+                        .into_any_element()
+                }
             }
             GoalTab::Brief => white_box()
                 .child(

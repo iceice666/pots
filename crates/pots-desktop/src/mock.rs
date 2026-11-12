@@ -559,6 +559,25 @@ pub fn store() -> Store {
                 to: None,
             },
         ],
+        // 和服務一樣由舊到新。
+        activity: vec![
+            GoalActivity {
+                at: at(10, 12),
+                text: "你開始了這個 Goal，交給 Planner".into(),
+            },
+            GoalActivity {
+                at: at(10, 20),
+                text: "規劃完成：拆成後端 callback、前端按鈕、整合測試、review 與文件 5 個任務，\
+                       callback 先做，其他等它的路徑定下來。"
+                    .into(),
+            },
+            GoalActivity {
+                at: at(11, 2),
+                text:
+                    "callback 已開 PR；整合測試第 2 次建置仍失敗，已請 worker 先修 redis 啟動順序。"
+                        .into(),
+            },
+        ],
         brief: "把登入改成 OAuth，先支援 Google。舊的密碼登入保留三個月，期間兩種方式並存；\
                 session 過期時間改為 14 天（見 Spec「Session 處理」）。完成條件：\
                 後端 callback、前端按鈕、整合測試都合併到 main。"
@@ -776,6 +795,7 @@ pub fn store() -> Store {
                     .into(),
                 to: None,
             }],
+            activity: Vec::new(),
             brief: "結帳頁改版：新版地址表單與付款步驟。".into(),
             quick: false,
             env: false,
@@ -1063,6 +1083,7 @@ pub fn store() -> Store {
                 progress: "開了 PR #9，CI 都過了".into(),
             }],
             team: vec![],
+            activity: Vec::new(),
             brief: "合併重複的 alias，移除過期的 PATH 設定。".into(),
             quick: true,
             env: false,

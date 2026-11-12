@@ -354,6 +354,7 @@ mod tests {
             budget_used_pct: 0,
             tasks,
             team: Vec::new(),
+            activity: Vec::new(),
             brief: String::new(),
             quick: false,
             env: false,

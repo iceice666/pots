@@ -580,6 +580,8 @@ pub enum AutomationSection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GoalTab {
     Tasks,
+    /// Planner 的里程碑、開工、排程等進展（只有 Goal 結束與需要你處理的會貼到對話流）。
+    Activity,
     Brief,
     Ledger,
     Team,

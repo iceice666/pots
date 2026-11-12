@@ -277,6 +277,9 @@ impl Sync {
         for post in &mut goal.team {
             post.at = self.local(post.at);
         }
+        for a in &mut goal.activity {
+            a.at = self.local(a.at);
+        }
         goal
     }
 
@@ -1283,6 +1286,7 @@ mod tests {
                 progress: String::new(),
             }],
             team: vec![],
+            activity: Vec::new(),
             brief: String::new(),
             quick: false,
             env: false,

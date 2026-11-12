@@ -527,7 +527,7 @@ impl PotsApp {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.store.goal(this.instance, gid).is_some() {
-                            this.open_panel(Some(Panel::Goal(gid, GoalTab::Tasks)), cx)
+                            this.open_panel(Some(Panel::Goal(gid, GoalTab::Activity)), cx)
                         }
                     }))
                     .into_any_element()
