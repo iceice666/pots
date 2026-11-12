@@ -40,6 +40,10 @@ pub struct Applied {
     pub worker_changed: bool,
     /// `Why` 的結果（「為什麼」面板）。
     pub why: Option<WhyView>,
+    /// `TaskDiff` 的結果（任務 thread 的「看 diff」）。
+    pub task_diff: Option<TaskDiffView>,
+    /// `TaskTrace` 的結果（任務 thread 的「看 trace」），時間已換成本地時間。
+    pub task_trace: Option<TaskTraceView>,
     /// `CostReport` 的結果（用量頁）。報表的時間是伺服器的 UTC 秒，用量頁不顯示時刻。
     pub cost_report: Option<CostReport>,
     /// 單價表更新了（`Pricing`）；用量頁據此重新要一份報表。
@@ -266,6 +270,8 @@ impl Sync {
 
     fn localize_goal(&self, mut goal: GoalView) -> GoalView {
         for t in &mut goal.tasks {
+            t.started_at = t.started_at.map(|at| self.local(at));
+            t.finished_at = t.finished_at.map(|at| self.local(at));
             for s in &mut t.steps {
                 s.at = s.at.map(|at| self.local(at));
             }
@@ -341,7 +347,13 @@ impl Sync {
         } else {
             vec![InboxAction::Approve, InboxAction::Reject]
         };
-        if matches!(&a.action, ApprovalActionView::MergePr { url: Some(_), .. }) {
+        // PR 與本機資料夾的套用都看得到任務分支的 diff（本機資料夾沒有 PR 可以開）。
+        let has_diff = match &a.action {
+            ApprovalActionView::MergePr { url, .. } => url.is_some() || a.task.is_some(),
+            ApprovalActionView::ApplyChanges { .. } => a.task.is_some(),
+            _ => false,
+        };
+        if has_diff {
             actions.push(InboxAction::ViewDiff);
         }
         actions.push(InboxAction::OpenThread);
@@ -845,6 +857,17 @@ impl Sync {
                 out.github_test = Some((request, result));
             }
             ServerEvent::Why { why } => out.why = why,
+            ServerEvent::TaskDiff { diff } => out.task_diff = Some(diff),
+            ServerEvent::TaskTrace { mut trace } => {
+                for run in &mut trace.runs {
+                    run.started_at = self.local(run.started_at);
+                    run.finished_at = run.finished_at.map(|at| self.local(at));
+                    for step in &mut run.steps {
+                        step.at = self.local(step.at);
+                    }
+                }
+                out.task_trace = Some(trace);
+            }
             ServerEvent::CostReport { report } => out.cost_report = Some(report),
             ServerEvent::Pricing { info } => out.pricing = Some(info),
             ServerEvent::Error { message } => {
@@ -1278,6 +1301,9 @@ mod tests {
                 state: task_state,
                 branch: None,
                 elapsed_min: 0,
+                started_at: None,
+                finished_at: None,
+                spent_tokens: 0,
                 cost_cents: 0,
                 steps: vec![],
                 thread: vec![],

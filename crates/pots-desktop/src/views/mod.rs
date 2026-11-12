@@ -16,6 +16,7 @@ mod project_env;
 mod roles;
 mod settings;
 mod stream;
+mod task_inspect;
 mod text;
 mod usage;
 mod widgets;

@@ -385,6 +385,9 @@ pub fn store() -> Store {
         state: TaskStateView::Running,
         branch: Some("agent/t31-oauth-callback".into()),
         elapsed_min: 12,
+        started_at: None,
+        finished_at: None,
+        spent_tokens: 0,
         cost_cents: 84,
         steps: vec![
             TaskStep {
@@ -428,6 +431,9 @@ pub fn store() -> Store {
         state: TaskStateView::Running,
         branch: Some("agent/t32-login-button".into()),
         elapsed_min: 8,
+        started_at: None,
+        finished_at: None,
+        spent_tokens: 0,
         cost_cents: 31,
         steps: vec![
             TaskStep {
@@ -455,6 +461,9 @@ pub fn store() -> Store {
         },
         branch: Some("agent/t33-oauth-e2e".into()),
         elapsed_min: 21,
+        started_at: None,
+        finished_at: None,
+        spent_tokens: 0,
         cost_cents: 57,
         steps: vec![
             TaskStep {
@@ -482,6 +491,9 @@ pub fn store() -> Store {
         },
         branch: None,
         elapsed_min: 3,
+        started_at: None,
+        finished_at: None,
+        spent_tokens: 0,
         cost_cents: 9,
         steps: vec![TaskStep {
             text: "對照 spec 檢查 session 與舊密碼登入的相容性".into(),
@@ -504,6 +516,9 @@ pub fn store() -> Store {
         },
         branch: Some("agent/t34-auth-docs".into()),
         elapsed_min: 6,
+        started_at: None,
+        finished_at: None,
+        spent_tokens: 0,
         cost_cents: 14,
         steps: vec![TaskStep {
             text: "第 2 次建置仍失敗，停止".into(),
@@ -767,6 +782,9 @@ pub fn store() -> Store {
                 },
                 branch: Some("agent/t21-checkout".into()),
                 elapsed_min: 46,
+                started_at: None,
+                finished_at: None,
+                spent_tokens: 0,
                 cost_cents: 212,
                 steps: vec![
                     TaskStep {
@@ -1072,6 +1090,9 @@ pub fn store() -> Store {
                 },
                 branch: Some("agent/t3-shell-cleanup".into()),
                 elapsed_min: 9,
+                started_at: None,
+                finished_at: None,
+                spent_tokens: 0,
                 cost_cents: 35,
                 steps: vec![TaskStep {
                     text: "開了 PR #9".into(),

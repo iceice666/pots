@@ -45,6 +45,53 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+/// 任務 thread 的「看 diff」「看 trace」對話框。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskInspect {
+    /// 已送出，等服務回覆；`diff` 為假是 trace。
+    Loading {
+        task: TaskId,
+        diff: bool,
+    },
+    Diff(TaskDiffView),
+    Trace(TaskTraceView),
+}
+
+impl TaskInspect {
+    pub fn task(&self) -> TaskId {
+        match self {
+            Self::Loading { task, .. } => *task,
+            Self::Diff(d) => d.task,
+            Self::Trace(t) => t.task,
+        }
+    }
+
+    pub fn is_diff(&self) -> bool {
+        match self {
+            Self::Loading { diff, .. } => *diff,
+            Self::Diff(_) => true,
+            Self::Trace(_) => false,
+        }
+    }
+}
+
+/// 服務回了 diff 或 trace：只在對話框還在等同一個任務的同一種內容時換上。
+fn apply_task_inspect(
+    inspect: &mut Option<TaskInspect>,
+    diff: Option<TaskDiffView>,
+    trace: Option<TaskTraceView>,
+) {
+    let Some(waiting) = inspect.as_ref() else {
+        return;
+    };
+    let (task, want_diff) = (waiting.task(), waiting.is_diff());
+    match (diff, trace) {
+        (Some(d), _) if want_diff && d.task == task => *inspect = Some(TaskInspect::Diff(d)),
+        (_, Some(t)) if !want_diff && t.task == task => *inspect = Some(TaskInspect::Trace(t)),
+        _ => {}
+    }
+}
+
 /// 中欄顯示什麼。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -743,6 +790,10 @@ pub struct PotsApp {
     pub why: Option<WhyView>,
     /// 問「為什麼」的那則訊息附帶的工具摘要。
     pub why_tools: Option<ToolSummary>,
+    /// 任務的 diff 或 trace 對話框。
+    pub task_inspect: Option<TaskInspect>,
+    /// trace 裡展開的步驟（run 的序號、步驟的序號）；換一個任務就清掉。
+    pub expanded_trace: HashSet<(usize, usize)>,
     /// 用量頁的時間範圍與最近一份報表（`ClientCommand::CostReport` 的結果）。
     pub usage_range: UsageRange,
     pub usage: Option<CostReport>,
@@ -816,8 +867,7 @@ impl PotsApp {
         });
         let goal_note =
             cx.new(|cx| InputState::new(window, cx).placeholder("在這個 Goal 留言給 Planner"));
-        let worker_note =
-            cx.new(|cx| InputState::new(window, cx).placeholder("直接對這個 worker 說話"));
+        let worker_note = cx.new(|cx| InputState::new(window, cx).placeholder("對這個任務留言"));
 
         let subscriptions = vec![
             cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| {
@@ -879,6 +929,8 @@ impl PotsApp {
             expanded_tools: HashSet::new(),
             expanded_cards: HashSet::new(),
             why: None,
+            task_inspect: None,
+            expanded_trace: HashSet::new(),
             why_tools: None,
             usage_range: UsageRange::Week,
             usage: None,
@@ -1049,6 +1101,17 @@ impl PotsApp {
                 .applied(&applied);
                 if applied.why.is_some() {
                     self.why = applied.why;
+                }
+                apply_task_inspect(
+                    &mut self.task_inspect,
+                    applied.task_diff,
+                    applied.task_trace,
+                );
+                if applied.error.is_some()
+                    && matches!(self.task_inspect, Some(TaskInspect::Loading { .. }))
+                {
+                    // 服務拒絕了（例如找不到任務分支）：錯誤在底部提示，對話框不要一直轉。
+                    self.task_inspect = None;
                 }
                 if let Some(report) = applied.cost_report {
                     self.usage = Some(report);
@@ -1676,6 +1739,10 @@ impl PotsApp {
     fn on_close_settings(&mut self, _: &CloseSettings, _: &mut Window, cx: &mut Context<Self>) {
         if self.reject_dialog.is_some() {
             self.cancel_reject(cx);
+        } else if self.task_inspect.is_some() {
+            self.close_task_inspect(cx);
+        } else if self.why.is_some() {
+            self.close_why(cx);
         } else if self.settings.is_some() {
             self.close_settings(cx);
         } else {
@@ -2664,6 +2731,43 @@ impl PotsApp {
         cx.notify();
     }
 
+    /// 任務 thread 的「看 diff」（`diff` 為真）或「看 trace」：送出指令，對話框先顯示載入中。
+    pub fn request_task_inspect(&mut self, task: TaskId, diff: bool, cx: &mut Context<Self>) {
+        if self.live.is_none() {
+            self.toast = Some(if diff {
+                "「看 diff」需要連上服務才讀得到任務分支。".into()
+            } else {
+                "「看 trace」需要連上服務才有 trace。".into()
+            });
+            cx.notify();
+            return;
+        }
+        if self.task_inspect.as_ref().map(TaskInspect::task) != Some(task) {
+            self.expanded_trace.clear();
+        }
+        let command = if diff {
+            ClientCommand::TaskDiff { task }
+        } else {
+            ClientCommand::TaskTrace { task }
+        };
+        self.store.outbox.push((self.instance, command));
+        self.task_inspect = Some(TaskInspect::Loading { task, diff });
+        cx.notify();
+    }
+
+    pub fn close_task_inspect(&mut self, cx: &mut Context<Self>) {
+        self.task_inspect = None;
+        self.expanded_trace.clear();
+        cx.notify();
+    }
+
+    pub fn toggle_trace_step(&mut self, key: (usize, usize), cx: &mut Context<Self>) {
+        if !self.expanded_trace.remove(&key) {
+            self.expanded_trace.insert(key);
+        }
+        cx.notify();
+    }
+
     pub fn close_why(&mut self, cx: &mut Context<Self>) {
         self.why = None;
         self.why_tools = None;
@@ -2717,16 +2821,19 @@ impl PotsApp {
                 self.open_settings(SettingsTab::Providers, cx);
             }
             InboxAction::ViewDiff => {
-                let url = self.store.approval(id).and_then(|i| match &i.approval {
-                    Some(ApprovalView {
-                        action: ApprovalActionView::MergePr { url: Some(u), .. },
-                        ..
-                    }) => Some(u.clone()),
+                // 有任務的核准開 app 裡的 diff（對話框裡還有「開 PR」）；沒有任務時才開 PR 網頁。
+                let approval = self.store.approval(id).and_then(|i| i.approval.as_ref());
+                let task = approval.and_then(|a| a.task);
+                let url = approval.and_then(|a| match &a.action {
+                    ApprovalActionView::MergePr { url: Some(u), .. } => Some(u.clone()),
                     _ => None,
                 });
-                match url {
-                    Some(u) => cx.open_url(&u),
-                    None => self.notify_unimplemented(action.label(), cx),
+                match (task, url) {
+                    (Some(task), _) if self.live.is_some() => {
+                        self.request_task_inspect(task, true, cx)
+                    }
+                    (_, Some(u)) => cx.open_url(&u),
+                    _ => self.notify_unimplemented(action.label(), cx),
                 }
             }
             InboxAction::EditConditions => {
@@ -2909,11 +3016,18 @@ impl PotsApp {
             return;
         }
         if self.live.is_some() {
-            // 協定還沒有「留言給 Planner」的指令；要改方向請在對話裡說，或直接改 Brief。
-            self.notify_unimplemented("留言給 Planner", cx);
-            return;
+            // 服務回 `GoalChanged` 時 Team 分頁就有這則留言。
+            self.store.outbox.push((
+                self.instance,
+                ClientCommand::NoteGoal {
+                    goal,
+                    text,
+                    task: None,
+                },
+            ));
+        } else {
+            self.store.post_goal_note(self.instance, goal, text);
         }
-        self.store.post_goal_note(self.instance, goal, text);
         self.set_panel(Some(Panel::Goal(goal, GoalTab::Team)));
         self.goal_note.update(cx, |s, cx| s.clean(window, cx));
         cx.notify();
@@ -2928,11 +3042,22 @@ impl PotsApp {
             return;
         }
         if self.live.is_some() {
-            // 協定還沒有直接對 worker 說話的指令（任務 thread 之後再做）。
-            self.notify_unimplemented("對 worker 說話", cx);
-            return;
+            // 服務還不能直接插話給執行中的 worker：留言連同任務交給 Planner，由它調整或轉達。
+            let Some(goal) = self.store.task(self.instance, task).map(|(g, _)| g.id) else {
+                return;
+            };
+            self.store.outbox.push((
+                self.instance,
+                ClientCommand::NoteGoal {
+                    goal,
+                    text,
+                    task: Some(task),
+                },
+            ));
+            self.toast = Some("已留言給 Planner，在 Goal 的 Team 分頁看得到。".into());
+        } else {
+            self.store.send_to_task(self.instance, task, text);
         }
-        self.store.send_to_task(self.instance, task, text);
         self.worker_note.update(cx, |s, cx| s.clean(window, cx));
         cx.notify();
     }
@@ -3033,6 +3158,7 @@ impl Render for PotsApp {
             .children(self.render_reject_dialog(cx))
             .children(self.render_workdir_dialog(cx))
             .children(self.render_why_dialog(cx))
+            .children(self.render_task_inspect(cx))
             .children(self.render_toast(cx))
     }
 }

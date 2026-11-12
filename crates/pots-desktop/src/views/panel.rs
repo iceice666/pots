@@ -22,6 +22,26 @@ use crate::app::{GoalTab, Panel, PotsApp};
 use crate::model::*;
 use crate::theme;
 
+/// 任務 thread 標題下的「12 分鐘 · 34.5k tokens」。服務還沒有算任務的金額，是 0 時不顯示。
+fn task_usage_line(t: &TaskView, now: Timestamp) -> String {
+    let mut parts = vec![format!("{} 分鐘", t.elapsed_at(now))];
+    if t.cost_cents > 0 {
+        parts.push(format!("${}.{:02}", t.cost_cents / 100, t.cost_cents % 100));
+    }
+    if t.spent_tokens > 0 {
+        parts.push(format!(
+            "{} tokens",
+            super::usage::fmt_tokens(t.spent_tokens)
+        ));
+    }
+    parts.join(" · ")
+}
+
+/// 這個 Goal 有 Planner 可以收留言：進行中，而且不是快速修改或環境分析。
+fn has_planner(g: &GoalView) -> bool {
+    g.state.is_active() && !g.quick && !g.env
+}
+
 pub(super) fn panel_frame() -> Div {
     div()
         .flex_none()
@@ -59,9 +79,8 @@ fn task_state_pill(state: &TaskStateView) -> Div {
     match state {
         TaskStateView::Planned => pill("已規劃", theme::text_muted(), theme::track()),
         TaskStateView::Running => pill("進行中", theme::accent_text(), theme::accent_soft()),
-        TaskStateView::Waiting { on } => {
-            pill(format!("等待 {on}"), theme::warn(), theme::warn_soft())
-        }
+        // 在等什麼寫在下一行（`task_detail`），這裡只標狀態，不重複一長串。
+        TaskStateView::Waiting { .. } => pill("等待中", theme::warn(), theme::warn_soft()),
         TaskStateView::NeedsHuman { .. } => pill("需要你", theme::warn_text(), theme::warn_soft()),
         TaskStateView::Done { .. } => pill("完成", theme::ok(), theme::ok_soft()),
         TaskStateView::Failed { attempts, .. } => pill(
@@ -584,7 +603,7 @@ impl PotsApp {
                                 .flex_none()
                                 .text_size(px(12.))
                                 .text_color(theme::text_muted())
-                                .child(format!("{} 分", t.elapsed_min))
+                                .child(format!("{} 分", t.elapsed_at(self.store.now)))
                         });
                         col = col.child(
                             div()
@@ -742,14 +761,19 @@ impl PotsApp {
                     .py(px(16.))
                     .child(body),
             )
-            .child(note_box(
-                Input::new(&self.goal_note)
-                    .appearance(false)
-                    .into_any_element(),
-                send_button("goal-note-send", 32.)
-                    .on_click(cx.listener(|this, _, window, cx| this.send_goal_note(window, cx)))
-                    .into_any_element(),
-            ))
+            // 連著服務時只有進行中、有 Planner 的 Goal 能留言（快速修改與環境分析沒有 Planner）。
+            .when(self.live.is_none() || has_planner(g), |d| {
+                d.child(note_box(
+                    Input::new(&self.goal_note)
+                        .appearance(false)
+                        .into_any_element(),
+                    send_button("goal-note-send", 32.)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.send_goal_note(window, cx)),
+                        )
+                        .into_any_element(),
+                ))
+            })
     }
 
     fn render_task_panel(
@@ -779,12 +803,7 @@ impl PotsApp {
                     .items_center()
                     .gap(px(8.))
                     .child(task_state_pill(&t.state))
-                    .child(format!(
-                        "{} 分鐘 · ${}.{:02}",
-                        t.elapsed_min,
-                        t.cost_cents / 100,
-                        t.cost_cents % 100
-                    )),
+                    .child(task_usage_line(t, self.store.now)),
             )
             .child(
                 task_detail_line(
@@ -843,8 +862,8 @@ impl PotsApp {
                             .text_size(px(13.))
                             .px(px(12.))
                             .py(px(5.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.notify_unimplemented("看 diff", cx)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_task_inspect(tid, true, cx)
                             })),
                     )
                     .child(
@@ -852,8 +871,8 @@ impl PotsApp {
                             .text_size(px(13.))
                             .px(px(12.))
                             .py(px(5.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.notify_unimplemented("看 trace", cx)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_task_inspect(tid, false, cx)
                             })),
                     )
                     .when(g.state.is_active() && retryable(&t.state), |d| {
@@ -939,7 +958,11 @@ impl PotsApp {
             div()
                 .text_size(px(13.))
                 .text_color(theme::text_muted())
-                .child("還沒有對話。你可以直接對這個 worker 說話。")
+                .child(if self.live.is_some() {
+                    "還沒有對話。"
+                } else {
+                    "還沒有對話。你可以直接對這個 worker 說話。"
+                })
                 .into_any_element()
         } else {
             div()
@@ -968,32 +991,50 @@ impl PotsApp {
                     .child(section_label("這個任務的對話").pt(px(12.)))
                     .child(thread),
             )
-            .child(
+            .child({
+                // 連著服務時留言交給 Planner（附上這個任務）；沒有 Planner 的 Goal 只留說明。
+                let live = self.live.is_some();
+                let can_note = !live || has_planner(g);
+                let hint = if !live {
+                    "訊息只送給這個 worker，Planner 會在 Ledger 看到摘要。"
+                } else if can_note {
+                    "留言連同這個任務交給 Planner，由它調整規劃或轉達 worker。"
+                } else if g.state.is_active() {
+                    "快速修改沒有 Planner；要調整請在對話裡跟負責人說。"
+                } else {
+                    ""
+                };
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .child(
-                        note_box(
-                            Input::new(&self.worker_note)
-                                .appearance(false)
-                                .into_any_element(),
-                            send_button("worker-note-send", 32.)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.send_worker_note(window, cx)
-                                }))
-                                .into_any_element(),
+                    .when(can_note, |d| {
+                        d.child(
+                            note_box(
+                                Input::new(&self.worker_note)
+                                    .appearance(false)
+                                    .into_any_element(),
+                                send_button("worker-note-send", 32.)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.send_worker_note(window, cx)
+                                    }))
+                                    .into_any_element(),
+                            )
+                            .mb(px(0.)),
                         )
-                        .mb(px(0.)),
-                    )
-                    .child(
-                        div()
-                            .px(px(20.))
-                            .pb(px(16.))
-                            .text_size(px(12.))
-                            .text_color(theme::text_muted())
-                            .child("訊息只送給這個 worker，Planner 會在 Ledger 看到摘要。"),
-                    ),
-            )
+                    })
+                    .when(!hint.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .px(px(20.))
+                                .pb(px(16.))
+                                .when(!can_note, |d| d.pt(px(12.)).border_t_1())
+                                .border_color(theme::border())
+                                .text_size(px(12.))
+                                .text_color(theme::text_muted())
+                                .child(hint),
+                        )
+                    })
+            })
     }
 }
