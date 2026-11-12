@@ -11,6 +11,7 @@
 
 mod approvals;
 mod artifacts;
+mod attachments;
 mod automation;
 mod budget;
 mod commands;
