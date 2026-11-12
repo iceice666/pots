@@ -111,7 +111,8 @@ async fn gets_back_the_uploaded_bytes() {
     assert_eq!(res.status, 200, "{}", res.body_text());
     assert_eq!(res.header("content-type"), Some("image/png"));
     assert_eq!(
-        res.header("content-length").map(|v| v.parse::<usize>().unwrap()),
+        res.header("content-length")
+            .map(|v| v.parse::<usize>().unwrap()),
         Some(bytes.len()),
         "Content-Length 要是本體的長度"
     );
@@ -128,7 +129,10 @@ async fn gets_back_the_uploaded_bytes() {
     });
     let mut jpg = Vec::new();
     image::DynamicImage::ImageRgb8(img)
-        .write_to(&mut std::io::Cursor::new(&mut jpg), image::ImageFormat::Jpeg)
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpg),
+            image::ImageFormat::Jpeg,
+        )
         .unwrap();
     let mut headers = auth_headers(&srv);
     headers.push(("Content-Type", "image/jpeg".to_string()));
@@ -194,7 +198,7 @@ async fn requires_the_token() {
     let res = http_get_raw(
         srv.addr(),
         &format!("/attachments/{}", view.id),
-        &[host.clone()],
+        std::slice::from_ref(&host),
     )
     .await;
     assert_eq!(res.status, 401);
