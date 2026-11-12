@@ -124,7 +124,7 @@ worker 讀自己的 worktree；其他 profile 讀的是每個 repo 預設分支�
 flowchart TB
     main["主 agent（Planner）<br/>拆任務、協調、做決定"]
 
-    subgraph subagents["Subagents（同步）"]
+    subgraph subagents["Subagents（唯讀、單次）"]
         explorer["explorer · 查程式碼、讀 log"]
         reviewer["reviewer · 審查 diff"]
     end
@@ -156,15 +156,17 @@ flowchart TB
 | --- | --- | --- | --- |
 | 是誰 | 擁有對話或 Goal 的 agent：chat、planner、 global | 主 agent 在一輪內開出的臨時助手 | Planner 用 `create_task` 建立的 worker |
 | 生命週期 | 永久（對話）或跟著 Goal | 單次 run，回傳結果即結束 | 跟著任務，可掛起、喚醒、跨好幾天 |
-| 同步性 | — | 同步：主 agent 等它回來，可並行多個 | 非同步：透過任務樹與事件 |
+| 同步性 | — | Planner、worker 等它回來；對話 agent、總管不等，結論以系統通知送回。可並行多個 | 非同步：透過任務樹與事件 |
 | context | 自己的記憶或 Brief | 只有主 agent 給的說明 | 任務描述、Brief、 team 貼文 |
 | 能做什麼 | 依 profile | 預設唯讀（explorer、 reviewer） | 依 worker profile，可寫入 |
-| 結果去哪 | 對話或 artifact | 只回到主 agent 的 context | 任務結果、Report、 team 貼文 |
+| 結果去哪 | 對話或 artifact | 只回到主 agent 的 context（工具結果，或對話 agent 的系統通知） | 任務結果、Report、 team 貼文 |
 | 平台紀錄 | `agent_runs` | 子 run （`parent_run_id` ），不建任務 | `tasks` 與 `agent_runs` |
 
 - subagent 是用來保持主 agent 的 context 乾淨。 讀大量程式碼、整理 CI log、審查 diff，把結論帶回來；主 agent 收到的是結論，不是過程。
 
 - 上限。 subagent 不能再開 subagent（深度 1），每輪最多並行 4 個，預算從主 agent 的 run 扣。
+
+- 對話 agent 不等 subagent。 對話 agent 與總管的 `run_subagent` 在背景跑：工具馬上回傳，agent 先告訴你它派人查什麼，這次回覆就結束，你可以繼續說話，不會卡在「排隊中」。結論回來時平台在對話流貼一則「N 個 explorer 回報了結論」的事件，並以系統觸發（和 listener 通知一樣）排進同一個佇列叫醒對話 agent 整理回覆。每個 project 背景最多同時 4 個，超過時工具直接拒絕。按「停止」連背景的 subagent 一起停，被停下的不送結論；服務關閉時也一樣。Planner 與 worker 需要結論才能繼續這一輪，仍然等它們回來。以 `tests/worker.rs` 的 `chat_runs_explorer_subagent_on_mirror` 與 `chat_keeps_talking_while_explorer_runs` 驗證。
 
 - 何時改用 team。 需要寫入、需要等外部事件、或要跨超過一輪的工作，一律不用 subagent，改成 team 任務。
 
