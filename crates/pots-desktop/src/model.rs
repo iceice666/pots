@@ -293,12 +293,15 @@ impl Store {
     }
 
     /// 在 project 對話流尾端加入使用者訊息，並記下要送出的 `Send` 指令。
+    /// `attachments` 是已經上傳好的圖片（見 [`crate::views::composer_attach`]）：
+    /// 訊息本身帶中介資料供畫面顯示，送給服務的只有 ID。
     pub fn send_to_project(
         &mut self,
         instance: InstanceId,
         project: ProjectId,
         text: String,
         mode: SendMode,
+        attachments: Vec<AttachmentView>,
     ) {
         let id = ItemId::new();
         let at = self.now;
@@ -321,7 +324,7 @@ impl Store {
                 narration: Vec::new(),
                 cards: vec![],
                 steer: mode == SendMode::Steer,
-                attachments: Vec::new(),
+                attachments: attachments.clone(),
             }),
         });
         if mode == SendMode::Steer {
@@ -334,8 +337,8 @@ impl Store {
                 id,
                 text,
                 mode,
-                // 圖片附件還沒接（任務 3／4）。
-                attachments: Vec::new(),
+                // 只送 ID：中介資料由伺服器從 `attachments` 表查回來，不信任客戶端。
+                attachments: attachments.into_iter().map(|a| a.id).collect(),
             },
         ));
     }

@@ -17,6 +17,19 @@ serde_json.workspace = true
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 tokio-tungstenite = "0.30"
+# 圖片附件：驗證 magic number、BMP/TIFF（macOS 截圖、Windows 螢幕剪取）轉 PNG。
+# 版本已在 lock（`gpui-pre` 也依賴它），升為一般依賴不會新增版本。
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+    "gif",
+    "bmp",
+    "tiff",
+] }
+# 圖片上傳走 HTTP（`POST /attachments`），不走 WebSocket：大圖塞文字 frame 不理想。
+# 服務在本機 loopback，不需要 TLS（與 `ws://` 一致）。
+reqwest = { version = "0.13", default-features = false, features = ["query"] }
 tracing = "0.1"
 # 桌面通知（核准、需要你處理的任務、Goal 完成）；服務沒有視窗，所以由客戶端發出。
 notify-rust = "4"
@@ -27,7 +40,6 @@ libc = "0.2"
 [dev-dependencies]
 # 離屏 renderer 與 HeadlessAppContext。
 gpui-kit = { workspace = true, features = ["test-support"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
 pots-llm = { path = "../pots-llm", features = ["test-util"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }

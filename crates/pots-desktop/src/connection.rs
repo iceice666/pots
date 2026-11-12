@@ -13,7 +13,9 @@ use futures::{SinkExt as _, StreamExt as _};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{self, Message, client::IntoClientRequest as _};
 
-use crate::model::{ClientCommand, ConnectionState, ItemId, ServerEvent};
+use crate::model::{
+    AttachmentView, ClientCommand, ConnectionState, ItemId, ProjectId, ServerEvent,
+};
 
 /// 連線位置與存取 token。
 #[derive(Clone)]
@@ -38,6 +40,8 @@ pub trait Endpoint: Send + 'static {
 #[derive(Debug)]
 pub enum ConnEvent {
     State(ConnectionState),
+    /// 連線用的目標（位址與 token）。連上之後才有，圖片上傳要用。
+    Target(Target),
     Server(Box<ServerEvent>),
     /// 找不到或啟動不了服務等需要讓人知道的錯誤。
     Problem(String),
@@ -85,6 +89,120 @@ pub fn spawn(
 }
 
 type Events = futures::channel::mpsc::UnboundedSender<ConnEvent>;
+
+/// 一張要上傳的圖片。位元組已經驗證過、必要時也轉好檔了（見
+/// [`crate::views::composer_attach`]）。
+pub struct UploadJob {
+    /// 客戶端配的號；上傳結果用它配回待送圖片。
+    pub key: u64,
+    pub mime: String,
+    pub filename: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+/// 圖片上傳的結果：`(key, 中介資料或中文原因)`。
+pub type UploadResult = (u64, Result<AttachmentView, String>);
+
+/// 圖片上傳。走自己的執行緒與 tokio runtime：`reqwest` 需要 tokio 的 reactor，
+/// GPUI 的背景 executor 不是 tokio；和連線執行緒分開，上傳大圖時不會卡住 WebSocket
+/// 的 `select!`。失敗一律回中文原因（伺服器的錯誤本來就是純文字中文，照顯示）。
+pub struct Uploads {
+    jobs: mpsc::UnboundedSender<(Target, ProjectId, UploadJob)>,
+}
+
+impl Uploads {
+    pub fn spawn() -> (
+        Uploads,
+        futures::channel::mpsc::UnboundedReceiver<UploadResult>,
+    ) {
+        let (job_tx, mut job_rx) = mpsc::unbounded_channel::<(Target, ProjectId, UploadJob)>();
+        let (res_tx, res_rx) = futures::channel::mpsc::unbounded();
+        std::thread::Builder::new()
+            .name("pots-uploads".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = res_tx.unbounded_send((0, Err(format!("無法啟動上傳：{e}"))));
+                        return;
+                    }
+                };
+                runtime.block_on(async move {
+                    let client = match reqwest::Client::builder()
+                        .timeout(Duration::from_secs(60))
+                        .build()
+                    {
+                        Ok(client) => client,
+                        Err(e) => {
+                            let _ = res_tx
+                            .unbounded_send((0, Err(format!("無法建立 HTTP client：{e}"))));
+                            return;
+                        }
+                    };
+                    while let Some((target, project, job)) = job_rx.recv().await {
+                        let key = job.key;
+                        let result = upload_one(&client, &target, project, job).await;
+                        if res_tx.unbounded_send((key, result)).is_err() {
+                            return;
+                        }
+                    }
+                });
+            })
+            .expect("無法建立上傳執行緒");
+        (Uploads { jobs: job_tx }, res_rx)
+    }
+
+    pub fn upload(&self, target: Target, project: ProjectId, job: UploadJob) {
+        let _ = self.jobs.send((target, project, job));
+    }
+}
+
+/// `POST /attachments?project=<id>[&filename=<name>]`，raw bytes body。
+///
+/// 守衛（`gateway.rs`）：`Host` 要剛好是 `127.0.0.1:<port>`、要帶
+/// `Authorization: Bearer <token>`、**不能送 `Origin`**。`reqwest` 不會自己送 `Origin`，
+/// 所以只要別加就行。
+async fn upload_one(
+    client: &reqwest::Client,
+    target: &Target,
+    project: ProjectId,
+    job: UploadJob,
+) -> Result<AttachmentView, String> {
+    let url = format!("http://{}/attachments", target.addr);
+    let mut query: Vec<(&str, String)> = Vec::new();
+    query.push(("project", project.to_string()));
+    if let Some(name) = &job.filename {
+        query.push(("filename", name.clone()));
+    }
+    let response = client
+        .post(&url)
+        .query(&query)
+        .header(reqwest::header::CONTENT_TYPE, job.mime.clone())
+        .bearer_auth(&target.token)
+        .body(job.bytes)
+        .send()
+        .await
+        .map_err(|e| format!("連不上服務：{e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::OK {
+        return response
+            .json::<AttachmentView>()
+            .await
+            .map_err(|e| format!("看不懂服務的回應：{e}"));
+    }
+    let message = response
+        .text()
+        .await
+        .unwrap_or_else(|_| status.to_string());
+    Err(if message.trim().is_empty() {
+        format!("上傳失敗（HTTP {}）", status.as_u16())
+    } else {
+        message.trim().to_string()
+    })
+}
 
 /// 跨越多次連線保留的狀態。
 #[derive(Default)]
@@ -226,6 +344,13 @@ async fn session(
     .map_err(|_| SessionEnd::Closed)?;
     if events
         .unbounded_send(ConnEvent::State(ConnectionState::Connected))
+        .is_err()
+    {
+        return Ok(());
+    }
+    // 圖片上傳要用同一個位址與 token；UI 在連上之前不會有它。
+    if events
+        .unbounded_send(ConnEvent::Target(target.clone()))
         .is_err()
     {
         return Ok(());

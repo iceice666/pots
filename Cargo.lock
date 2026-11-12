@@ -5876,6 +5876,7 @@ dependencies = [
  "pots-llm",
  "pots-proto",
  "pots-server",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
