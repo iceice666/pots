@@ -530,16 +530,28 @@ impl ArtifactEditor for TableEditor {
         }
     }
 
-    /// The cell or column name being edited is closed and what was typed
-    /// in it dropped (the app saved it into the table before an agent's
-    /// change, so it is lost only where the agent rewrote the table). The
-    /// selection stays where it was, within the new table's size.
+    /// The cell or column name being edited stays open if the new table
+    /// still has it with the text typed so far (the agent added rows or
+    /// renamed: the app saved the edit before its change), so typing goes
+    /// on. Otherwise it is closed and the agent's text wins. The selection
+    /// stays where it was, within the new table's size.
     fn replace(&mut self, content: ArtifactContent, cx: &mut Context<Self>) {
         let ArtifactContent::Table(table) = content;
-        let was_editing = self.editing(cx).is_some();
+        let editing = self.editing(cx);
+        let text = self.input.read(cx).value().to_string();
+        let same_columns = table.columns.len() == self.state.read(cx).delegate().table.columns.len();
+        let keep = same_columns
+            && match editing {
+                Some(Editing::Cell(row, col)) => table.rows.get(row).and_then(|r| r.get(col)) == Some(&text),
+                Some(Editing::Column(col)) => table.columns.get(col) == Some(&text),
+                None => false,
+            };
+        let was_editing = editing.is_some() && !keep;
         self.state.update(cx, |state, cx| {
             let delegate = state.delegate_mut();
-            delegate.editing = None;
+            if !keep {
+                delegate.editing = None;
+            }
             delegate.table = table;
             let (rows, cols) = (delegate.table.rows.len(), delegate.table.columns.len());
             state.refresh(cx);

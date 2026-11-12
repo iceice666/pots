@@ -211,15 +211,7 @@ fn read_artifact(ws: &Workspace, input: &Value) -> Result<String, String> {
 fn create_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
     let c = channel(ws, input)?;
     let title = title(&input["title"])?.ok_or("`title` is required.")?;
-    if let Some(a) = ws.artifacts.iter().find(|a| a.channel == c && a.title.eq_ignore_ascii_case(&title)) {
-        return Err(format!(
-            "#{} already has a {} titled “{}” (id {}). Change it with update_table, or pick another title.",
-            ws.channels[c].name,
-            a.kind.label().to_lowercase(),
-            a.title,
-            a.id
-        ));
-    }
+    title_free(ws, c, &title, None)?;
     let columns = columns(&input["columns"])?.ok_or("`columns` is required: the column names, left to right.")?;
     let rows = match &input["rows"] {
         Value::Null => Vec::new(),
@@ -241,6 +233,22 @@ fn create_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
     })
 }
 
+/// An error if another artifact in channel `c` than `except` already has
+/// `title` (ignoring case): two tabs of the same name are hard to tell
+/// apart, and a retried create would make a second one.
+fn title_free(ws: &Workspace, c: usize, title: &str, except: Option<usize>) -> Result<(), String> {
+    match ws.artifacts.iter().find(|a| a.channel == c && Some(a.id) != except && a.title.eq_ignore_ascii_case(title)) {
+        Some(a) => Err(format!(
+            "#{} already has a {} titled “{}” (id {}). Change it with update_table, or pick another title.",
+            ws.channels[c].name,
+            a.kind.label().to_lowercase(),
+            a.title,
+            a.id
+        )),
+        None => Ok(()),
+    }
+}
+
 fn update_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
     let id = artifact_id(ws, input)?;
     let old = table(ws, id)?;
@@ -256,6 +264,9 @@ fn update_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
     };
     if new_title.is_none() && new_rows.is_none() {
         return Err("Nothing to change: give `title`, `rows`, or `columns` with `rows`.".into());
+    }
+    if let Some(t) = &new_title {
+        title_free(ws, ws.artifact(id).expect("checked").channel, t, Some(id))?;
     }
     let table = Table {
         columns: new_columns.unwrap_or_else(|| old.columns.clone()),
@@ -601,6 +612,22 @@ mod tests {
         }
         assert!(err(read(&ws, READ_ARTIFACT, &json!({"id": id}))).contains("couldn't be read"));
         assert!(read(&ws, LIST_ARTIFACTS, &json!({"channel": "general"})).unwrap().contains("(its file can't be read)"));
+    }
+
+    #[test]
+    fn renaming_keeps_titles_apart_in_a_channel() {
+        let mut ws = data::seed();
+        let make = |ws: &mut Workspace, channel: &str, title: &str| {
+            write(ws, CREATE_TABLE, &json!({"channel": channel, "title": title, "columns": ["A"]})).unwrap().id
+        };
+        let (a, b) = (make(&mut ws, "general", "Plan"), make(&mut ws, "general", "Budget"));
+        make(&mut ws, "engineering", "Ideas");
+        let e = err(write(&mut ws, UPDATE_TABLE, &json!({"id": b, "title": "plan", "rows": [["x"]]})));
+        assert_eq!(e, format!("#general already has a table titled “Plan” (id {a}). Change it with update_table, or pick another title."));
+        assert_eq!((ws.artifact(b).unwrap().title.as_str(), table_of(&ws, b).rows.len()), ("Budget", 0), "nothing changed");
+        // Its own title in other case, and a title used in another channel, are fine.
+        assert!(write(&mut ws, UPDATE_TABLE, &json!({"id": a, "title": "PLAN"})).unwrap().title);
+        assert!(write(&mut ws, UPDATE_TABLE, &json!({"id": b, "title": "Ideas"})).unwrap().title);
     }
 
     #[test]

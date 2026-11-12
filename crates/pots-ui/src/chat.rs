@@ -1082,12 +1082,7 @@ impl ChatApp {
     /// elsewhere) and in the editor if it's open there, and said under the
     /// reply, so the owner sees what the agent did.
     fn artifact_tool(&mut self, id: usize, name: &str, input: &serde_json::Value, cx: &mut Context<Self>) -> (String, bool) {
-        if let MainView::Artifact { frame, .. } = &self.view {
-            let frame = frame.clone();
-            if let Some(content) = frame.update(cx, |f, cx| f.unsaved(cx)) {
-                self.save_artifact(frame.read(cx).id, content);
-            }
-        }
+        self.save_open_artifact(None, cx);
         if !artifact_tools::is_write(name) {
             return agent::tools::run(&self.ws, name, input);
         }
@@ -1095,6 +1090,9 @@ impl ChatApp {
             Ok(changed) => changed,
             Err(e) => return (e, true),
         };
+        if !changed.content && !changed.title {
+            return (changed.result, false);
+        }
         let artifact = changed.id;
         // Its file first: a workspace listing it is never saved without it.
         if changed.content {
@@ -3747,6 +3745,13 @@ mod tests {
         let t = table(&app, id, cx);
         assert_eq!((t.cell(0, 0), t.cell(1, 0), t.cell(5, 0)), ("saved soon", "typing!", "new"));
         assert_eq!(on_disk(&home, id)["rows"].as_array().unwrap().len(), 6);
+        // Only rows were added: the cell is still being typed in, and Enter keeps it.
+        cx.simulate_input("?");
+        cx.simulate_keystrokes("enter");
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(table(&app, id, cx).cell(1, 0), "typing!?");
+        assert_eq!(on_disk(&home, id)["rows"][1][0], "typing!?");
         let note = app.read_with(cx, |app, _| app.ws.locate(reply).and_then(|(c, ix)| app.ws.message(c, ix).note.clone())).unwrap();
         assert_eq!(note, "Renamed table “Plan” in #engineering (3 columns × 5 rows).\nAdded 1 row to table “Plan” in #engineering (3 columns × 6 rows).");
     }

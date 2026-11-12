@@ -43,8 +43,10 @@ pub trait ArtifactEditor: Render + Focusable + EventEmitter<EditorEvent> {
     /// Take the keyboard focus, where typing should go.
     fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>);
     /// Show `content` (of the editor's kind), written by someone else: an
-    /// edit in progress is dropped, so it can't later write over it. No
-    /// window needed: an agent's tool call has none.
+    /// edit in progress is dropped, so it can't later write over it, unless
+    /// the new content still has what it typed there (rows were only added,
+    /// say), where typing goes on. No window needed: an agent's tool call
+    /// has none.
     fn replace(&mut self, content: ArtifactContent, cx: &mut Context<Self>);
 }
 
@@ -206,8 +208,9 @@ impl ArtifactFrame {
     }
 
     /// Show `content`, now saved, in place of what the editor has: an
-    /// agent changed the artifact. Edits not saved yet are dropped, and so
-    /// is a save waiting to happen, so neither brings the old content back.
+    /// agent changed the artifact. Edits not saved yet are dropped (see
+    /// `ArtifactEditor::replace`), and so is a save waiting to happen, so
+    /// neither brings the old content back.
     /// (The app saves what the frame had before letting the agent at it.)
     pub fn replace(&mut self, content: ArtifactContent, cx: &mut Context<Self>) {
         self.save_task = None;
