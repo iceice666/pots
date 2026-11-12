@@ -389,9 +389,9 @@ mod tests {
         assert!(pending.is_empty());
         assert!(pending.take_jobs().is_empty());
 
-        // SVG 看得懂但不是我們收的格式。
-        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#.to_vec();
-        let err = pending.accept_bytes(svg, None).expect_err("不收 SVG");
+        // 看得懂、但不在白名單裡的格式（ICO 的 magic number）。
+        let ico = vec![0, 0, 1, 0, 0, 0, 0, 0];
+        let err = pending.accept_bytes(ico, None).expect_err("不收 ICO");
         assert!(err.contains("只支援 png、jpeg、webp、gif"), "{err}");
 
         // 空檔案。

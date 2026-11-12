@@ -1932,6 +1932,61 @@ mod tests {
         assert!(store.listener(home, listener).is_none());
     }
 
+    fn attachment(id: u64) -> AttachmentView {
+        AttachmentView {
+            id: AttachmentId::from_u64(id),
+            mime: "image/png".into(),
+            bytes: 68,
+            width: Some(1),
+            height: Some(1),
+            filename: None,
+        }
+    }
+
+    /// 附件要到得了兩邊：訊息的 `attachments` 給畫面顯示，`Send` 只帶 ID（伺服器查
+    /// 中介資料，不信任客戶端）。
+    #[test]
+    fn sending_with_attachments_only_puts_ids_on_the_wire() {
+        let mut store = super::store();
+        let home = InstanceId::from_u64(2);
+        let auth = store.instances[1].projects[0].id;
+        store.outbox.clear();
+        let views = vec![attachment(7), attachment(8)];
+        store.send_to_project(
+            home,
+            auth,
+            "這兩張圖".into(),
+            SendMode::Queue,
+            views.clone(),
+        );
+
+        let p = store.project(home, auth).unwrap();
+        let StreamItemKind::Human(m) = &p.items.last().unwrap().kind else {
+            panic!("expected human message");
+        };
+        assert_eq!(m.attachments, views);
+
+        let (_, command) = store.outbox.last().unwrap();
+        let ClientCommand::Send { attachments, text, .. } = command else {
+            panic!("應該送出 Send");
+        };
+        assert_eq!(*attachments, [AttachmentId::from_u64(7), AttachmentId::from_u64(8)]);
+        assert_eq!(text, "這兩張圖");
+    }
+
+    /// 沒有附件時送出的指令與以前完全一樣（空 vec，序列化時省略）。
+    #[test]
+    fn sending_without_attachments_is_unchanged() {
+        let mut store = super::store();
+        let home = InstanceId::from_u64(2);
+        let auth = store.instances[1].projects[0].id;
+        store.outbox.clear();
+        store.send_to_project(home, auth, "只有文字".into(), SendMode::Queue, Vec::new());
+        let (_, command) = store.outbox.last().unwrap();
+        let encoded = serde_json::to_string(command).expect("序列化");
+        assert!(!encoded.contains("attachments"), "{encoded}");
+    }
+
     #[test]
     fn queued_while_busy() {
         let mut store = store();
