@@ -27,7 +27,7 @@
 
 - 改方向。 你在對話中改變主意時，對話 agent 呼叫 `steer_goal` 更新 brief 並發出 steer 事件，Planner 被喚醒後重新規劃。
 
-- 回報。 Planner 的里程碑與升級事件以卡片形式回到對話流，對話 agent 可以在下一輪看到並轉述。
+- 回報。 Planner 的里程碑記在 Goal 的「動態」（`goal_activity`），只有 Goal 結束與需要使用者處理的事才以卡片回到對話流；對話 agent 在下一輪的 instructions 看得到最近的動態並可以轉述。
 
 - 好處。 Planner 的 context 小而穩定，容易快取；brief 本身也是你可以檢視、修改的「這個 Goal 到底要做什麼」。
 
@@ -181,7 +181,7 @@ M1 起對話 agent 的歷史由 OM 組成：記憶區塊加上 `om_raw` 裡還�
 
 M2 先把 Planner 的 run 改走持久化佇列（`crates/pots-server/src/planner.rs`）：觸發和改狀態寫在同一個 transaction，同一個 Goal 已有排隊中的 run 時把觸發併進去；每個 Goal 同時最多一個 `running`，整個實例最多並行 4 個。SQLite 沒有 `SKIP LOCKED`，由單一 runner 在 `BEGIN IMMEDIATE` 的 transaction 裡挑選並標記。steer 中斷這個 Goal 正在跑的 run；服務關閉時被中斷的 run 回到 `queued`（不算一次重試），當掉留下的 `running` 在下次啟動時放回佇列，取走超過 3 次就標成失敗。對話 agent 仍由記憶體裡的 lane 排程（每個 project 一個），只在開始時寫一列 `running`。
 
-Planner 的里程碑不寫進對話 agent 的 `om_raw`：寫成使用者訊息會讓 Observer 誤認成使用者說的話，寫在 run 進行中也會拆散工具呼叫與結果。改成對話 agent 每次 run 的 instructions 帶著「進行中的 Goal」與「最近 5 張里程碑」，它在下一輪就看得到並轉述；細節仍以 `get_status` 為準。
+Planner 的里程碑不寫進對話 agent 的 `om_raw`：寫成使用者訊息會讓 Observer 誤認成使用者說的話，寫在 run 進行中也會拆散工具呼叫與結果。改成對話 agent 每次 run 的 instructions 帶著「進行中的 Goal」與「最近 5 筆 Goal 動態」（`goal_activity`，不只貼到對話流的那些），它在下一輪就看得到並轉述；細節仍以 `get_status` 為準。
 
 ### ChatGPT Plan provider：內建 agent 的模型推論後端
 
@@ -287,7 +287,7 @@ M4 依上面的設計實作在 `crates/pots-server/src/worker/`（加上 `0006_w
 - **Claude Code adapter。** 參數照 OpenClaw：`--print --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --permission-mode default --setting-sources user --strict-mcp-config --mcp-config <檔>`，加上 `--append-system-prompt`（worker 規則）、`--allowedTools`（平台工具）、`--disallowedTools`（背景常駐與排程類）與 `--session-id=`／`--resume=`，不經 shell。容器裡共用的 home 不可信（之前的 run 可能寫進 hooks），所以改成 `--setting-sources=`（不讀任何 settings.json）加上平台產生的 `--settings`（`disableAllHooks`）；本機用 `--setting-sources=user`。prompt 從 stdin 送入；worker 規則之外另外說明 Claude Code 該用自己的 Read／Edit／Bash／Task，平台工具是 `mcp__pots__*`。原生工具的權限經 `can_use_tool` 回到平台：容器就是沙箱，一律放行，只擋 `git push` 與背景執行的 Bash（擋 push 是盡力而為，真正的保護是容器裡沒有憑證）。平台工具（worker profile 去掉 CLI 自己就有的改檔、執行、subagent）經 `rmcp` 的 streamable HTTP MCP server（`/mcp`）提供：每個 run 一個只在這次有效的 capability token，工具清單與範圍由平台決定；不經 gateway 的本機 token 與 `Host` 檢查，改有自己的 Host 白名單（loopback 與 `host.docker.internal`）與 capability，帶 `Origin` 的一律拒絕。`wait_for` 只能等 project 監看的 repo。結束工具成功時平台送 `interrupt`，等 CLI 收尾，逾時才 SIGTERM／SIGKILL 整個行程群組（容器是移除容器）；一輪結束卻沒有呼叫結束工具時提醒一次。登入失效、額度用完、CLI 錯誤依結構化欄位分類（不只看英文字串），任務轉 `NeedsHuman` 並說明要怎麼做。
 - **續接。** session ID 在啟動 CLI 之前寫進 `worker_sessions`（連同官方 session 所在的 home 與工作目錄）。被喚醒、服務重啟後用 `--resume` 接著做；容器模式先確認專屬 home 裡的 session 檔還在，CLI 回報找不到 session 時（error result 或 stderr，比對 CLI 的英文訊息）開新的、帶完整 context。
 - **登入。** Pots 不讀、不轉存 Claude 憑證。設定的「Worker」類別給一行指令（容器：掛專屬 home 跑 image 裡的 `claude`），你在終端機跑、在 Claude Code 裡 `/login` 完成官方登入。
-- **快速通道。** 對話 agent 的 `quick_fix`（與 listener 的「快速修正」）開一個 `quick` 種類的 Goal（Brief 是描述）加一個任務，直接派給 worker、不排 Planner。任務完成或失敗時 Goal 跟著結束，結果以里程碑卡片貼回對話；你取消它的任務時 Goal 一起取消。worker 用 `escalate` 時升級成一般 Goal（Brief 補上「升級原因」——以引用區塊標明是 worker 的說法——與分支）並叫醒 Planner。快速修改沒有 Planner：對話 agent 不能 steer 它（要改就取消再開），你改 Brief、外部事件都不排 Planner，也不訂閱資源，worker 也不能發問題給 Planner。
+- **快速通道。** 對話 agent 的 `quick_fix`（與 listener 的「快速修正」）開一個 `quick` 種類的 Goal（Brief 是描述）加一個任務，直接派給 worker、不排 Planner。任務完成或失敗時 Goal 跟著結束，結果以里程碑卡片貼回對話（卡住需要你處理時也是；升級成一般 Goal 只記在動態）；你取消它的任務時 Goal 一起取消。worker 用 `escalate` 時升級成一般 Goal（Brief 補上「升級原因」——以引用區塊標明是 worker 的說法——與分支）並叫醒 Planner。快速修改沒有 Planner：對話 agent 不能 steer 它（要改就取消再開），你改 Brief、外部事件都不排 Planner，也不訂閱資源，worker 也不能發問題給 Planner。
 - **Subagent。** 對話 agent、Planner 與內建 worker 有 `run_subagent`：一次最多 4 個並行的 explorer 或 reviewer，只有唯讀工具，不能再開 subagent。worker 開的讀自己的工作目錄，其他的讀 repo 預設分支的鏡像；每個是一筆 `agent_runs`（`parent_run_id`），用量算進 Goal。
 - **Team 貼文。** `post_to_team`／`read_team`（`team_posts`、`team_reads`）：worker 發 finding、question、blocker、handoff，Planner 發 decision、finding、handoff。沒有指定對象的 question 與 blocker 叫醒 Planner；handoff 與 Planner 指定任務的 decision 叫醒那個任務（等待中的回到佇列，worker 會被告知原本在等什麼；Planner 的回答也能叫醒用 escalate 交回、在等它決定的任務，但重新登入、重試用完這類要你處理的不會）。worker 遇到要決定的事就發 question 並 `escalate`，Planner 以 decision 回答時被叫醒接著做；每次 run 開始時觸發訊息帶上上次之後的新貼文；同一個 Goal 每小時最多 30 則。桌面版在 Goal 面板的 Team 分頁。
 - **延後與已知限制。** CI 失敗自動修（最多 3 次）與「可以 merge」的核准卡片（M5 已實作）、桌面版的任務 thread（直接對 worker 說話、完整串流）、每個 project 各自選 worker 後端（目前是整個實例一份設定）、容器的對外網路白名單、訂閱額度的預算與 Claude Code 用量的記帳（M6）、清掉結束很久的工作目錄。同一個實例的 Claude Code worker 共用一個 Claude Code 設定目錄（登入與官方 session 檔），任務與 project 之間讀得到、也改得到彼此的 session 紀錄；改成每個 project 一份（並驗證登入與 refresh）要對真的 Claude Code 做原型。`--setting-sources=`（空值）的行為與 `CLAUDE_CONFIG_DIR` 下的登入檔位置也要對真的 CLI 確認。本機執行沒有沙箱，listener 觸發的快速修改也會在本機跑（之後拿掉了本機執行，見[Project 環境](#project-環境由環境-worker-建立)）。team 貼文在 run 開始時就記成已讀（run 沒能開始時不會重送）。

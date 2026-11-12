@@ -10,11 +10,11 @@
 | --- | --- | --- | --- |
 | 和 agent 討論功能 | 主對話流（每個 project 一條） | OM 記憶 + 最近原始訊息 + 即時狀態 | 討論收斂時 agent 開一張草稿 Goal 卡片，你看過 Brief 按「開始」 |
 | 核准 | 對話中的內嵌卡片、全域 Inbox、手機推播 | Task Store | 一鍵核准或拒絕，可附一句理由 |
-| 看進度 | 側邊狀態面板（任務樹、 PR、CI） | Task Store 即時查詢 | 對話裡只出現里程碑卡片 |
+| 看進度 | 側邊狀態面板（任務樹、動態、 PR、CI） | Task Store 即時查詢 | 對話裡只出現 Goal 卡片、核准與 Goal 的結果 |
 
 沒有 session，但工作有結構。 主對話永遠是同一條。當討論收斂成具體工作，agent 開一張 Goal 卡片，後續細節掛在卡片的 thread 下，主流不被洗版。
 
-進度不灌進對話。 對話裡只放里程碑：Goal 已建立、PR 已開、需要核准、Goal 完成或失敗。細節在狀態面板。
+進度不灌進對話。 對話裡只放要你知道或決定的事：Goal 卡片（狀態與 Planner 的最後一句話會隨時更新）、需要核准、需要你處理、Goal 完成或失敗。Planner 的里程碑（規劃完成、改派重試）、開工與 Planner 叫醒自己的排程只記在 Goal 面板的「動態」分頁，不貼到對話、也不通知。
 
 看得到 agent 在做事。 對話 agent 呼叫工具前會先用一句話說它要做什麼（「我先查一下目前的 Goal 狀態。」）。這些旁白在回覆串流中以淡色顯示在訊息裡；回覆完成後訊息只留最後的回答，旁白收進「為什麼這樣回答」面板，和模型輪、工具呼叫依序排在一起。最後一輪沒有文字時（例如回答寫在結束 run 的工具呼叫旁），最後一段旁白當成回答。
 
@@ -125,7 +125,7 @@ pub enum ClientCommand {
 
 - 記憶：快照裡每個 project 帶著 `MemoryView`；Observer、Reflector 或你的修改讓記憶變了就送一筆 `Memory` 整份替換。觀察的修改被拒絕時，除了 `Error` 也重送一次目前的 `Memory`，客戶端先改的內容會被蓋回去。
 
-- 任務樹與 artifact：快照裡每個 project 帶著所有 Goal（含任務樹與 Brief 全文）與 artifact；任何變化都送一筆 `GoalChanged` 或 `ArtifactChanged` 整筆替換，客戶端不用自己拼狀態。Planner 的里程碑是對話流裡的 `Card::Milestone`。`SaveArtifact` 被拒絕（同一段兩邊都改過）時只回 `Error`，草稿留在客戶端；`Cancel { task }` 取消一個還沒結束的任務。
+- 任務樹與 artifact：快照裡每個 project 帶著所有 Goal（含任務樹與 Brief 全文）與 artifact；任何變化都送一筆 `GoalChanged` 或 `ArtifactChanged` 整筆替換，客戶端不用自己拼狀態。Goal 的進展是 `GoalView::activity`（`goal_activity` 表），在 Goal 面板的「動態」分頁；只有 Goal 結束與快速修改需要你處理時，同一句話也以 `Card::Milestone` 貼到對話流。`SaveArtifact` 被拒絕（同一段兩邊都改過）時只回 `Error`，草稿留在客戶端；`Cancel { task }` 取消一個還沒結束的任務。
 
 - 工作資料夾：快照的 `ProjectSnapshot` 帶 `workdir`；建立、設定或 agent 的 `set_workdir` 成功後送一筆 `ProjectWorkdir` 整份替換。自動化分頁的 `ProjectRepos` 只影響監看，不影響 worker 在哪工作。本機資料夾的核准是 `ApplyChanges`（路徑、分支、sha），核准後平台才線性套用（岔開時把任務 commit 接到你的分支後面）。
 

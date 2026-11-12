@@ -196,5 +196,5 @@ pub enum TeamPost {
 
 - 沉澱。 Goal 結束時，Planner 把有長期價值的 Finding 整理成 Project Notes 提案。
 
-- 和對話的關係。 team 貼文不進 OM，對話裡只看得到 Planner 轉出的里程碑；你想看細節時在 Goal 面板的 Team 分頁裡看。
+- 和對話的關係。 team 貼文不進 OM，Planner 的里程碑記在 Goal 面板的「動態」分頁，對話裡只看得到 Goal 的結果；你想看細節時在 Goal 面板的 Team 分頁裡看。
 
