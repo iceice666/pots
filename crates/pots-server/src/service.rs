@@ -54,20 +54,35 @@ pub async fn chatgpt_deps(data_dir: &Path, model: Option<String>) -> Result<Deps
     let base = Url::parse(DEFAULT_BASE_URL).map_err(|e| Error::Config(e.to_string()))?;
     let provider = ResponsesProvider::new(base, auth.clone(), http.clone());
     let control = SiwcControl::new(auth);
+    // 圖片來源：這裡只有一個空槽（讀檔要資料庫），`crate::start` 把 `StoreImages` 填進去；
+    // provider 與 `Deps::images` 共用同一個槽，所以填的就是推論路徑用的。
     let images = crate::images::ImageSlot::new();
     let auto = Arc::new(
         AutoModel::new(provider, model.is_none(), control.status())
             .with_images(Arc::new(images.clone())),
     );
-    Ok(Deps {
-        provider: auto.clone(),
-        model: model.unwrap_or_else(|| AUTO_MODEL.into()),
-        model_auth: Arc::new(control),
-        api_providers: Arc::new(
-            HttpApiProviders::new(http, Some(auto)).with_images(Arc::new(images.clone())),
-        ),
-        images,
-    })
+    let mut deps = Deps::new(
+        auto.clone(),
+        model.unwrap_or_else(|| AUTO_MODEL.into()),
+        Arc::new(control),
+    );
+    deps.images = images;
+    Ok(deps.with_http_api_providers(http, Some(auto)))
+}
+
+impl Deps {
+    /// 換成正式組裝的 API provider 工廠，並讓它與 [`Deps::images`] 共用同一個圖片來源槽：
+    /// [`start`](crate::start) 填進去的讀檔來源就是這些 provider 發請求時用的來源。
+    pub fn with_http_api_providers(
+        mut self,
+        http: pots_llm::reqwest::Client,
+        chatgpt: Option<Arc<AutoModel>>,
+    ) -> Self {
+        self.api_providers = Arc::new(
+            HttpApiProviders::new(http, chatgpt).with_images(Arc::new(self.images.clone())),
+        );
+        self
+    }
 }
 
 /// 用 ChatGPT 授權啟動服務，直到收到結束訊號。
