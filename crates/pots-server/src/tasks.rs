@@ -623,6 +623,14 @@ async fn task_view(conn: &mut SqliteConnection, t: &TaskRow) -> Result<TaskView,
         pr: t.pr.clone(),
         pr_url: t.pr_url.clone(),
         progress: t.progress.clone(),
+        started_at: t.started_at,
+        finished_at: t.finished_at,
+        spent_tokens: sqlx::query_scalar::<_, i64>("SELECT spent_tokens FROM tasks WHERE id = ?")
+            .bind(t.id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?
+            .unwrap_or(0)
+            .max(0) as u64,
     })
 }
 

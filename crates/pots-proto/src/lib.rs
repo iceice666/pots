@@ -36,7 +36,8 @@ use uuid::Uuid;
 /// - 17：Goal 草稿（`GoalState::Draft`、`StartGoal`、`DiscardGoal`）。
 /// - 18：project 環境（`EnvSpec`、`ProjectEnvView`、`ProjectEnv`、`SetupProjectEnv`、`UseProjectEnv`、
 ///   `GoalView::env`、快照帶 project 的環境）；worker 只在容器裡執行。
-pub const PROTOCOL_VERSION: u32 = 18;
+/// - 19：任務的 diff 與 trace（`TaskDiff`、`TaskTrace`）、在 Goal 留言給 Planner（`NoteGoal`）。
+pub const PROTOCOL_VERSION: u32 = 19;
 
 mod presets;
 pub use presets::{CatalogModel, PresetApi, ProviderPreset, preset_for, provider_presets};
@@ -740,6 +741,27 @@ pub struct TaskView {
     /// worker 最後一句進度。
     #[serde(default)]
     pub progress: String,
+    /// 開始與結束的時間；客戶端據此算耗時，不用等下一次 `GoalChanged`。
+    #[serde(default)]
+    pub started_at: Option<Timestamp>,
+    #[serde(default)]
+    pub finished_at: Option<Timestamp>,
+    /// 這個任務用掉的 token（worker 與它叫的 subagent）。
+    #[serde(default)]
+    pub spent_tokens: u64,
+}
+
+impl TaskView {
+    /// 到 `now` 為止做了幾分鐘；沒有開始時間時用伺服器算好的 `elapsed_min`。
+    pub fn elapsed_at(&self, now: Timestamp) -> u32 {
+        match self.started_at {
+            Some(start) => {
+                let end = self.finished_at.unwrap_or(now);
+                ((end.0 - start.0).max(0) / 60) as u32
+            }
+            None => self.elapsed_min,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1829,6 +1851,43 @@ pub struct WhyView {
     pub steps: Vec<TraceStepView>,
 }
 
+/// 任務分支相對基準分支的改動（任務 thread 的「看 diff」）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDiffView {
+    pub task: TaskId,
+    pub branch: String,
+    pub base: String,
+    /// worker 交出的最後一個 commit；還沒有 commit 時是 `None`，`diff` 也是空的。
+    pub sha: Option<String>,
+    /// `git diff --stat` 的結果。
+    pub stat: String,
+    /// unified diff；太長時截掉，`truncated` 為真。
+    pub diff: String,
+    pub truncated: bool,
+}
+
+/// 任務的一次 run（worker 或它叫的 subagent）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRunView {
+    pub agent: String,
+    pub model: Option<String>,
+    /// `running`、`done`、`failed`、`cancelled` 等。
+    pub state: String,
+    pub error: Option<String>,
+    pub started_at: Timestamp,
+    pub finished_at: Option<Timestamp>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub steps: Vec<TraceStepView>,
+}
+
+/// 任務所有 run 的 trace（任務 thread 的「看 trace」），由舊到新。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTraceView {
+    pub task: TaskId,
+    pub runs: Vec<TaskRunView>,
+}
+
 // ---------------------------------------------------------------------------
 // 即時協定（proposal/ux-and-frontend.md#即時協定）
 
@@ -2409,6 +2468,14 @@ pub enum ServerEvent {
     Why {
         why: Option<WhyView>,
     },
+    /// 任務的 diff；只回給問的連線，不記日誌。
+    TaskDiff {
+        diff: TaskDiffView,
+    },
+    /// 任務的 trace；只回給問的連線，不記日誌。
+    TaskTrace {
+        trace: TaskTraceView,
+    },
     /// 成本報表；只回給問的連線，不記日誌。
     CostReport {
         report: CostReport,
@@ -2587,6 +2654,8 @@ impl ServerEvent {
             | Self::LoginUrl { .. }
             | Self::ProviderTest { .. }
             | Self::Why { .. }
+            | Self::TaskDiff { .. }
+            | Self::TaskTrace { .. }
             | Self::CostReport { .. }
             | Self::Pricing { .. }
             | Self::Error { .. } => None,
@@ -2654,6 +2723,14 @@ pub enum ClientCommand {
     Why {
         item: ItemId,
     },
+    /// 任務分支相對基準分支的 diff；伺服器回 `TaskDiff`。
+    TaskDiff {
+        task: TaskId,
+    },
+    /// 任務所有 run 的模型輪與工具呼叫；伺服器回 `TaskTrace`。
+    TaskTrace {
+        task: TaskId,
+    },
     /// 成本報表：依 project、Goal、agent、provider／runtime 彙總；`project` 不給就是全部。
     CostReport {
         project: Option<ProjectId>,
@@ -2693,6 +2770,14 @@ pub enum ClientCommand {
     /// 捨棄一個草稿 Goal（變成已取消）。不是草稿時回 `Error`。
     DiscardGoal {
         goal: GoalId,
+    },
+    /// 在 Goal 留言給 Planner：Team 分頁記一則你的問題，並叫醒 Planner（像改方向）。`task` 是從哪個
+    /// 任務 thread 留的。快速修改與環境分析沒有 Planner，回 `Error`。伺服器回 `GoalChanged`。
+    NoteGoal {
+        goal: GoalId,
+        text: String,
+        #[serde(default)]
+        task: Option<TaskId>,
     },
     /// 重試一個需要決定（或失敗）的任務：回到佇列，worker 從工作目錄的現況接著做。
     RetryTask {

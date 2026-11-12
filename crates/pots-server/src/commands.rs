@@ -4,7 +4,8 @@
 use pots_proto::{
     AgentState, ArtifactId, ArtifactKind, Author, Card, ClientCommand, GoalId, ItemId, Msg,
     MsgStatus, ProjectId, ProjectSnapshot, SendMode, ServerEvent, StreamItemKind, StreamItemView,
-    StreamScope, TaskId, Timestamp, TraceStepView, WhyView, WorkDir,
+    StreamScope, TaskDiffView, TaskId, TaskRunView, TaskTraceView, Timestamp, TraceStepView,
+    WhyView, WorkDir,
 };
 use tokio::sync::mpsc;
 
@@ -83,6 +84,12 @@ async fn run(app: &App, cmd: ClientCommand) -> Result<Option<ServerEvent>, Strin
     if let ClientCommand::Why { item } = cmd {
         return why(app, item).await.map(Some);
     }
+    if let ClientCommand::TaskDiff { task } = cmd {
+        return task_diff(app, task).await.map(Some);
+    }
+    if let ClientCommand::TaskTrace { task } = cmd {
+        return task_trace(app, task).await.map(Some);
+    }
     if let ClientCommand::CostReport {
         project,
         since,
@@ -106,7 +113,9 @@ async fn run(app: &App, cmd: ClientCommand) -> Result<Option<ServerEvent>, Strin
 async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
     match cmd {
         ClientCommand::Resume { .. } => Err("這條連線已經 Resume 過".into()),
-        ClientCommand::Why { .. } => Err("這個指令要直接回覆".into()),
+        ClientCommand::Why { .. }
+        | ClientCommand::TaskDiff { .. }
+        | ClientCommand::TaskTrace { .. } => Err("這個指令要直接回覆".into()),
         ClientCommand::CostReport { .. }
         | ClientCommand::Pricing
         | ClientCommand::SetPrice { .. }
@@ -147,6 +156,7 @@ async fn run_logged(app: &App, cmd: ClientCommand) -> Result<(), String> {
         } => crate::approvals::decide(app, approval, approve, note).await,
         ClientCommand::Cancel { task } => cancel_task(app, task).await,
         ClientCommand::RetryTask { task } => retry_task(app, task).await,
+        ClientCommand::NoteGoal { goal, text, task } => note_goal(app, goal, text, task).await,
         ClientCommand::StartGoal { goal } => start_goal(app, goal, true).await,
         ClientCommand::DiscardGoal { goal } => start_goal(app, goal, false).await,
         ClientCommand::SaveArtifact {
@@ -916,20 +926,7 @@ async fn why(app: &App, item: ItemId) -> Result<ServerEvent, String> {
             .trace(run)
             .await?
             .into_iter()
-            .map(|t| {
-                // 模型說的話直接給文字，其他給 JSON。
-                let detail = match t.detail.get("text").and_then(|v| v.as_str()) {
-                    Some(text) if t.kind == "text" => text.to_string(),
-                    _ => t.detail.to_string(),
-                };
-                TraceStepView {
-                    kind: t.kind,
-                    name: t.name,
-                    at: t.at,
-                    ok: t.ok,
-                    detail,
-                }
-            })
+            .map(trace_step)
             .collect();
         Ok(Some(ServerEvent::Why {
             why: Some(WhyView {
@@ -951,6 +948,129 @@ async fn why(app: &App, item: ItemId) -> Result<ServerEvent, String> {
     result
         .map_err(internal)?
         .ok_or_else(|| "找不到這則訊息".into())
+}
+
+/// 「看 diff」最多回多少位元組的 diff。
+const MAX_TASK_DIFF_BYTES: usize = 400_000;
+
+/// 任務分支相對基準分支的 diff。只讀平台的鏡像（worker 交出 commit 之後才有），不碰工作目錄。
+async fn task_diff(app: &App, task: TaskId) -> Result<ServerEvent, String> {
+    let row = {
+        let mut conn = app.store.acquire().await.map_err(internal)?;
+        let row = tasks::task(&mut conn, task)
+            .await
+            .map_err(internal)?
+            .ok_or("找不到這個任務")?;
+        let goal = tasks::goal(&mut conn, row.goal).await.map_err(internal)?;
+        match goal {
+            Some(g) if owns(app, g.project).await.map_err(internal)? => {}
+            _ => return Err("找不到這個任務".into()),
+        }
+        row
+    };
+    let branch = row.branch.clone().unwrap_or_default();
+    let base = row.base.clone().unwrap_or_default();
+    let empty = |base: String| ServerEvent::TaskDiff {
+        diff: TaskDiffView {
+            task,
+            branch: branch.clone(),
+            base,
+            sha: None,
+            stat: String::new(),
+            diff: String::new(),
+            truncated: false,
+        },
+    };
+    let (Some(repo), false) = (row.repo.as_deref(), base.is_empty()) else {
+        return Ok(empty(base));
+    };
+    let source = crate::worker::repo::RepoSource::parse(repo)?;
+    let found = app
+        .worker
+        .repos()
+        .task_diff(&source, &base, task, MAX_TASK_DIFF_BYTES)
+        .await
+        .map_err(|e| format!("無法讀取任務分支：{e}"))?;
+    let Some(found) = found else {
+        return Ok(empty(base));
+    };
+    Ok(ServerEvent::TaskDiff {
+        diff: TaskDiffView {
+            task,
+            branch,
+            base,
+            sha: Some(found.sha),
+            stat: found.stat,
+            diff: found.diff,
+            truncated: found.truncated,
+        },
+    })
+}
+
+/// 任務所有 run（worker 與它叫的 subagent）的模型輪與工具呼叫，由舊到新。
+async fn task_trace(app: &App, task: TaskId) -> Result<ServerEvent, String> {
+    let result: Result<Option<Vec<TaskRunView>>, crate::Error> = async {
+        let mut conn = app.store.acquire().await?;
+        let Some(row) = tasks::task(&mut conn, task).await? else {
+            return Ok(None);
+        };
+        match tasks::goal(&mut conn, row.goal).await? {
+            Some(g) if owns(app, g.project).await? => {}
+            _ => return Ok(None),
+        }
+        use sqlx::Row;
+        let rows = sqlx::query(
+            "SELECT id, agent, model, state, error, started_at, finished_at, input_tokens, \
+             output_tokens FROM agent_runs WHERE task_id = ? ORDER BY started_at, rowid",
+        )
+        .bind(task.to_string())
+        .fetch_all(&mut *conn)
+        .await?;
+        drop(conn);
+        let mut runs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: uuid::Uuid = crate::store::parse_id(row.try_get("id")?)?;
+            let steps = app
+                .store
+                .trace(id)
+                .await?
+                .into_iter()
+                .map(trace_step)
+                .collect();
+            runs.push(TaskRunView {
+                agent: row.try_get("agent")?,
+                model: row.try_get("model")?,
+                state: row.try_get("state")?,
+                error: row.try_get("error")?,
+                started_at: Timestamp(row.try_get("started_at")?),
+                finished_at: row.try_get::<Option<i64>, _>("finished_at")?.map(Timestamp),
+                input_tokens: row.try_get::<i64, _>("input_tokens")?.max(0) as u64,
+                output_tokens: row.try_get::<i64, _>("output_tokens")?.max(0) as u64,
+                steps,
+            });
+        }
+        Ok(Some(runs))
+    }
+    .await;
+    let runs = result.map_err(internal)?.ok_or("找不到這個任務")?;
+    Ok(ServerEvent::TaskTrace {
+        trace: TaskTraceView { task, runs },
+    })
+}
+
+/// trace 的一列轉成畫面用的步驟：模型說的話直接給文字，其他給 JSON。
+fn trace_step(t: crate::store::TraceRow) -> TraceStepView {
+    let detail = match t.detail.get("text").and_then(|v| v.as_str()) {
+        Some(text) if t.kind == "text" => text.to_string(),
+        _ => t.detail.to_string(),
+    };
+    TraceStepView {
+        kind: t.kind,
+        name: t.name,
+        at: t.at,
+        ok: t.ok,
+        detail,
+    }
 }
 
 /// 把 `agent_runs.trigger` 的 JSON 轉成一句人看得懂的話。
@@ -1118,6 +1238,83 @@ async fn start_goal(app: &App, id: GoalId, start: bool) -> Result<(), String> {
             .await?;
             txn.commit().await?;
         }
+        Ok(Ok(()))
+    }
+    .await;
+    result.map_err(internal)?
+}
+
+/// 你在 Goal 留言給 Planner：Team 分頁記一則你的問題，叫醒 Planner（中斷正在跑的 run，像改方向）。
+async fn note_goal(
+    app: &App,
+    id: GoalId,
+    text: String,
+    task: Option<TaskId>,
+) -> Result<(), String> {
+    let text = tasks::check_text("留言", &text, crate::team::MAX_POST_CHARS, true)?;
+    let result: Result<Result<(), String>, crate::Error> = async {
+        let mut txn = app.hub.begin().await?;
+        let Some(goal) = tasks::goal(txn.conn(), id).await? else {
+            return Ok(Err("找不到這個 Goal".into()));
+        };
+        if !owns(app, goal.project).await? {
+            return Ok(Err("找不到這個 Goal".into()));
+        }
+        if !goal.state.is_active() {
+            return Ok(Err(format!(
+                "Goal「{}」{}，沒有 Planner 在等留言",
+                goal.title,
+                goal.state.label()
+            )));
+        }
+        if tasks::kind_without_planner(&tasks::goal_kind(txn.conn(), id).await?) {
+            return Ok(Err(
+                "快速修改沒有 Planner：要調整請在對話裡跟負責人說，或取消後重開".into(),
+            ));
+        }
+        let about = match task {
+            Some(t) => match tasks::task(txn.conn(), t).await? {
+                Some(row) if row.goal == id => Some(row),
+                _ => return Ok(Err("找不到這個任務".into())),
+            },
+            None => None,
+        };
+        let now = Timestamp::now();
+        if let Err(e) = crate::team::insert(
+            txn.conn(),
+            id,
+            pots_proto::TeamPostKind::Question,
+            &Principal::Human,
+            None,
+            task,
+            &text,
+            now,
+        )
+        .await?
+        {
+            return Ok(Err(e));
+        }
+        let reason = match &about {
+            Some(row) => format!(
+                "（關於任務「{}」，task_id：{}）{text}",
+                tasks::one_line(&row.title, 200),
+                row.id
+            ),
+            None => text,
+        };
+        planner::enqueue(
+            txn.conn(),
+            goal.project,
+            id,
+            &PlannerTrigger::Steer {
+                by: "使用者（在 Goal 面板留言）".into(),
+                reason,
+            },
+        )
+        .await?;
+        tasks::push_goal(&mut txn, id).await?;
+        let planner = app.planner.clone();
+        txn.commit_then(|| planner.steer(id)).await?;
         Ok(Ok(()))
     }
     .await;

@@ -1497,6 +1497,12 @@ impl Worker {
                     "project 環境（第 {rev} 版）的準備腳本失敗，可以到 project 設定重新分析環境或換回其他版本：{why}"
                 )));
             }
+            // 不然進度會一直停在「執行環境的準備腳本…」，直到 worker 第一次回報。
+            let mut txn = inner.hub.begin().await?;
+            tasks::set_task_work(txn.conn(), task.id, None, None, Some("準備好了，開始工作…"))
+                .await?;
+            tasks::push_goal(&mut txn, goal.id).await?;
+            txn.commit().await?;
         }
         // 執行時間從這裡開始算：準備工作目錄、建 image 與準備腳本都不算。
         let limit = if setup_task {
@@ -1663,8 +1669,40 @@ impl Worker {
             max_turns: profile.max_turns,
             session_id: Some(format!("task:{}", task.id)),
         };
-        let (events, rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(rx);
+        // 模型說的話與要用的工具當成任務的進度（和 Claude Code 一樣），不必等模型自己 report_progress。
+        let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = {
+            let hub = inner.hub.clone();
+            let (task, goal) = (task.id, job.goal);
+            tokio::spawn(async move {
+                let mut last = String::new();
+                while let Some(ev) = rx.recv().await {
+                    let text = match ev {
+                        agent::AgentEvent::Item(Item::Assistant { text }) => {
+                            tasks::one_line(&text, 200)
+                        }
+                        agent::AgentEvent::ToolStarted(call) => {
+                            builtin_tool_summary(&call.name, &call.arguments)
+                        }
+                        _ => continue,
+                    };
+                    if text.is_empty() || text == last {
+                        continue;
+                    }
+                    let r: Result<(), Error> = async {
+                        let mut txn = hub.begin().await?;
+                        tasks::set_task_work(txn.conn(), task, None, None, Some(&text)).await?;
+                        tasks::push_goal(&mut txn, goal).await?;
+                        txn.commit().await
+                    }
+                    .await;
+                    match r {
+                        Ok(()) => last = text,
+                        Err(e) => tracing::warn!(error = %e, "無法更新 worker 進度"),
+                    }
+                }
+            })
+        };
         let result = agent::run(
             &config,
             vec![Item::User { text: message }],
@@ -1672,6 +1710,7 @@ impl Worker {
             job.cancel.clone(),
         )
         .await;
+        let _ = progress.await;
         let finished = ctx.finished.load(std::sync::atomic::Ordering::SeqCst);
         Ok(match result {
             _ if finished => RunEnd::Finished,
@@ -2354,6 +2393,32 @@ async fn render_prompt(
         out.push_str(&crate::team::render(txn.conn(), &posts).await?);
     }
     Ok(out)
+}
+
+/// 內建 worker 要用的工具，給人看的一行（任務的進度）。`report_progress` 自己會寫進度，不另外摘要。
+fn builtin_tool_summary(name: &str, arguments: &str) -> String {
+    let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    let field = |key: &str| {
+        args[key]
+            .as_str()
+            .map(|v| tasks::one_line(v, 120))
+            .filter(|v| !v.is_empty())
+    };
+    match name {
+        "report_progress" => String::new(),
+        "run" => field("command").map_or("執行指令".into(), |c| format!("執行 {c}")),
+        "edit_file" => field("path").map_or("修改檔案".into(), |p| format!("修改 {p}")),
+        "read_file" => field("path").map_or("讀檔案".into(), |p| format!("讀 {p}")),
+        "list_files" => field("path").map_or("列出檔案".into(), |p| format!("列出 {p}")),
+        "grep" => field("pattern").map_or("搜尋".into(), |p| format!("搜尋 {p}")),
+        "git_log" => "看 git log".into(),
+        "git_diff" => "看目前的 diff".into(),
+        "open_pr" => field("title").map_or("開 PR".into(), |t| format!("開 PR：{t}")),
+        "run_subagent" => "交給 subagent".into(),
+        "post_to_team" => "在 team 發文".into(),
+        "wait_for" => "準備等待".into(),
+        other => format!("用工具 {other}"),
+    }
 }
 
 #[cfg(test)]

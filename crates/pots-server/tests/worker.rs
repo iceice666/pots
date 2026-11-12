@@ -577,6 +577,54 @@ async fn builtin_worker_opens_pr_waits_for_ci_and_completes() {
         git(&remote, &["log", "--format=%s", "-1", &branch]).trim(),
         "Add hello"
     );
+
+    // 任務 thread 的「看 diff」：從鏡像讀任務分支相對 main 的改動。
+    c.send(&ClientCommand::TaskDiff { task: t.id }).await;
+    let diff = c
+        .until(|e| matches!(e, ServerEvent::TaskDiff { .. }))
+        .await
+        .into_iter()
+        .find_map(|e| match e {
+            ServerEvent::TaskDiff { diff } => Some(diff),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(diff.branch, branch);
+    assert_eq!(diff.base, "main");
+    assert!(diff.sha.is_some());
+    assert!(diff.stat.contains("hello.txt"), "{}", diff.stat);
+    assert!(diff.diff.contains("+hi"), "{}", diff.diff);
+    assert!(!diff.truncated);
+
+    // 「看 trace」：worker 的兩次 run（開工、CI 結果喚醒）與工具呼叫，由舊到新。
+    c.send(&ClientCommand::TaskTrace { task: t.id }).await;
+    let trace = c
+        .until(|e| matches!(e, ServerEvent::TaskTrace { .. }))
+        .await
+        .into_iter()
+        .find_map(|e| match e {
+            ServerEvent::TaskTrace { trace } => Some(trace),
+            _ => None,
+        })
+        .unwrap();
+    assert!(trace.runs.iter().all(|r| r.agent == "worker"), "{trace:?}");
+    assert!(trace.runs.len() >= 2, "{trace:?}");
+    let tools: Vec<&str> = trace
+        .runs
+        .iter()
+        .flat_map(|r| &r.steps)
+        .filter(|s| s.kind == "tool")
+        .map(|s| s.name.as_str())
+        .collect();
+    let first = tools
+        .iter()
+        .position(|n| *n == "edit_file")
+        .expect("edit_file");
+    let last = tools
+        .iter()
+        .position(|n| *n == "complete_task")
+        .expect("complete_task");
+    assert!(first < last, "{tools:?}");
     srv.stop().await;
 }
 

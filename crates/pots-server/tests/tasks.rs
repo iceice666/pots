@@ -424,6 +424,60 @@ async fn steer_interrupts_planner_and_replans() {
     srv.stop().await;
 }
 
+/// 你在 Goal 面板留言：Team 分頁多一則你的問題，Planner 被叫醒並看到留言；空白的留言被拒絕。
+#[tokio::test]
+async fn goal_note_reaches_planner_and_team() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = FnProvider::new("m", |req| {
+        if !is_planner(req) {
+            return chat_turn(req);
+        }
+        let (trigger, _) = planner_turn(req);
+        if trigger.contains("在 Goal 面板留言") {
+            ScriptedTurn::reply("收到留言")
+        } else {
+            ScriptedTurn::reply("規劃好了")
+        }
+    });
+    let srv = launch(tmp.path(), model.clone()).await;
+    let mut c = srv.client().await;
+    c.snapshot().await;
+    let project = c.create_project("登入").await;
+    let events = say(&mut c, project, &create_goal_call("登入重構")).await;
+    let goal = settle_goal(&mut c, &events, |g| g.planner_note == "規劃好了").await;
+
+    c.send(&ClientCommand::NoteGoal {
+        goal: goal.id,
+        text: "   ".into(),
+        task: None,
+    })
+    .await;
+    let evs = c.until(|e| matches!(e, ServerEvent::Error { .. })).await;
+    assert!(
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::Error { message } if message.contains("不能是空的")))
+    );
+
+    c.send(&ClientCommand::NoteGoal {
+        goal: goal.id,
+        text: "先別動 session 的格式".into(),
+        task: None,
+    })
+    .await;
+    let g = until_goal(&mut c, |g| g.id == goal.id && g.planner_note == "收到留言").await;
+    let mine: Vec<_> = g.team.iter().filter(|p| p.from == "你").collect();
+    assert_eq!(mine.len(), 1, "{:?}", g.team);
+    assert_eq!(mine[0].kind, pots_proto::TeamPostKind::Question);
+    assert_eq!(mine[0].body, "先別動 session 的格式");
+    let woke = model
+        .requests()
+        .into_iter()
+        .filter(is_planner)
+        .any(|r| planner_turn(&r).0.contains("先別動 session 的格式"));
+    assert!(woke, "Planner 沒有看到留言");
+    srv.stop().await;
+}
+
 /// 你在編輯器改 Brief：叫醒 Planner；期間 agent 改過時以區段合併；同一段衝突時拒絕；
 /// 版本紀錄與還原。
 #[tokio::test]

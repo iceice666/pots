@@ -89,6 +89,15 @@ pub struct Checkout {
     pub base: String,
 }
 
+/// [`Repos::task_diff`] 的結果。
+#[derive(Clone, Debug)]
+pub struct TaskDiff {
+    pub sha: String,
+    pub stat: String,
+    pub diff: String,
+    pub truncated: bool,
+}
+
 /// 推上去的結果。
 #[derive(Clone, Debug)]
 pub struct Pushed {
@@ -502,6 +511,48 @@ impl Repos {
         let mut c = git(Some(mirror), None);
         c.args(["rev-parse", "--verify", "--quiet", &task_ref(task)]);
         Ok(run(c).await?.trim().to_string())
+    }
+
+    /// 任務分支相對基準分支的 commit、`--stat` 與 diff（任務 thread 的「看 diff」）。只讀鏡像；
+    /// 鏡像或任務分支還不存在（worker 還沒交出 commit）時回 `None`。diff 超過 `max_bytes` 時截短，
+    /// 第三個值為真。
+    pub async fn task_diff(
+        &self,
+        source: &RepoSource,
+        base: &str,
+        task: TaskId,
+        max_bytes: usize,
+    ) -> Result<Option<TaskDiff>, RepoError> {
+        let mirror = self.mirror_dir(source);
+        if !mirror.exists() {
+            return Ok(None);
+        }
+        let Ok(sha) = self.task_sha(&mirror, task).await else {
+            return Ok(None);
+        };
+        let range = format!("refs/remotes/origin/{base}...{}", task_ref(task));
+        let mut c = git(Some(&mirror), None);
+        c.args(["diff", "--no-color", "--no-ext-diff", "--stat=120", &range]);
+        let stat = run(c).await?;
+        let mut c = git(Some(&mirror), None);
+        c.args(["diff", "--no-color", "--no-ext-diff", &range]);
+        let mut diff = run(c).await?;
+        let truncated = diff.len() > max_bytes;
+        if truncated {
+            let mut end = max_bytes;
+            while !diff.is_char_boundary(end) {
+                end -= 1;
+            }
+            // 切在整行上，最後一行不會只剩半截。
+            let end = diff[..end].rfind('\n').map_or(end, |i| i + 1);
+            diff.truncate(end);
+        }
+        Ok(Some(TaskDiff {
+            sha,
+            stat,
+            diff,
+            truncated,
+        }))
     }
 
     /// 基準分支之後有沒有 commit。
