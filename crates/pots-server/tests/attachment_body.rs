@@ -123,6 +123,22 @@ async fn gets_back_the_uploaded_bytes() {
     );
     assert_eq!(res.body, bytes, "取回的位元組要和上傳的一模一樣");
 
+    // 兩張不同的圖各自取回自己的內容（不是「永遠回同一個檔」的錯誤接線）。
+    let second = png(3, 7, 11);
+    assert_ne!(second, bytes);
+    let view2 = upload_ok(&srv, project, &second).await;
+    assert_ne!(view2.id, view.id);
+    for (id, expected) in [(view.id, &bytes), (view2.id, &second)] {
+        let res = http_get_raw(
+            srv.addr(),
+            &format!("/attachments/{id}"),
+            &auth_headers(&srv),
+        )
+        .await;
+        assert_eq!(res.status, 200, "{}", res.body_text());
+        assert_eq!(&res.body, expected, "附件 {id} 取回到別的內容");
+    }
+
     // jpeg 也走同一條路（MIME 用上傳時驗過的那個，不是猜的）。
     let img = image::RgbImage::from_fn(3, 2, |x, y| {
         image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
@@ -225,6 +241,19 @@ async fn requires_the_token() {
     .await;
     assert_eq!(res.status, 403);
 
+    // Host 不是 127.0.0.1:<port>／localhost:<port> → 403（DNS rebinding）。
+    // 這條確認新路由確實吃到同一層守衛，而不是被加到 webhook router 那邊。
+    let res = http_get_raw(
+        srv.addr(),
+        &format!("/attachments/{}", view.id),
+        &[
+            ("Host", "evil.example:1234".to_string()),
+            ("Authorization", format!("Bearer {}", srv.token())),
+        ],
+    )
+    .await;
+    assert_eq!(res.status, 403);
+
     // 正確的 token 還是拿得到。
     let res = http_get_raw(
         srv.addr(),
@@ -258,6 +287,26 @@ async fn missing_file_on_disk_is_server_error() {
     let res = http_get_raw(
         srv.addr(),
         &format!("/attachments/{}", view.id),
+        &auth_headers(&srv),
+    )
+    .await;
+    assert_eq!(res.status, 500, "{}", res.body_text());
+
+    // 本體被換成大小不同的檔案（長度與 DB 不符）：一樣 500，不會送出對不上的內容。
+    let second = png(4, 4, 5);
+    let view2 = upload_ok(&srv, project, &second).await;
+    let files: Vec<_> = std::fs::read_dir(tmp.path().join("attachments"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    assert_eq!(files.len(), 1, "前一個被刪了，只剩新的：{files:?}");
+    std::fs::write(&files[0], b"short").unwrap();
+
+    let res = http_get_raw(
+        srv.addr(),
+        &format!("/attachments/{}", view2.id),
         &auth_headers(&srv),
     )
     .await;

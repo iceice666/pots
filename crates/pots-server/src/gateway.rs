@@ -236,10 +236,29 @@ async fn attachment_body(State(app): State<Arc<App>>, Path(id): Path<String>) ->
     };
     drop(conn);
     let dir = app.watcher.data_dir().to_path_buf();
+    let path = crate::attachments::body_path(&dir, &row.sha256);
+    // 先看檔案大小再讀：本體是內容定址、寫入後不再變動，長度對不上代表檔案被動過或
+    // 磁碟出了問題。寧可回 500 留下痕跡，也不要整份讀進記憶體或送出長度不符的內容。
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) if meta.len() == row.bytes => {}
+        Ok(meta) => {
+            tracing::error!(
+                id = %row.id,
+                expected = row.bytes,
+                actual = meta.len(),
+                "附件的本體長度與 DB 不符"
+            );
+            return (StatusCode::INTERNAL_SERVER_ERROR, "讀不到這張圖片的內容").into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, id = %row.id, "讀不到附件的本體");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "讀不到這張圖片的內容").into_response();
+        }
+    }
     let bytes = match crate::attachments::read_body(&dir, &row.sha256).await {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::error!(error = %e, id = %row.id, sha256 = %row.sha256, "附件的檔案不見了");
+            tracing::error!(error = %e, id = %row.id, "讀不到附件的本體");
             return (StatusCode::INTERNAL_SERVER_ERROR, "讀不到這張圖片的內容").into_response();
         }
     };
