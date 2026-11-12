@@ -1101,7 +1101,25 @@ pub fn format_utc(t: Timestamp) -> String {
 
 #[cfg(test)]
 mod tests {
+    use pots_proto::{AttachmentView, InstanceId, InstanceKind};
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::hub::InstanceInfo;
+    use crate::store::ProjectRow;
+
+    fn msg(author: Author, text: &str, status: MsgStatus) -> Msg {
+        Msg {
+            author,
+            text: text.into(),
+            status,
+            tools: None,
+            narration: Vec::new(),
+            cards: Vec::new(),
+            steer: false,
+            attachments: Vec::new(),
+        }
+    }
 
     #[test]
     fn utc_format() {
@@ -1154,5 +1172,143 @@ mod tests {
         let s = log.summary().unwrap();
         assert_eq!(s.text, "呼叫了 1 個工具");
         assert_eq!(s.details, ["get_status：完成"]);
+    }
+
+    /// 一個 project 的暫存服務：資料庫、hub 與 project 一列。
+    async fn fixture() -> (TempDir, Store, Hub, ProjectId) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open_sqlite(&tmp.path().join("pots.db"))
+            .await
+            .unwrap();
+        let project = ProjectId::new();
+        let mut tx = store.begin().await.unwrap();
+        Store::insert_project(
+            &mut tx,
+            &ProjectRow {
+                id: project,
+                name: "看圖".into(),
+                instructions: String::new(),
+                agent_name: "Pots".into(),
+                workdir: None,
+                created_at: Timestamp::now(),
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let hub = Hub::new(
+            store.clone(),
+            InstanceInfo {
+                id: InstanceId::new(),
+                name: "test".into(),
+                kind: InstanceKind::Desktop,
+            },
+            pots_proto::ModelAuthView::SignedOut,
+            pots_proto::ProvidersView::default(),
+        )
+        .await
+        .unwrap();
+        (tmp, store, hub, project)
+    }
+
+    fn human(text: &str, attachments: Vec<AttachmentView>) -> StreamItemView {
+        let mut msg = msg(Author::Human, text, MsgStatus::Done);
+        msg.attachments = attachments;
+        StreamItemView {
+            id: ItemId::new(),
+            at: Timestamp::now(),
+            kind: StreamItemKind::Human(msg),
+        }
+    }
+
+    fn attachment(id: u64, mime: &str) -> AttachmentView {
+        AttachmentView {
+            id: pots_proto::AttachmentId::from_u64(id),
+            mime: mime.into(),
+            bytes: 3,
+            width: Some(1),
+            height: Some(1),
+            filename: None,
+        }
+    }
+
+    /// 有附件：`om_raw` 是一筆 `Item::User` 後面接著每張圖的 `Item::Image`（依附件順序）。
+    #[tokio::test]
+    async fn consume_writes_images_after_the_user_item() {
+        let (_tmp, store, hub, project) = fixture().await;
+        let item = human(
+            "這兩張是什麼？",
+            vec![attachment(1, "image/png"), attachment(2, "image/jpeg")],
+        );
+        {
+            let mut txn = hub.begin().await.unwrap();
+            Store::insert_item(txn.conn(), project, &item, ItemStatus::Pending, None)
+                .await
+                .unwrap();
+            consume(&mut txn, project, item.id, "這兩張是什麼？", None)
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        }
+        let history = store.om_raw_history(project).await.unwrap();
+        assert_eq!(
+            history,
+            vec![
+                Item::User {
+                    text: "這兩張是什麼？".into()
+                },
+                Item::Image {
+                    attachment_id: pots_proto::AttachmentId::from_u64(1).to_string(),
+                    mime: "image/png".into(),
+                },
+                Item::Image {
+                    attachment_id: pots_proto::AttachmentId::from_u64(2).to_string(),
+                    mime: "image/jpeg".into(),
+                },
+            ]
+        );
+    }
+
+    /// 沒有附件（含系統觸發）：行為與以前完全一樣，只有一筆 `Item::User`。
+    #[tokio::test]
+    async fn consume_without_images_is_unchanged() {
+        let (_tmp, store, hub, project) = fixture().await;
+        let human_item = human("只有文字", Vec::new());
+        let trigger = StreamItemView {
+            id: ItemId::new(),
+            at: Timestamp::now(),
+            kind: StreamItemKind::Event {
+                text: "排程觸發".into(),
+            },
+        };
+        {
+            let mut txn = hub.begin().await.unwrap();
+            Store::insert_item(txn.conn(), project, &human_item, ItemStatus::Pending, None)
+                .await
+                .unwrap();
+            Store::insert_item(txn.conn(), project, &trigger, ItemStatus::Pending, None)
+                .await
+                .unwrap();
+            consume(&mut txn, project, human_item.id, "只有文字", None)
+                .await
+                .unwrap();
+            // 系統觸發沒有 `Human` 訊息可以查附件：一樣只寫一筆 `Item::User`。
+            consume(&mut txn, project, trigger.id, "排程的內容", None)
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        }
+        let history = store.om_raw_history(project).await.unwrap();
+        assert_eq!(
+            history,
+            vec![
+                Item::User {
+                    text: "只有文字".into()
+                },
+                Item::User {
+                    text: "排程的內容".into()
+                },
+            ]
+        );
     }
 }

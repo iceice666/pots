@@ -55,6 +55,7 @@ pub use config::{
     AuthConfig, Clock, Config, ListenConfig, ManualClock, StoreConfig, WatcherConfig, WorkerConfig,
 };
 pub use datadir::{BuildInfo, ConnectionInfo, LocalToken, read_connection_info};
+pub use images::{ImageSlot, StoreImages};
 pub use memory::OmConfig;
 pub use model_auth::{FakeModelAuth, ModelAuthControl};
 pub use providers::{ApiProviderFactory, NoApiProviders};
