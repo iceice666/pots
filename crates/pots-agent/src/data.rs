@@ -182,7 +182,21 @@ pub enum Card {
         conflicts: Option<String>,
         /// What happened when the owner answered.
         outcome: Option<MergeOutcome>,
+        /// Once approved: whether Pots also merged the branch into the
+        /// project's checkout, or why it left that to the owner.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged: Option<AutoMerge>,
     },
+}
+
+/// What became of merging an approved branch into the project's checkout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoMerge {
+    /// Merged into branch `into`, which is now at commit `head`.
+    Merged { into: String, head: String },
+    /// Left for the owner to merge, and why.
+    Skipped(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

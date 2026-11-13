@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::config::{
     AgentConfig, ChannelConfig, Config, ProjectConfig, SandboxConfig, TeamConfig, WorkerConfig, WorkspaceMode, expand_home,
 };
-use crate::data::{Card, Conv, Decision, MergeOutcome, Retired, UserKind, Workspace};
+use crate::data::{AutoMerge, Card, Conv, Decision, MergeOutcome, Retired, UserKind, Workspace};
 use crate::reply::Reply;
 use pots_llm::{Api, Part, Provider, Request, Role, ToolSpec, Turn};
 use crate::sandbox;
@@ -576,14 +576,29 @@ pub fn merge_request_note(
     note
 }
 
-/// What a coordinator is told when the owner accepted `branch` from `place`.
-pub fn merge_approved_note(branch: &str, place: &str) -> String {
+/// What a coordinator is told when the owner accepted `branch` from
+/// `place`, and what became of merging it into the project's checkout.
+pub fn merge_approved_note(branch: &str, place: &str, merged: &AutoMerge) -> String {
+    let (status, overlap) = match merged {
+        AutoMerge::Merged { into, head } => (
+            format!(
+                "The branch is now in the project repo under the same name, and Pots merged it into `{into}` \
+                 (now at `{head}`)."
+            ),
+            "say which one should rebase onto the new default branch",
+        ),
+        AutoMerge::Skipped(why) => (
+            format!(
+                "The branch is now in the project repo under the same name. Pots didn't merge it into the \
+                 default branch ({why}), so that is up to the owner."
+            ),
+            "say which one should wait for this branch or rebase once it's merged",
+        ),
+    };
     format!(
-        "Pots (the app, not the owner): the owner accepted the merge request for `{branch}` from {place}. The \
-         branch is now in the project repo under the same name; merging it into the default branch is up to \
-         the owner. Report it to the owner here, in a line or two, with what is still open. If an open task \
-         touches the same code, say which one should wait for this branch or rebase once it's merged. Don't \
-         start new tasks for it unasked."
+        "Pots (the app, not the owner): the owner accepted the merge request for `{branch}` from {place}. \
+         {status} Report it to the owner here, in a line or two, with what is still open. If an open task \
+         touches the same code, {overlap}. Don't start new tasks for it unasked."
     )
 }
 
@@ -698,14 +713,17 @@ anywhere else: outside the task's thread they'd work on another checkout.";
 /// Where the merge request of the task in `conv` stands, if it has one.
 fn merge_status(ws: &Workspace, conv: Conv) -> Option<String> {
     let card = (0..ws.len(conv)).rev().find_map(|i| match &ws.message(conv, i).card {
-        Some(Card::Merge { outcome, .. }) => Some(outcome.clone()),
+        Some(Card::Merge { outcome, merged, .. }) => Some((outcome.clone(), merged.clone())),
         _ => None,
     })?;
     Some(match card {
-        None => "merge requested, waiting for the owner".to_string(),
-        Some(MergeOutcome::Approved(_)) => "approved: the branch is in the project repo".to_string(),
-        Some(MergeOutcome::Rejected) => "merge rejected".to_string(),
-        Some(MergeOutcome::Failed(_)) => "merge request failed".to_string(),
+        (None, _) => "merge requested, waiting for the owner".to_string(),
+        (Some(MergeOutcome::Approved(_)), Some(AutoMerge::Merged { into, .. })) => {
+            format!("approved and merged into `{into}`")
+        }
+        (Some(MergeOutcome::Approved(_)), _) => "approved: the branch is in the project repo".to_string(),
+        (Some(MergeOutcome::Rejected), _) => "merge rejected".to_string(),
+        (Some(MergeOutcome::Failed(_)), _) => "merge request failed".to_string(),
     })
 }
 
@@ -1523,9 +1541,15 @@ mod tests {
         let note = owner_question_note("Engineer", place, " Which DB? ", &["Postgres".into(), "SQLite".into()]);
         assert!(note.contains("waiting for the answer: “Which DB?” Options: Postgres / SQLite."), "{note}");
 
-        let note = merge_approved_note("pots/t1-a", place);
+        let left = AutoMerge::Skipped("the checkout has uncommitted changes".into());
+        let note = merge_approved_note("pots/t1-a", place, &left);
         assert!(note.contains("accepted the merge request for `pots/t1-a` from thread “A” in #backend"));
+        assert!(note.contains("didn't merge it into the default branch (the checkout has uncommitted changes)"), "{note}");
         assert!(note.contains("with what is still open"));
+        let merged = AutoMerge::Merged { into: "main".into(), head: "abc1234".into() };
+        let note = merge_approved_note("pots/t1-a", place, &merged);
+        assert!(note.contains("Pots merged it into `main` (now at `abc1234`)"), "{note}");
+        assert!(note.contains("rebase onto the new default branch"), "{note}");
     }
 
     #[test]

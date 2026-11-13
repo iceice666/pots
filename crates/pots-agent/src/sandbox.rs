@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::config::WorkspaceMode;
-use crate::data::Card;
+use crate::data::{AutoMerge, Card};
 use pots_llm::ToolSpec;
 
 const MAX_OUTPUT: usize = 20_000;
@@ -262,6 +262,7 @@ impl Session {
             repo: Some(self.env.repo.display().to_string()),
             conflicts: others.and_then(|c| c.warning(&self.env.repo, &self.env.branch)),
             outcome: None,
+            merged: None,
         })
     }
 
@@ -633,6 +634,77 @@ pub fn apply_edit(text: &str, old: &str, new: &str, all: bool) -> Result<(String
 pub fn accept_branch(repo: &Path, source: &str, branch: &str) -> Result<String, String> {
     git(repo, &["fetch", "--quiet", source, &format!("+{branch}:{branch}")])?;
     Ok(git(repo, &["rev-parse", "--short", branch])?.trim().to_string())
+}
+
+/// After [`accept_branch`], merge `branch` into the branch checked out in
+/// `repo`, but only when that can't disturb the owner's work: the checkout
+/// is on the project's default branch (the one `source`, the task's clone,
+/// started from), has no uncommitted changes to tracked files and no merge,
+/// rebase, cherry-pick or revert in progress, and the merge is clean.
+/// Otherwise nothing is touched, and the reason is returned. Blocks on git.
+pub fn merge_into_checkout(repo: &Path, source: &str, branch: &str) -> AutoMerge {
+    match try_merge_into_checkout(repo, Path::new(source), branch) {
+        Ok(merged) => merged,
+        Err(e) => AutoMerge::Skipped(e),
+    }
+}
+
+fn try_merge_into_checkout(repo: &Path, source: &Path, branch: &str) -> Result<AutoMerge, String> {
+    let skip = |why: String| Ok(AutoMerge::Skipped(why));
+    if git(repo, &["rev-parse", "--is-bare-repository"])?.trim() == "true" {
+        return skip("the project repo has no checkout".into());
+    }
+    let Ok(current) = git(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]) else {
+        return skip("the checkout isn't on a branch (detached HEAD)".into());
+    };
+    let current = current.trim().to_string();
+    // The task's clone follows the project's default branch as `origin/HEAD`.
+    let default = git(source, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .ok()
+        .map(|d| d.trim().trim_start_matches("origin/").to_string());
+    if let Some(default) = default.filter(|d| *d != current) {
+        return skip(format!("the checkout is on `{current}`, not the default branch `{default}`"));
+    }
+    if !resolves(repo, "HEAD") {
+        return skip(format!("`{current}` has no commits yet"));
+    }
+    for (marker, what) in [
+        ("MERGE_HEAD", "a merge"),
+        ("rebase-merge", "a rebase"),
+        ("rebase-apply", "a rebase"),
+        ("CHERRY_PICK_HEAD", "a cherry-pick"),
+        ("REVERT_HEAD", "a revert"),
+    ] {
+        let path = git(repo, &["rev-parse", "--path-format=absolute", "--git-path", marker])?;
+        if Path::new(path.trim()).exists() {
+            return skip(format!("{what} is in progress in the checkout"));
+        }
+    }
+    if !git(repo, &["status", "--porcelain", "--untracked-files=no"])?.trim().is_empty() {
+        return skip("the checkout has uncommitted changes".into());
+    }
+    if git(repo, &["merge-base", "--is-ancestor", branch, "HEAD"]).is_ok() {
+        let head = git(repo, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
+        return Ok(AutoMerge::Merged { into: current, head });
+    }
+    if !shares_history(repo, "HEAD", branch)? {
+        return skip(format!("`{branch}` shares no history with `{current}`"));
+    }
+    if let Some(files) = merge_tree(repo, "HEAD", branch)? {
+        let files = files.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ");
+        return skip(format!("it conflicts with `{current}` in {files}"));
+    }
+    if let Err(e) = git(repo, &["merge", "--quiet", "--no-edit", branch]) {
+        // A merge git started (and stopped, say on an untracked file or a
+        // hook) is undone, so the checkout is as the owner left it.
+        let head = git(repo, &["rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"]);
+        if head.is_ok_and(|h| Path::new(h.trim()).exists()) {
+            let _ = git(repo, &["merge", "--abort"]);
+        }
+        return skip(e);
+    }
+    let head = git(repo, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
+    Ok(AutoMerge::Merged { into: current, head })
 }
 
 // --- merge conflicts between tasks -------------------------------------------
@@ -1165,6 +1237,84 @@ mod tests {
         let rdir = reviewer.env.host_dir();
         assert_eq!(git(&rdir, &["log", "--format=%s", "base..HEAD"]).unwrap().trim(), "add a");
         assert!(!rdir.join("scratch").exists(), "untracked files are cleaned");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn approved_branches_merge_into_a_clean_checkout_only() {
+        let tmp = std::env::temp_dir().join(format!("pots-sandbox-automerge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let commit = |dir: &Path, file: &str, text: &str| {
+            std::fs::write(dir.join(file), text).unwrap();
+            git(dir, &["add", file]).unwrap();
+            git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", file]).unwrap();
+        };
+        git(&repo, &["init", "--quiet", "-b", "main"]).unwrap();
+        git(&repo, &["config", "user.name", "Owner"]).unwrap();
+        git(&repo, &["config", "user.email", "owner@example.com"]).unwrap();
+        commit(&repo, "a.txt", "one\n");
+        commit(&repo, "b.txt", "two\n");
+        let tasks = tmp.join("tasks");
+        let task = |key: &str, file: &str, text: &str| {
+            let env = Env::new(WorkspaceMode::Write, "docker".into(), "img".into(), repo.clone(), &tasks, key, "Engineer");
+            Session::new(env.clone()).prepare_writer().unwrap();
+            commit(&env.writer_dir(), file, text);
+            let source = env.writer_dir().display().to_string();
+            accept_branch(&repo, &source, &env.branch).unwrap();
+            (source, env.branch)
+        };
+        let main = || git(&repo, &["rev-parse", "main"]).unwrap();
+        let skipped = |m: AutoMerge| match m {
+            AutoMerge::Skipped(why) => why,
+            merged => panic!("merged: {merged:?}"),
+        };
+        let (a_src, a) = task("t1-a", "a.txt", "one, says t1\n");
+        let (b_src, b) = task("t2-b", "a.txt", "one, says t2\n");
+        let (c_src, c) = task("t3-c", "c.txt", "new\n");
+        // The owner's main moves on meanwhile, so merging t3 isn't a fast-forward.
+        commit(&repo, "d.txt", "owner\n");
+
+        // Uncommitted changes to tracked files: left alone.
+        std::fs::write(repo.join("b.txt"), "editing\n").unwrap();
+        let before = main();
+        assert_eq!(skipped(merge_into_checkout(&repo, &a_src, &a)), "the checkout has uncommitted changes");
+        assert_eq!(main(), before);
+        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "editing\n");
+        git(&repo, &["checkout", "--quiet", "--", "b.txt"]).unwrap();
+
+        // On another branch, or detached: left alone.
+        git(&repo, &["checkout", "--quiet", "-b", "side"]).unwrap();
+        let why = skipped(merge_into_checkout(&repo, &a_src, &a));
+        assert_eq!(why, "the checkout is on `side`, not the default branch `main`");
+        git(&repo, &["checkout", "--quiet", "--detach", "main"]).unwrap();
+        assert!(skipped(merge_into_checkout(&repo, &a_src, &a)).contains("detached HEAD"));
+        git(&repo, &["checkout", "--quiet", "main"]).unwrap();
+
+        // Clean, with an untracked file around: merged, with git's usual message.
+        std::fs::write(repo.join("notes.txt"), "mine\n").unwrap();
+        let merged = merge_into_checkout(&repo, &c_src, &c);
+        let head = git(&repo, &["rev-parse", "--short", "HEAD"]).unwrap().trim().to_string();
+        assert_eq!(merged, AutoMerge::Merged { into: "main".into(), head });
+        assert_eq!(git(&repo, &["log", "-1", "--format=%s"]).unwrap().trim(), "Merge branch 'pots/t3-c'");
+        assert_eq!(std::fs::read_to_string(repo.join("c.txt")).unwrap(), "new\n");
+        assert_eq!(std::fs::read_to_string(repo.join("notes.txt")).unwrap(), "mine\n");
+        // Again: it's already in.
+        assert!(matches!(merge_into_checkout(&repo, &c_src, &c), AutoMerge::Merged { .. }));
+
+        // t1 merges; t2 then conflicts with it and is left for the owner.
+        assert!(matches!(merge_into_checkout(&repo, &a_src, &a), AutoMerge::Merged { .. }));
+        let before = main();
+        assert_eq!(skipped(merge_into_checkout(&repo, &b_src, &b)), "it conflicts with `main` in `a.txt`");
+        assert_eq!(main(), before);
+        assert_eq!(git(&repo, &["status", "--porcelain", "--untracked-files=no"]).unwrap(), "");
+        assert!(resolves(&repo, &b), "the branch itself is still there to merge by hand");
+
+        // A merge the owner has in progress: left alone.
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "merge", "--quiet", "--no-commit", "--no-ff", &b]).unwrap_err();
+        assert_eq!(skipped(merge_into_checkout(&repo, &c_src, &c)), "a merge is in progress in the checkout");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

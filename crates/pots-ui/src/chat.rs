@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use pots_agent::agent::{self, Agents};
-use pots_agent::data::{self, ArtifactContent, ArtifactKind, Card, Conv, MergeOutcome, Message, UserKind, Workspace};
+use pots_agent::data::{self, ArtifactContent, ArtifactKind, AutoMerge, Card, Conv, MergeOutcome, Message, UserKind, Workspace};
 use pots_agent::markdown::{self, Sep};
 use pots_agent::reply::{Host, Outcome, blocking};
 use pots_agent::search::{Hit, MessageHit};
@@ -1213,37 +1213,54 @@ impl ChatApp {
         self.merging.insert(id);
         self.message_changed(id);
         cx.spawn(async move |this, cx| {
-            let result = blocking(move || sandbox::accept_branch(&repo, &source, &branch)).await.and_then(|r| r);
+            let result = blocking(move || {
+                let tip = sandbox::accept_branch(&repo, &source, &branch)?;
+                Ok((tip, sandbox::merge_into_checkout(&repo, &source, &branch)))
+            })
+            .await
+            .and_then(|r| r);
             this.update(cx, |app, cx| app.merge_done(id, result, cx)).ok();
         })
         .detach();
         cx.notify();
     }
 
-    fn merge_done(&mut self, id: usize, result: Result<String, String>, cx: &mut Context<Self>) {
+    fn merge_done(&mut self, id: usize, result: Result<(String, AutoMerge), String>, cx: &mut Context<Self>) {
         self.merging.remove(&id);
         let Some(msg) = self.ws.message_by_id_mut(id) else { return };
-        let Some(Card::Merge { branch, outcome, .. }) = &mut msg.card else { return };
+        let Some(Card::Merge { branch, outcome, merged, .. }) = &mut msg.card else { return };
         let branch = branch.clone();
-        let ok = result.is_ok();
-        *outcome = Some(match result {
-            Ok(tip) => MergeOutcome::Approved(tip),
-            Err(e) => MergeOutcome::Failed(e),
-        });
+        let done = match result {
+            Ok((tip, auto)) => {
+                *outcome = Some(MergeOutcome::Approved(tip));
+                *merged = Some(auto.clone());
+                Some(auto)
+            }
+            Err(e) => {
+                *outcome = Some(MergeOutcome::Failed(e));
+                None
+            }
+        };
         self.message_changed(id);
-        if ok && let Some((conv, _)) = self.ws.locate(id) {
+        if let Some(auto) = done
+            && let Some((conv, _)) = self.ws.locate(id)
+        {
             // An accepted merge request ends the task: say so in the thread
             // without waking anyone there (any owner post would wake the
             // last agent, and its reply would reopen the thread), close the
             // thread, and let the coordinator report it in #general.
-            let ix = self.ws.post(conv, self.ws.me, &format!("Approved: `{branch}` is now a branch in the project repo."));
+            let text = match &auto {
+                AutoMerge::Merged { into, head } => format!("Approved: `{branch}` is merged into `{into}` (`{head}`)."),
+                AutoMerge::Skipped(why) => format!("Approved: `{branch}` is now a branch in the project repo, not merged because {why}."),
+            };
+            let ix = self.ws.post(conv, self.ws.me, &text);
             self.message_added(conv, ix);
             if let Conv::Thread(t) = conv
                 && !self.ws.waits_on_owner(t)
             {
                 self.ws.threads[t].archived = true;
             }
-            let note = agent::merge_approved_note(&branch, &agent::task_place(&self.ws, conv));
+            let note = agent::merge_approved_note(&branch, &agent::task_place(&self.ws, conv), &auto);
             let shown = format!("Pots asked for this: you accepted `{branch}`.");
             self.wake_coordinators(conv, note, shown, cx);
         }
@@ -2647,7 +2664,7 @@ impl ChatApp {
                         .into_any_element(),
                 })
                 .into_any_element(),
-            Card::Merge { branch, summary, commits, outcome, conflicts, .. } => {
+            Card::Merge { branch, summary, commits, outcome, conflicts, merged, .. } => {
                 const SHOWN: usize = 8;
                 let busy = self.merging.contains(&id);
                 frame
@@ -2675,10 +2692,7 @@ impl ChatApp {
                         d.child(md(3, &format!("⚠ **Conflicts with other work** (when it was requested):\n\n{c}")))
                     })
                     .map(|d| match outcome {
-                        Some(MergeOutcome::Approved(tip)) => d.child(md(
-                            2,
-                            &format!("✓ Approved: `{branch}` (`{tip}`) is now a branch in the project repo. Merge it from there."),
-                        )),
+                        Some(MergeOutcome::Approved(tip)) => d.child(md(2, &approved_text(branch, tip, merged.as_ref()))),
                         Some(MergeOutcome::Rejected) => d.child(muted("✗ Rejected".into())),
                         failed => d
                             .when_some(
@@ -2689,7 +2703,7 @@ impl ChatApp {
                                 |d, e| d.child(div().text_size(px(13.)).text_color(theme::error()).child(format!("⚠ Couldn't bring the branch in: {e}"))),
                             )
                             .child(if busy {
-                                muted("Fetching the branch…".into()).into_any_element()
+                                muted("Fetching and merging the branch…".into()).into_any_element()
                             } else {
                                 div()
                                     .flex()
@@ -3149,6 +3163,19 @@ impl Host for UiHost<'_> {
             }
             _ => self.update(|app, _| agent::tools::run(&app.ws, name, input)),
         }
+    }
+}
+
+/// What an approved merge card says: merged into the default branch, or
+/// fetched as a branch and why it wasn't merged (cards from before Pots
+/// merged say only that it's a branch).
+fn approved_text(branch: &str, tip: &str, merged: Option<&AutoMerge>) -> String {
+    match merged {
+        Some(AutoMerge::Merged { into, head }) => format!("✓ Approved and merged: `{branch}` is in `{into}` (now at `{head}`)."),
+        Some(AutoMerge::Skipped(why)) => format!(
+            "✓ Approved: `{branch}` (`{tip}`) is now a branch in the project repo, not merged because {why}. Merge it from there."
+        ),
+        None => format!("✓ Approved: `{branch}` (`{tip}`) is now a branch in the project repo. Merge it from there."),
     }
 }
 
