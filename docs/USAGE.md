@@ -194,7 +194,12 @@ Engineer 用 `task_done` 回報任務完成（status 是 done），或你按 **A
 4. Reviewer checkout 那個 branch 來審：
    - 需要修改 → @Engineer，回到第 3 步。
    - 沒問題 → 呼叫 `request_merge`，thread 裡出現 🔀 **Merge request** 卡片，列出這個 branch 的 commit。同時 Pots 會叫 PM 到 #general 跟你回報哪個任務可以收了（見下方「PM 的回報」）。
-5. 你按 **Approve**：Pots 把 branch 以同名 branch（`pots/...`）fetch 到專案 repo。**不會動到你目前的 checkout 和其他 branch**，要不要 merge 由你自己在 repo 裡處理。PM 也會在 #general 回報，順便說還有哪些任務在跑。任務到這裡就結束了：thread 會自動封存，thread 裡的 agent 不會再回話。按 **Reject** 會通知 Reviewer。
+5. 你按 **Approve**：Pots 先把 branch 以同名 branch（`pots/...`）fetch 到專案 repo，接著在下面這些條件**全部**成立時，直接把它 merge 進你 checkout 的預設 branch（等同在 repo 裡跑 `git merge --no-edit pots/...`，可以 fast-forward 就 fast-forward，不行就用 git 預設訊息建 merge commit）：
+   - 專案 repo 有 working tree（不是 bare repo），而且 checkout 在預設 branch 上（也就是任務 clone 時的 `origin/HEAD`），不是別的 branch 或 detached HEAD；
+   - 已追蹤的檔案沒有未 commit 的改動（untracked 檔案不算），也沒有進行到一半的 merge、rebase、cherry-pick 或 revert；
+   - `git merge-tree` 試合的結果沒有衝突。
+
+   任何一條不成立，Pots 就只 fetch、不動你的 checkout，卡片上會寫出沒 merge 的原因，要不要 merge 由你自己在 repo 裡處理。merge 用的是你 repo 的 git 設定（作者、hook）；如果 git 在途中失敗，Pots 會 `git merge --abort`，讓 checkout 回到原狀。PM 也會在 #general 回報有沒有 merge，順便說還有哪些任務在跑。任務到這裡就結束了：thread 會自動封存，thread 裡的 agent 不會再回話。按 **Reject** 會通知 Reviewer。
 
 想在接受前自己看看，可以直接從任務的 clone 抓：
 
@@ -209,7 +214,7 @@ git fetch ~/.pots/tasks/<任務>/repo pots/<任務>
 - `check_merge_conflicts` 在主機上試做 merge，不會動到你的 repo 和任務的 clone。對每個有 commit 的任務，列出改了哪些檔案、能不能乾淨 merge 進**現在的**預設 branch；對每兩個任務，列出一起 merge 會不會衝突、衝突在哪些檔案。已經在預設 branch 裡的任務會標成沒有東西要 merge。只看得到已經 commit 的東西。
 - PM 開新任務前，如果同一個 repo 有可能改到同一段 code 的進行中任務，會先查一次：可能把新工作併進那個任務、等它 merge 完再開，或照開，在新任務的說明裡寫清楚舊任務改了什麼，並用 `post_in_thread` 告訴舊任務。
 - 你問 PM 要怎麼 merge，或有 merge request 時還有其他任務在跑，PM 會查衝突、用 `ask_owner` 建議 merge 順序。
-- 你把第一個 branch merge 進預設 branch 之後，PM 會用 `post_in_thread` 到另一個任務的 thread @Engineer，請它 rebase 到 `origin/HEAD`、解衝突、重跑測試、再送審。
+- 第一個 branch merge 進預設 branch 之後（Approve 時 Pots 自動 merge，或你自己 merge），PM 會用 `post_in_thread` 到另一個任務的 thread @Engineer，請它 rebase 到 `origin/HEAD`、解衝突、重跑測試、再送審。
 
 Engineer 每次被叫到時，Pots 會在主機上替它的 clone 跑一次 `git fetch origin`（容器裡連不到你的 repo），所以 `origin/HEAD` 是你 repo 現在的預設 branch，你 Approve 過的任務 branch 也會以 `origin/pots/...` 出現。Reviewer 的 `base` 也跟著變成最新的預設 branch，所以 Engineer rebase 之後，Reviewer 看到的還是只有這個任務的改動。
 
@@ -220,7 +225,7 @@ Engineer 每次被叫到時，Pots 會在主機上替它的 clone 跑一次 `git
 PM 只有被叫到才會講話，所以任務走到下面這些點時，Pots 會叫 PM 在 #general（沒有 #general 就在任務的頻道）回報。PM 這則回覆下方會註明是 Pots 叫它的。
 
 - **有人送 merge request**：PM 說哪個任務可以收了、卡片在哪，還有其他進行中任務的狀況。有衝突的話，改成說明哪裡衝突，並用 `ask_owner` 建議 merge 順序。
-- **你按 Approve**：PM 回報這個 branch 已經進專案 repo，說還有哪些任務在跑；如果有任務改到同一段 code，會提醒哪個要等或要 rebase。
+- **你按 Approve**：PM 回報這個 branch 已經進專案 repo、Pots 有沒有把它 merge 進預設 branch（沒有的話是為什麼），說還有哪些任務在跑；如果有任務改到同一段 code，會提醒哪個要等或要 rebase。
 - **Engineer 或 Reviewer 在 thread 裡用 `ask_owner` 問你**：PM 提醒你有任務在等你決定、要去哪裡回答。PM 不會替你回答，也不會再問一次。
 - **任務沒送 merge request 就結束了**：例如唯讀的查詢答完了、查完發現不用改，或做不下去（缺工具、環境壞了）。這時 Engineer 或 Reviewer 會呼叫 `task_done`，附上狀態（`done` 完成，`stuck` 卡住）和摘要，PM 再依此回報；卡住的話會說是什麼擋住、怎樣能解開。
 
