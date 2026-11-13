@@ -708,6 +708,9 @@ pub enum State {
     NoCommits,
     /// Nothing that isn't in the default branch `into` already.
     NothingToMerge { into: String },
+    /// No common history with `into` (a clone of an older, rewritten history):
+    /// there's nothing to diff against, so it's left out of the checks.
+    Unrelated { into: String },
     /// Work to merge into `into`: the files it changes, and the ones that
     /// conflict with `into` as it is now, if any.
     Open { into: String, files: Vec<String>, conflicts: Option<Vec<String>> },
@@ -737,6 +740,9 @@ impl Report {
                 State::NoCommits => format!("- {label}{status}: `{branch}` has no commits yet.\n"),
                 State::NothingToMerge { into } => format!(
                     "- {label}{status}: nothing to merge, `{branch}` has no commits that aren't in {into} (none yet, or already merged).\n"
+                ),
+                State::Unrelated { into } => format!(
+                    "- {label}{status}: `{branch}` shares no history with {into} (its clone is from an older history), so it can't be checked.\n"
                 ),
                 State::Open { into, files, conflicts } => {
                     open += 1;
@@ -772,8 +778,12 @@ impl Report {
     pub fn warning(&self, branch: &str) -> Option<String> {
         let me = self.tasks.iter().position(|c| c.task.branch == branch)?;
         let mut lines = Vec::new();
-        if let State::Open { into, conflicts: Some(c), .. } = &self.tasks[me].state {
-            lines.push(format!("- Conflicts with {into} as it is now, in {}.", list(c)));
+        match &self.tasks[me].state {
+            State::Open { into, conflicts: Some(c), .. } => {
+                lines.push(format!("- Conflicts with {into} as it is now, in {}.", list(c)));
+            }
+            State::Unrelated { into } => lines.push(format!("- Shares no history with {into}: it can't be merged as it is.")),
+            _ => {}
         }
         for pair in &self.pairs {
             let other = match (pair.a == me, pair.b == me) {
@@ -849,6 +859,8 @@ fn check_in(repo: &Path, tasks: &[TaskBranch], dir: &Path) -> Result<Report, Str
             // The project still has no commits: everything is new.
             None => State::Open { into, files: lines_of(&git(dir, &["ls-tree", "-r", "--name-only", &tip])?), conflicts: None },
             Some(base) if git(dir, &["merge-base", "--is-ancestor", &tip, &base]).is_ok() => State::NothingToMerge { into },
+            // `base...tip` needs a merge base; without one, git refuses the diff.
+            Some(base) if !shares_history(dir, &base, &tip)? => State::Unrelated { into },
             Some(base) => State::Open {
                 into,
                 files: lines_of(&git(dir, &["diff", "--name-only", &format!("{base}...{tip}")])?),
@@ -871,6 +883,18 @@ fn check_in(repo: &Path, tasks: &[TaskBranch], dir: &Path) -> Result<Report, Str
         }
     }
     Ok(report)
+}
+
+/// Whether `a` and `b` have a common ancestor in `dir`.
+fn shares_history(dir: &Path, a: &str, b: &str) -> Result<bool, String> {
+    let (code, out) = run(Command::new("git").arg("-C").arg(dir).args(["merge-base", a, b]), None, Duration::from_secs(300))
+        .map_err(|e| format!("git: {e}"))?;
+    match code {
+        0 => Ok(true),
+        // No merge base; anything else is a real failure.
+        1 => Ok(false),
+        _ => Err(format!("git merge-base {a} {b} failed: {}", String::from_utf8_lossy(&out).trim())),
+    }
 }
 
 /// Merge `a` and `b` in `dir` without a work tree: `None` if it's clean,
@@ -1197,6 +1221,44 @@ mod tests {
         };
         assert_eq!(card(Some(&check)).unwrap(), "- Conflicts with t2-a2 (`pots/t2-a2`), in `a.txt`.");
         assert_eq!(card(None), None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_clone_of_an_older_history_does_not_stop_the_conflict_check() {
+        let tmp = std::env::temp_dir().join(format!("pots-sandbox-unrelated-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let commit = |dir: &Path, file: &str, text: &str| {
+            std::fs::write(dir.join(file), text).unwrap();
+            git(dir, &["add", file]).unwrap();
+            git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", file]).unwrap();
+        };
+        git(&repo, &["init", "--quiet", "-b", "main"]).unwrap();
+        commit(&repo, "a.txt", "one\n");
+        let tasks = tmp.join("tasks");
+
+        // A task cloned before the project's history was rewritten: its own root.
+        let old = tasks.join("t0/repo");
+        std::fs::create_dir_all(&old).unwrap();
+        git(&old, &["init", "--quiet", "-b", "pots/t0"]).unwrap();
+        commit(&old, "a.txt", "from before\n");
+        let t0 = TaskBranch { label: "t0".into(), clone: old, branch: "pots/t0".into(), status: None };
+
+        // A current task, checked after it.
+        let env = Env::new(WorkspaceMode::Write, "docker".into(), "img".into(), repo.clone(), &tasks, "t1", "Engineer");
+        Session::new(env.clone()).prepare_writer().unwrap();
+        commit(&env.writer_dir(), "b.txt", "new\n");
+        let t1 = TaskBranch { label: "t1".into(), clone: env.writer_dir(), branch: env.branch, status: None };
+
+        let checked = check_conflicts(&repo, &[t0, t1], &tasks).unwrap();
+        assert_eq!(checked.tasks[0].state, State::Unrelated { into: "the default branch".into() });
+        let report = checked.render();
+        assert!(report.contains("- t0: `pots/t0` shares no history with the default branch"), "{report}");
+        assert!(report.contains("- t1: `pots/t1`, changes `b.txt`; merges cleanly into main"), "{report}");
+        assert_eq!(checked.warning("pots/t0").unwrap(), "- Shares no history with the default branch: it can't be merged as it is.");
+        assert_eq!(checked.warning("pots/t1"), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
