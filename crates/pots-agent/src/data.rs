@@ -270,27 +270,50 @@ pub enum Retired {
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactKind {
     Table,
+    Document,
+    Checklist,
+    Board,
 }
 
 impl ArtifactKind {
     /// Every kind, in the order the app offers them.
-    pub const ALL: &[ArtifactKind] = &[ArtifactKind::Table];
+    pub const ALL: &[ArtifactKind] =
+        &[ArtifactKind::Document, ArtifactKind::Table, ArtifactKind::Checklist, ArtifactKind::Board];
 
     /// The kind's name, as shown in the app ("Table").
     pub fn label(self) -> &'static str {
         match self {
             ArtifactKind::Table => "Table",
+            ArtifactKind::Document => "Document",
+            ArtifactKind::Checklist => "Checklist",
+            ArtifactKind::Board => "Board",
+        }
+    }
+
+    /// The kind's name in a sentence ("table").
+    pub fn noun(self) -> &'static str {
+        match self {
+            ArtifactKind::Table => "table",
+            ArtifactKind::Document => "document",
+            ArtifactKind::Checklist => "checklist",
+            ArtifactKind::Board => "board",
         }
     }
 }
 
 /// What an artifact holds. Saved apart from `workspace.json`, one file
 /// per artifact (see `store`), tagged with its kind:
-/// `{"kind": "table", "columns": [...], "rows": [[...], ...]}`.
+/// `{"kind": "table", "columns": [...], "rows": [[...], ...]}`,
+/// `{"kind": "document", "text": "..."}`,
+/// `{"kind": "checklist", "items": [{"text": "...", "done": false}, ...]}`,
+/// `{"kind": "board", "columns": [{"name": "...", "cards": ["...", ...]}, ...]}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ArtifactContent {
     Table(Table),
+    Document(Document),
+    Checklist(Checklist),
+    Board(Board),
 }
 
 impl ArtifactContent {
@@ -298,13 +321,216 @@ impl ArtifactContent {
     pub fn new(kind: ArtifactKind) -> Self {
         match kind {
             ArtifactKind::Table => ArtifactContent::Table(Table::blank(DEFAULT_TABLE_COLUMNS, DEFAULT_TABLE_ROWS)),
+            ArtifactKind::Document => ArtifactContent::Document(Document::default()),
+            ArtifactKind::Checklist => ArtifactContent::Checklist(Checklist::default()),
+            ArtifactKind::Board => ArtifactContent::Board(Board::blank()),
         }
     }
 
     pub fn kind(&self) -> ArtifactKind {
         match self {
             ArtifactContent::Table(_) => ArtifactKind::Table,
+            ArtifactContent::Document(_) => ArtifactKind::Document,
+            ArtifactContent::Checklist(_) => ArtifactKind::Checklist,
+            ArtifactContent::Board(_) => ArtifactKind::Board,
         }
+    }
+}
+
+/// Free text, written in markdown.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Document {
+    #[serde(default)]
+    pub text: String,
+}
+
+impl Document {
+    /// How many lines it has: none when empty.
+    pub fn lines(&self) -> usize {
+        self.text.lines().count()
+    }
+}
+
+/// A list of things to do, each ticked off when done.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Checklist {
+    #[serde(default)]
+    pub items: Vec<ChecklistItem>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChecklistItem {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
+impl ChecklistItem {
+    pub fn new(text: &str) -> Self {
+        ChecklistItem { text: text.to_string(), done: false }
+    }
+}
+
+impl Checklist {
+    pub fn done(&self) -> usize {
+        self.items.iter().filter(|i| i.done).count()
+    }
+
+    /// Set item `ix`'s text; false if there is no such item or it already says that.
+    pub fn set_text(&mut self, ix: usize, text: &str) -> bool {
+        match self.items.get_mut(ix) {
+            Some(item) if item.text != text => {
+                item.text = text.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Tick item `ix` off, or untick it; false if there is no such item.
+    pub fn toggle(&mut self, ix: usize) -> bool {
+        match self.items.get_mut(ix) {
+            Some(item) => {
+                item.done = !item.done;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Insert an empty item before item `at` (at the end if past it); returns its index.
+    pub fn insert(&mut self, at: usize) -> usize {
+        let at = at.min(self.items.len());
+        self.items.insert(at, ChecklistItem::default());
+        at
+    }
+
+    pub fn remove(&mut self, ix: usize) -> bool {
+        if ix < self.items.len() {
+            self.items.remove(ix);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Names of a new board's columns.
+pub const DEFAULT_BOARD_COLUMNS: [&str; 3] = ["To do", "Doing", "Done"];
+
+/// A kanban board: named columns, left to right, each holding cards (plain
+/// text), top to bottom. Cards move from column to column as work goes on.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Board {
+    #[serde(default)]
+    pub columns: Vec<BoardColumn>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardColumn {
+    pub name: String,
+    #[serde(default)]
+    pub cards: Vec<String>,
+}
+
+impl BoardColumn {
+    pub fn new(name: &str) -> Self {
+        BoardColumn { name: name.to_string(), cards: Vec::new() }
+    }
+}
+
+impl Board {
+    /// A board with the usual empty columns: To do, Doing, Done.
+    pub fn blank() -> Self {
+        Board { columns: DEFAULT_BOARD_COLUMNS.iter().map(|n| BoardColumn::new(n)).collect() }
+    }
+
+    pub fn cards(&self) -> usize {
+        self.columns.iter().map(|c| c.cards.len()).sum()
+    }
+
+    pub fn card(&self, col: usize, ix: usize) -> Option<&str> {
+        self.columns.get(col)?.cards.get(ix).map(String::as_str)
+    }
+
+    /// Set a card's text; false if there is no such card or it already says that.
+    pub fn set_card(&mut self, col: usize, ix: usize, text: &str) -> bool {
+        match self.columns.get_mut(col).and_then(|c| c.cards.get_mut(ix)) {
+            Some(card) if card != text => {
+                *card = text.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Insert an empty card in column `col` before card `at` (at the end if
+    /// past it); returns its index, or `None` if there is no such column.
+    pub fn insert_card(&mut self, col: usize, at: usize) -> Option<usize> {
+        let cards = &mut self.columns.get_mut(col)?.cards;
+        let at = at.min(cards.len());
+        cards.insert(at, String::new());
+        Some(at)
+    }
+
+    pub fn remove_card(&mut self, col: usize, ix: usize) -> bool {
+        match self.columns.get_mut(col) {
+            Some(c) if ix < c.cards.len() => {
+                c.cards.remove(ix);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Move card `ix` of column `col` to the bottom of column `to`; returns
+    /// its index there, or `None` if either doesn't exist or `to` is `col`.
+    pub fn move_card(&mut self, col: usize, ix: usize, to: usize) -> Option<usize> {
+        if col == to || to >= self.columns.len() || self.card(col, ix).is_none() {
+            return None;
+        }
+        let card = self.columns[col].cards.remove(ix);
+        self.columns[to].cards.push(card);
+        Some(self.columns[to].cards.len() - 1)
+    }
+
+    /// Insert an empty column named `name` before column `at` (at the end
+    /// if past it); returns its index.
+    pub fn insert_column(&mut self, at: usize, name: &str) -> usize {
+        let at = at.min(self.columns.len());
+        self.columns.insert(at, BoardColumn::new(name));
+        at
+    }
+
+    /// Remove column `col` and its cards. The last column stays: a board
+    /// without columns would have nowhere to put a card.
+    pub fn remove_column(&mut self, col: usize) -> bool {
+        if col >= self.columns.len() || self.columns.len() == 1 {
+            return false;
+        }
+        self.columns.remove(col);
+        true
+    }
+
+    /// Rename column `col`; a blank name is refused (false).
+    pub fn rename_column(&mut self, col: usize, name: &str) -> bool {
+        let name = name.trim();
+        match self.columns.get_mut(col) {
+            Some(c) if !name.is_empty() && c.name != name => {
+                c.name = name.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A name for a new column that no column has yet ("Column 4").
+    pub fn next_column_name(&self) -> String {
+        (self.columns.len() + 1..)
+            .map(|i| format!("Column {i}"))
+            .find(|n| !self.columns.iter().any(|c| &c.name == n))
+            .expect("some number is free")
     }
 }
 
@@ -426,8 +652,8 @@ impl Table {
     }
 }
 
-/// Something made and kept in a channel: a table now, documents and
-/// whiteboards later. The metadata lives in `workspace.json`; the content
+/// Something made and kept in a channel: a table, document, checklist or
+/// board. The metadata lives in `workspace.json`; the content
 /// is in its own file (see `store`), loaded with the workspace.
 #[derive(Serialize, Deserialize)]
 pub struct Artifact {
@@ -1027,11 +1253,82 @@ mod tests {
     #[test]
     fn table_files_with_ragged_rows_are_made_to_fit() {
         let json = r#"{"kind":"table","columns":["a","b"],"rows":[["1"],["1","2","3"]]}"#;
-        let ArtifactContent::Table(t) = serde_json::from_str(json).unwrap();
+        let Ok(ArtifactContent::Table(t)) = serde_json::from_str(json) else { panic!("a table") };
         assert_eq!(t.rows, [vec!["1", ""], vec!["1", "2"]]);
         // And it is written back as plain columns and rows.
         let back = serde_json::to_value(ArtifactContent::Table(t)).unwrap();
         assert_eq!(back, serde_json::json!({"kind": "table", "columns": ["a", "b"], "rows": [["1", ""], ["1", "2"]]}));
+    }
+
+    #[test]
+    fn every_kind_starts_blank_and_reads_back_from_its_file() {
+        for &kind in ArtifactKind::ALL {
+            let blank = ArtifactContent::new(kind);
+            assert_eq!(blank.kind(), kind);
+            let json = serde_json::to_value(&blank).unwrap();
+            assert_eq!(json["kind"], kind.noun(), "{json}");
+            assert_eq!(serde_json::from_value::<ArtifactContent>(json).unwrap(), blank);
+        }
+        let ArtifactContent::Board(b) = ArtifactContent::new(ArtifactKind::Board) else { panic!("a board") };
+        assert_eq!(b.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), DEFAULT_BOARD_COLUMNS);
+
+        // Missing fields read as empty.
+        let read = |json: &str| serde_json::from_str::<ArtifactContent>(json).unwrap();
+        assert_eq!(read(r#"{"kind":"document"}"#), ArtifactContent::Document(Document::default()));
+        assert_eq!(
+            read(r#"{"kind":"checklist","items":[{"text":"a"},{"done":true}]}"#),
+            ArtifactContent::Checklist(Checklist {
+                items: vec![ChecklistItem::new("a"), ChecklistItem { text: String::new(), done: true }]
+            })
+        );
+        assert_eq!(read(r#"{"kind":"board","columns":[{"name":"x"}]}"#), ArtifactContent::Board(Board { columns: vec![BoardColumn::new("x")] }));
+    }
+
+    #[test]
+    fn checklist_items_are_added_ticked_and_removed() {
+        let mut c = Checklist::default();
+        assert_eq!(c.insert(5), 0, "past the end appends");
+        assert!(c.set_text(0, "milk"));
+        assert!(!c.set_text(0, "milk"), "unchanged");
+        assert_eq!(c.insert(0), 0);
+        assert!(c.set_text(0, "eggs"));
+        assert!(c.toggle(1));
+        assert_eq!((c.items[1].text.as_str(), c.items[1].done, c.done()), ("milk", true, 1));
+        assert!(!c.toggle(9));
+        assert!(c.remove(0));
+        assert!(!c.remove(5));
+        assert_eq!(c.items, [ChecklistItem { text: "milk".into(), done: true }]);
+    }
+
+    #[test]
+    fn board_cards_and_columns_are_edited_and_moved() {
+        let mut b = Board::blank();
+        assert_eq!(b.insert_card(0, 9), Some(0));
+        assert!(b.set_card(0, 0, "Login page"));
+        assert_eq!(b.insert_card(0, 0), Some(0));
+        assert!(b.set_card(0, 0, "Signup"));
+        assert_eq!(b.insert_card(7, 0), None, "no such column");
+        assert_eq!(b.cards(), 2);
+
+        assert_eq!(b.move_card(0, 1, 2), Some(0));
+        assert_eq!(b.card(2, 0), Some("Login page"));
+        assert_eq!(b.columns[0].cards, ["Signup"]);
+        assert_eq!(b.move_card(0, 0, 0), None, "same column");
+        assert_eq!(b.move_card(0, 5, 1), None, "no such card");
+        assert_eq!(b.move_card(0, 0, 9), None, "no such column");
+
+        assert!(b.remove_card(2, 0));
+        assert!(!b.remove_card(2, 0));
+        let name = b.next_column_name();
+        assert_eq!(name, "Column 4");
+        assert_eq!(b.insert_column(1, &name), 1);
+        assert!(b.rename_column(1, " Review "));
+        assert!(!b.rename_column(1, "  "), "blank names are refused");
+        assert_eq!(b.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["To do", "Review", "Doing", "Done"]);
+        for _ in 0..3 {
+            assert!(b.remove_column(0));
+        }
+        assert!(!b.remove_column(0), "the last column stays");
     }
 
     #[test]

@@ -1,8 +1,7 @@
 //! The tools agents use on a channel's artifacts: list them and read any
-//! kind; create and change tables. Writing tools are per kind
-//! (`create_table`, `update_table`, …), since each kind's content is shaped
-//! differently; documents and whiteboards will bring their own. Deleting
-//! is left to people.
+//! kind; create and change each kind. Writing tools are per kind
+//! (`create_table`, `update_document`, …), since each kind's content is
+//! shaped differently. Deleting is left to people.
 //!
 //! The functions here only change the [`Workspace`]; the app runs the
 //! writing ones (see [`is_write`]) itself, to save the artifact's file and
@@ -11,7 +10,7 @@
 use serde_json::{Value, json};
 
 use crate::agent::tools::channel;
-use crate::data::{ArtifactContent, Table, Workspace};
+use crate::data::{ArtifactContent, ArtifactKind, Board, BoardColumn, Checklist, ChecklistItem, Document, Table, Workspace};
 use pots_llm::ToolSpec;
 
 pub const LIST_ARTIFACTS: &str = "list_artifacts";
@@ -19,15 +18,47 @@ pub const READ_ARTIFACT: &str = "read_artifact";
 pub const CREATE_TABLE: &str = "create_table";
 pub const UPDATE_TABLE: &str = "update_table";
 pub const ADD_TABLE_ROWS: &str = "add_table_rows";
+pub const CREATE_DOCUMENT: &str = "create_document";
+pub const UPDATE_DOCUMENT: &str = "update_document";
+pub const CREATE_CHECKLIST: &str = "create_checklist";
+pub const UPDATE_CHECKLIST: &str = "update_checklist";
+pub const ADD_CHECKLIST_ITEMS: &str = "add_checklist_items";
+pub const CHECK_ITEMS: &str = "check_items";
+pub const CREATE_BOARD: &str = "create_board";
+pub const UPDATE_BOARD: &str = "update_board";
+pub const ADD_BOARD_CARDS: &str = "add_board_cards";
+pub const MOVE_BOARD_CARD: &str = "move_board_card";
 
 /// Every artifact tool, in the order agents are offered them.
-pub const ALL: [&str; 5] = [LIST_ARTIFACTS, READ_ARTIFACT, CREATE_TABLE, UPDATE_TABLE, ADD_TABLE_ROWS];
+pub const ALL: [&str; 15] = [
+    LIST_ARTIFACTS,
+    READ_ARTIFACT,
+    CREATE_TABLE,
+    UPDATE_TABLE,
+    ADD_TABLE_ROWS,
+    CREATE_DOCUMENT,
+    UPDATE_DOCUMENT,
+    CREATE_CHECKLIST,
+    UPDATE_CHECKLIST,
+    ADD_CHECKLIST_ITEMS,
+    CHECK_ITEMS,
+    CREATE_BOARD,
+    UPDATE_BOARD,
+    ADD_BOARD_CARDS,
+    MOVE_BOARD_CARD,
+];
 
 /// The most a table made or changed by an agent may have.
 pub const MAX_COLUMNS: usize = 50;
 pub const MAX_ROWS: usize = 1000;
 /// The longest artifact title, in characters.
 pub const MAX_TITLE: usize = 100;
+/// The longest document, in characters.
+pub const MAX_DOCUMENT: usize = 100_000;
+/// The most items a checklist, or cards a board, may have.
+pub const MAX_ITEMS: usize = 500;
+/// The longest checklist item or board card, in characters.
+pub const MAX_ITEM: usize = 2000;
 
 pub fn is_tool(name: &str) -> bool {
     ALL.contains(&name)
@@ -35,7 +66,7 @@ pub fn is_tool(name: &str) -> bool {
 
 /// Whether tool `name` changes an artifact (the rest only read).
 pub fn is_write(name: &str) -> bool {
-    matches!(name, CREATE_TABLE | UPDATE_TABLE | ADD_TABLE_ROWS)
+    is_tool(name) && !matches!(name, LIST_ARTIFACTS | READ_ARTIFACT)
 }
 
 const ROWS_DESCRIPTION: &str = "The rows, top to bottom: each an array of cell texts, one per column in column \
@@ -45,46 +76,43 @@ pub fn specs() -> Vec<ToolSpec> {
     let rows = json!({"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": ROWS_DESCRIPTION});
     let columns = json!({"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Column names, left to right."});
     let id = json!({"type": "integer", "minimum": 0, "description": "The artifact's id, from list_artifacts."});
+    let channel = json!({"type": "string", "description": "Channel name, without the #."});
+    let title = json!({"type": "string", "description": "A few words saying what it holds."});
+    let new_title = json!({"type": "string", "description": "A new title."});
+    let text = json!({"type": "string", "description": "The whole text, in markdown."});
+    let items = json!({"type": "array", "description": "The items, top to bottom.",
+        "items": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "What is to be done, in one line."},
+            "done": {"type": "boolean", "description": "Whether it is done already. Default false."}
+        }, "required": ["text"], "additionalProperties": false}});
+    let board_columns = json!({"type": "array", "minItems": 1, "description": "The columns, left to right.",
+        "items": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "The column's name, like “To do”."},
+            "cards": {"type": "array", "items": {"type": "string"}, "description": "Its cards, top to bottom: a line of text each."}
+        }, "required": ["name"], "additionalProperties": false}});
+    let object = |properties: Value, required: &[&str]| {
+        json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
+    };
     vec![
         ToolSpec {
             name: LIST_ARTIFACTS,
-            description: "List a channel's artifacts (tables people keep there, shown as tabs above its messages): \
-                          each one's id, kind and title.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {"channel": {"type": "string", "description": "Channel name, without the #."}},
-                "required": ["channel"],
-                "additionalProperties": false
-            }),
+            description: "List a channel's artifacts (tables, documents, checklists and boards people keep \
+                          there, shown as tabs above its messages): each one's id, kind and title.",
+            input_schema: object(json!({"channel": channel}), &["channel"]),
         },
         ToolSpec {
             name: READ_ARTIFACT,
-            description: "Read an artifact as it is now, including the owner's latest edits. For a table: its \
-                          title, columns and rows, as JSON. Read a table again before changing it: people may \
-                          have edited it since.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {"id": id},
-                "required": ["id"],
-                "additionalProperties": false
-            }),
+            description: "Read an artifact as it is now, including the owner's latest edits: a table's columns \
+                          and rows, a document's text, a checklist's items, a board's columns and cards. Read it \
+                          again before changing it: people may have edited it since.",
+            input_schema: object(json!({"id": id}), &["id"]),
         },
         ToolSpec {
             name: CREATE_TABLE,
             description: "Create a table artifact in a channel: a new tab there that people can open and edit \
                           like a spreadsheet. Cells are plain text. Every row needs exactly one cell per column. \
                           Returns the new table's id.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "channel": {"type": "string", "description": "Channel name, without the #."},
-                    "title": {"type": "string", "description": "A few words saying what the table holds."},
-                    "columns": columns,
-                    "rows": rows
-                },
-                "required": ["channel", "title", "columns"],
-                "additionalProperties": false
-            }),
+            input_schema: object(json!({"channel": channel, "title": title, "columns": columns, "rows": rows}), &["channel", "title", "columns"]),
         },
         ToolSpec {
             name: UPDATE_TABLE,
@@ -93,33 +121,112 @@ pub fn specs() -> Vec<ToolSpec> {
                           rows you keep along with your changes. To only add rows at the bottom, use \
                           add_table_rows instead. Whatever the owner is typing in the table when you change its \
                           cells gives way to your version.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
+            input_schema: object(
+                json!({
                     "id": id,
-                    "title": {"type": "string", "description": "A new title."},
+                    "title": new_title,
                     "columns": {"type": "array", "items": {"type": "string"}, "minItems": 1,
                                 "description": "New column names, left to right. Give `rows` too, shaped to them."},
                     "rows": rows
-                },
-                "required": ["id"],
-                "additionalProperties": false
-            }),
+                }),
+                &["id"],
+            ),
         },
         ToolSpec {
             name: ADD_TABLE_ROWS,
             description: "Add rows at the bottom of a table, keeping what's there: the way to log entries in a \
                           table as they come.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
+            input_schema: object(
+                json!({
                     "id": id,
                     "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "minItems": 1,
                              "description": ROWS_DESCRIPTION}
-                },
-                "required": ["id", "rows"],
-                "additionalProperties": false
-            }),
+                }),
+                &["id", "rows"],
+            ),
+        },
+        ToolSpec {
+            name: CREATE_DOCUMENT,
+            description: "Create a document artifact in a channel: a new tab there holding text in markdown \
+                          (notes, a plan, a spec, a write-up) that people can open and edit. Returns its id.",
+            input_schema: object(json!({"channel": channel, "title": title, "text": text}), &["channel", "title", "text"]),
+        },
+        ToolSpec {
+            name: UPDATE_DOCUMENT,
+            description: "Change a document: its title, and/or replace its whole text. read_artifact first and \
+                          give the full new text, the parts you keep included. Whatever the owner is typing in \
+                          it gives way to your version.",
+            input_schema: object(json!({"id": id, "title": new_title, "text": text}), &["id"]),
+        },
+        ToolSpec {
+            name: CREATE_CHECKLIST,
+            description: "Create a checklist artifact in a channel: a new tab there listing things to do, which \
+                          people tick off as they're done. Returns its id.",
+            input_schema: object(json!({"channel": channel, "title": title, "items": items}), &["channel", "title"]),
+        },
+        ToolSpec {
+            name: UPDATE_CHECKLIST,
+            description: "Change a checklist: its title, and/or replace all of its items. What you give replaces \
+                          what's there, so read_artifact first and pass the items you keep. To add items at the \
+                          bottom use add_checklist_items; to tick items off use check_items.",
+            input_schema: object(json!({"id": id, "title": new_title, "items": items}), &["id"]),
+        },
+        ToolSpec {
+            name: ADD_CHECKLIST_ITEMS,
+            description: "Add items at the bottom of a checklist, keeping what's there.",
+            input_schema: object(json!({"id": id, "items": items}), &["id", "items"]),
+        },
+        ToolSpec {
+            name: CHECK_ITEMS,
+            description: "Tick checklist items off as done (or, with done false, back to not done), found by \
+                          their text as read_artifact shows it.",
+            input_schema: object(
+                json!({
+                    "id": id,
+                    "items": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "The items' texts."},
+                    "done": {"type": "boolean", "description": "Default true."}
+                }),
+                &["id", "items"],
+            ),
+        },
+        ToolSpec {
+            name: CREATE_BOARD,
+            description: "Create a board artifact in a channel: a kanban board, a new tab there with named \
+                          columns (like To do, Doing, Done) of cards that people move along as work goes on. \
+                          Without `columns` it has To do, Doing and Done. Returns its id.",
+            input_schema: object(json!({"channel": channel, "title": title, "columns": board_columns}), &["channel", "title"]),
+        },
+        ToolSpec {
+            name: UPDATE_BOARD,
+            description: "Change a board: its title, and/or replace all of its columns and cards. What you give \
+                          replaces what's there, so read_artifact first and pass what you keep. To add cards use \
+                          add_board_cards; to move one use move_board_card.",
+            input_schema: object(json!({"id": id, "title": new_title, "columns": board_columns}), &["id"]),
+        },
+        ToolSpec {
+            name: ADD_BOARD_CARDS,
+            description: "Add cards at the bottom of one of a board's columns, keeping what's there.",
+            input_schema: object(
+                json!({
+                    "id": id,
+                    "column": {"type": "string", "description": "The column's name."},
+                    "cards": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "A line of text each."}
+                }),
+                &["id", "column", "cards"],
+            ),
+        },
+        ToolSpec {
+            name: MOVE_BOARD_CARD,
+            description: "Move a card on a board to the bottom of another column (from Doing to Done, say), \
+                          found by its text as read_artifact shows it.",
+            input_schema: object(
+                json!({
+                    "id": id,
+                    "card": {"type": "string", "description": "The card's text."},
+                    "to": {"type": "string", "description": "The name of the column it goes to."}
+                }),
+                &["id", "card", "to"],
+            ),
         },
     ]
 }
@@ -128,15 +235,26 @@ pub fn specs() -> Vec<ToolSpec> {
 pub fn activity(name: &str, input: &Value) -> Option<String> {
     let channel = input["channel"].as_str().map(|c| c.trim_start_matches('#'));
     let id = input["id"].as_u64();
+    let creating = |noun: &str, c: &str| match input["title"].as_str() {
+        Some(t) => format!("Creating {noun} “{}” in #{c}…", t.trim()),
+        None => format!("Creating a {noun} in #{c}…"),
+    };
     Some(match (name, channel, id) {
         (LIST_ARTIFACTS, Some(c), _) => format!("Looking at #{c}'s artifacts…"),
         (READ_ARTIFACT, _, Some(id)) => format!("Reading artifact {id}…"),
-        (CREATE_TABLE, Some(c), _) => match input["title"].as_str() {
-            Some(t) => format!("Creating table “{}” in #{c}…", t.trim()),
-            None => format!("Creating a table in #{c}…"),
-        },
+        (CREATE_TABLE, Some(c), _) => creating("table", c),
+        (CREATE_DOCUMENT, Some(c), _) => creating("document", c),
+        (CREATE_CHECKLIST, Some(c), _) => creating("checklist", c),
+        (CREATE_BOARD, Some(c), _) => creating("board", c),
         (UPDATE_TABLE, _, Some(id)) => format!("Updating table {id}…"),
+        (UPDATE_DOCUMENT, _, Some(id)) => format!("Updating document {id}…"),
+        (UPDATE_CHECKLIST, _, Some(id)) => format!("Updating checklist {id}…"),
+        (UPDATE_BOARD, _, Some(id)) => format!("Updating board {id}…"),
         (ADD_TABLE_ROWS, _, Some(id)) => format!("Adding rows to table {id}…"),
+        (ADD_CHECKLIST_ITEMS, _, Some(id)) => format!("Adding items to checklist {id}…"),
+        (CHECK_ITEMS, _, Some(id)) => format!("Ticking items in checklist {id}…"),
+        (ADD_BOARD_CARDS, _, Some(id)) => format!("Adding cards to board {id}…"),
+        (MOVE_BOARD_CARD, _, Some(id)) => format!("Moving a card on board {id}…"),
         _ => return None,
     })
 }
@@ -170,6 +288,16 @@ pub fn write(ws: &mut Workspace, name: &str, input: &Value) -> Result<Changed, S
         CREATE_TABLE => create_table(ws, input),
         UPDATE_TABLE => update_table(ws, input),
         ADD_TABLE_ROWS => add_table_rows(ws, input),
+        CREATE_DOCUMENT => create_document(ws, input),
+        UPDATE_DOCUMENT => update_document(ws, input),
+        CREATE_CHECKLIST => create_checklist(ws, input),
+        UPDATE_CHECKLIST => update_checklist(ws, input),
+        ADD_CHECKLIST_ITEMS => add_checklist_items(ws, input),
+        CHECK_ITEMS => check_items(ws, input),
+        CREATE_BOARD => create_board(ws, input),
+        UPDATE_BOARD => update_board(ws, input),
+        ADD_BOARD_CARDS => add_board_cards(ws, input),
+        MOVE_BOARD_CARD => move_board_card(ws, input),
         _ => Err(format!("There is no tool named {name}.")),
     }
 }
@@ -183,9 +311,9 @@ fn list(ws: &Workspace, input: &Value) -> Result<String, String> {
     let mut out = format!("Artifacts in #{}:\n", ws.channels[c].name);
     for id in ids {
         let a = ws.artifact(id).expect("listed");
-        out.push_str(&format!("- id {id}: {} “{}”", a.kind.label().to_lowercase(), a.title));
+        out.push_str(&format!("- id {id}: {} “{}”", a.kind.noun(), a.title));
         match &a.content {
-            Some(ArtifactContent::Table(t)) => out.push_str(&format!(" ({})", size(t))),
+            Some(content) => out.push_str(&format!(" ({})", size(content))),
             None => out.push_str(" (its file can't be read)"),
         }
         out.push('\n');
@@ -197,40 +325,98 @@ fn read_artifact(ws: &Workspace, input: &Value) -> Result<String, String> {
     let id = artifact_id(ws, input)?;
     let a = ws.artifact(id).expect("checked");
     let content = readable(ws, id)?;
-    let place = &ws.channels[a.channel].name;
-    match content {
-        ArtifactContent::Table(t) => Ok(format!(
-            "Table {id} “{}” in #{place}, {}:\n{}",
-            a.title,
-            size(t),
-            json!({"columns": t.columns, "rows": t.rows})
-        )),
-    }
+    let head = format!("{} {id} “{}” in #{}, {}", a.kind.label(), a.title, ws.channels[a.channel].name, size(content));
+    Ok(match content {
+        ArtifactContent::Table(t) => format!("{head}:\n{}", json!({"columns": t.columns, "rows": t.rows})),
+        ArtifactContent::Document(d) if d.text.trim().is_empty() => format!("{head}."),
+        ArtifactContent::Document(d) => format!("{head}:\n{}", d.text),
+        ArtifactContent::Checklist(c) => format!("{head}:\n{}", json!({"items": c.items})),
+        ArtifactContent::Board(b) => format!("{head}:\n{}", json!({"columns": b.columns})),
+    })
 }
 
-fn create_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+// --- creating and changing, for every kind --------------------------------
+
+/// A new artifact holding `content`, in the channel and with the title `input` gives.
+fn create(ws: &mut Workspace, input: &Value, content: ArtifactContent) -> Result<Changed, String> {
     let c = channel(ws, input)?;
     let title = title(&input["title"])?.ok_or("`title` is required.")?;
     title_free(ws, c, &title, None)?;
-    let columns = columns(&input["columns"])?.ok_or("`columns` is required: the column names, left to right.")?;
-    let rows = match &input["rows"] {
-        Value::Null => Vec::new(),
-        v => rows(v, &columns, 0)?,
-    };
-    let table = Table { columns, rows };
-    let size = size(&table);
-    let id = ws.add_artifact_with(c, title.clone(), ArtifactContent::Table(table));
+    let noun = content.kind().noun();
+    let size = size(&content);
+    let id = ws.add_artifact_with(c, title.clone(), content);
     let place = &ws.channels[c].name;
     Ok(Changed {
         id,
         content: true,
         title: true,
-        shown: format!("Created table “{title}” in #{place} ({size})."),
+        shown: format!("Created {noun} “{title}” in #{place} ({size})."),
         result: format!(
-            "Created table {id} “{title}” in #{place} ({size}). It is a tab in #{place} now; people can edit it \
+            "Created {noun} {id} “{title}” in #{place} ({size}). It is a tab in #{place} now; people can edit it \
              too, so read it again before changing it later."
         ),
     })
+}
+
+/// Give artifact `id` the title and/or content given (`None`: kept), and
+/// say what changed.
+fn update(ws: &mut Workspace, id: usize, new_title: Option<String>, new_content: Option<ArtifactContent>) -> Result<Changed, String> {
+    if let Some(t) = &new_title {
+        title_free(ws, ws.artifact(id).expect("checked").channel, t, Some(id))?;
+    }
+    let a = ws.artifact_mut(id).expect("checked");
+    let kind = a.kind;
+    let content = new_content.as_ref().is_some_and(|c| Some(c) != a.content.as_ref());
+    let title = new_title.as_ref().is_some_and(|t| *t != a.title);
+    if let Some(t) = new_title.filter(|_| title) {
+        a.title = t;
+    }
+    if let Some(c) = new_content.filter(|_| content) {
+        a.content = Some(c);
+    }
+    let a = ws.artifact(id).expect("checked");
+    let (name, place) = (a.title.clone(), ws.channels[a.channel].name.clone());
+    let size = a.content.as_ref().map(size).unwrap_or_default();
+    let (label, noun) = (kind.label(), kind.noun());
+    let what = match (title, content) {
+        (true, true) => "renamed and rewrote",
+        (true, false) => "renamed",
+        (false, true) => "rewrote",
+        (false, false) => {
+            return Ok(Changed {
+                id,
+                content,
+                title,
+                shown: String::new(),
+                result: format!("{label} {id} “{name}” already says that; nothing changed."),
+            });
+        }
+    };
+    let what_cap = format!("{}{}", what[..1].to_uppercase(), &what[1..]);
+    Ok(Changed {
+        id,
+        content,
+        title,
+        shown: format!("{what_cap} {noun} “{name}” in #{place} ({size})."),
+        result: format!("{label} {id} “{name}” in #{place} is {what} ({size})."),
+    })
+}
+
+/// Artifact `id` now holds `content`, changed by `done` ("Added 2 rows
+/// to"), said of it.
+fn changed(ws: &mut Workspace, id: usize, content: ArtifactContent, done: &str) -> Changed {
+    let size = size(&content);
+    let a = ws.artifact_mut(id).expect("checked");
+    a.content = Some(content);
+    let a = ws.artifact(id).expect("checked");
+    let (noun, name, place) = (a.kind.noun(), a.title.clone(), ws.channels[a.channel].name.clone());
+    Changed {
+        id,
+        content: true,
+        title: false,
+        shown: format!("{done} {noun} “{name}” in #{place} ({size})."),
+        result: format!("{done} {noun} {id} “{name}” in #{place}; it has {size} now."),
+    }
 }
 
 /// An error if another artifact in channel `c` than `except` already has
@@ -239,14 +425,27 @@ fn create_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
 fn title_free(ws: &Workspace, c: usize, title: &str, except: Option<usize>) -> Result<(), String> {
     match ws.artifacts.iter().find(|a| a.channel == c && Some(a.id) != except && a.title.eq_ignore_ascii_case(title)) {
         Some(a) => Err(format!(
-            "#{} already has a {} titled “{}” (id {}). Change it with update_table, or pick another title.",
+            "#{} already has a {} titled “{}” (id {}). Change it with update_{}, or pick another title.",
             ws.channels[c].name,
-            a.kind.label().to_lowercase(),
+            a.kind.noun(),
             a.title,
-            a.id
+            a.id,
+            a.kind.noun()
         )),
         None => Ok(()),
     }
+}
+
+// --- tables ------------------------------------------------------------------
+
+fn create_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    channel(ws, input)?;
+    let columns = columns(&input["columns"])?.ok_or("`columns` is required: the column names, left to right.")?;
+    let rows = match &input["rows"] {
+        Value::Null => Vec::new(),
+        v => rows(v, &columns, 0)?,
+    };
+    create(ws, input, ArtifactContent::Table(Table { columns, rows }))
 }
 
 fn update_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
@@ -265,47 +464,10 @@ fn update_table(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
     if new_title.is_none() && new_rows.is_none() {
         return Err("Nothing to change: give `title`, `rows`, or `columns` with `rows`.".into());
     }
-    if let Some(t) = &new_title {
-        title_free(ws, ws.artifact(id).expect("checked").channel, t, Some(id))?;
-    }
-    let table = Table {
-        columns: new_columns.unwrap_or_else(|| old.columns.clone()),
-        rows: new_rows.unwrap_or_else(|| old.rows.clone()),
-    };
-    let content = table != *old;
-    let size = size(&table);
-    let a = ws.artifact_mut(id).expect("checked");
-    let title = new_title.as_ref().is_some_and(|t| *t != a.title);
-    if let Some(t) = new_title.filter(|_| title) {
-        a.title = t;
-    }
-    if content {
-        a.content = Some(ArtifactContent::Table(table));
-    }
-    let a = ws.artifact(id).expect("checked");
-    let (name, place) = (a.title.clone(), ws.channels[a.channel].name.clone());
-    let what = match (title, content) {
-        (true, true) => "renamed and rewrote",
-        (true, false) => "renamed",
-        (false, true) => "rewrote",
-        (false, false) => {
-            return Ok(Changed {
-                id,
-                content,
-                title,
-                shown: String::new(),
-                result: format!("Table {id} “{name}” already says that; nothing changed."),
-            });
-        }
-    };
-    let what_cap = format!("{}{}", what[..1].to_uppercase(), &what[1..]);
-    Ok(Changed {
-        id,
-        content,
-        title,
-        shown: format!("{what_cap} table “{name}” in #{place} ({size})."),
-        result: format!("Table {id} “{name}” in #{place} is {what} ({size})."),
-    })
+    let content = new_rows.map(|rows| {
+        ArtifactContent::Table(Table { columns: new_columns.unwrap_or_else(|| old.columns.clone()), rows })
+    });
+    update(ws, id, new_title, content)
 }
 
 fn add_table_rows(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
@@ -318,27 +480,296 @@ fn add_table_rows(ws: &mut Workspace, input: &Value) -> Result<Changed, String> 
     let mut table = old.clone();
     let n = added.len();
     table.rows.extend(added);
-    let size = size(&table);
-    let a = ws.artifact_mut(id).expect("checked");
-    a.content = Some(ArtifactContent::Table(table));
+    Ok(changed(ws, id, ArtifactContent::Table(table), &format!("Added {} to", plural(n, "row"))))
+}
+
+// --- documents ---------------------------------------------------------------
+
+fn create_document(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    channel(ws, input)?;
+    let text = document_text(&input["text"])?.ok_or("`text` is required: the document's text, in markdown.")?;
+    create(ws, input, ArtifactContent::Document(Document { text }))
+}
+
+fn update_document(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    of_kind(ws, id, ArtifactKind::Document)?;
+    let new_title = title(&input["title"])?;
+    let text = document_text(&input["text"])?;
+    if new_title.is_none() && text.is_none() {
+        return Err("Nothing to change: give `title` and/or `text`.".into());
+    }
+    update(ws, id, new_title, text.map(|text| ArtifactContent::Document(Document { text })))
+}
+
+fn document_text(v: &Value) -> Result<Option<String>, String> {
+    let text = match v {
+        Value::Null => return Ok(None),
+        v => v.as_str().ok_or("`text` must be text (a string), in markdown.")?,
+    };
+    if text.chars().count() > MAX_DOCUMENT {
+        return Err(format!("`text` is too long: a document has at most {MAX_DOCUMENT} characters."));
+    }
+    Ok(Some(text.to_string()))
+}
+
+// --- checklists --------------------------------------------------------------
+
+fn create_checklist(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    channel(ws, input)?;
+    let items = match &input["items"] {
+        Value::Null => Vec::new(),
+        v => items(v, 0)?,
+    };
+    create(ws, input, ArtifactContent::Checklist(Checklist { items }))
+}
+
+fn update_checklist(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    of_kind(ws, id, ArtifactKind::Checklist)?;
+    let new_title = title(&input["title"])?;
+    let new_items = match &input["items"] {
+        Value::Null => None,
+        v => Some(items(v, 0)?),
+    };
+    if new_title.is_none() && new_items.is_none() {
+        return Err("Nothing to change: give `title` and/or `items`.".into());
+    }
+    update(ws, id, new_title, new_items.map(|items| ArtifactContent::Checklist(Checklist { items })))
+}
+
+fn add_checklist_items(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    let mut list = checklist(ws, id)?.clone();
+    let added = items(&input["items"], list.items.len())?;
+    if added.is_empty() {
+        return Err("`items` is empty: give at least one item to add.".into());
+    }
+    let n = added.len();
+    list.items.extend(added);
+    Ok(changed(ws, id, ArtifactContent::Checklist(list), &format!("Added {} to", plural(n, "item"))))
+}
+
+fn check_items(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    let mut list = checklist(ws, id)?.clone();
+    let done = match &input["done"] {
+        Value::Null => true,
+        v => v.as_bool().ok_or("`done` must be true or false.")?,
+    };
+    let wanted = texts(&input["items"], "items", "the items' texts")?;
+    if wanted.is_empty() {
+        return Err("`items` is empty: give the texts of the items to tick.".into());
+    }
+    let mut found = Vec::new();
+    for want in &wanted {
+        let at: Vec<usize> = (0..list.items.len()).filter(|&i| same_text(&list.items[i].text, want)).collect();
+        if at.is_empty() {
+            let have: Vec<&str> = list.items.iter().map(|i| i.text.as_str()).collect();
+            return Err(format!(
+                "No item says “{want}”. Nothing was changed. The items are: {}.",
+                if have.is_empty() { "none".to_string() } else { have.iter().map(|t| format!("“{t}”")).collect::<Vec<_>>().join(", ") }
+            ));
+        }
+        found.extend(at);
+    }
+    let mut n = 0;
+    for i in found {
+        if list.items[i].done != done {
+            list.items[i].done = done;
+            n += 1;
+        }
+    }
     let a = ws.artifact(id).expect("checked");
-    let (name, place) = (a.title.clone(), ws.channels[a.channel].name.clone());
-    let rows = if n == 1 { "1 row".to_string() } else { format!("{n} rows") };
-    Ok(Changed {
-        id,
-        content: true,
-        title: false,
-        shown: format!("Added {rows} to table “{name}” in #{place} ({size})."),
-        result: format!("Added {rows} to table {id} “{name}” in #{place}; it has {size} now."),
+    if n == 0 {
+        return Ok(Changed {
+            id,
+            content: false,
+            title: false,
+            shown: String::new(),
+            result: format!("Checklist {id} “{}”: already so; nothing changed.", a.title),
+        });
+    }
+    let how = if done { "Ticked off" } else { "Unticked" };
+    Ok(changed(ws, id, ArtifactContent::Checklist(list), &format!("{how} {} in", plural(n, "item"))))
+}
+
+/// Checklist items from `v`, for a checklist that has `before` items besides them.
+/// An item is `{"text": …, "done": …}`, or only its text.
+fn items(v: &Value, before: usize) -> Result<Vec<ChecklistItem>, String> {
+    let list = v.as_array().ok_or("`items` must be an array of items, each {\"text\": …, \"done\": …}.")?;
+    if before + list.len() > MAX_ITEMS {
+        return Err(format!("That makes {} items, too many: a checklist has at most {MAX_ITEMS}.", before + list.len()));
+    }
+    list.iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let (text, done) = match item {
+                Value::String(s) => (Some(s.as_str()), Value::Null),
+                Value::Object(o) => (o.get("text").and_then(Value::as_str), o.get("done").cloned().unwrap_or(Value::Null)),
+                _ => (None, Value::Null),
+            };
+            let text = text.ok_or_else(|| format!("Item {} has no `text`: give each item as {{\"text\": …}}.", i + 1))?;
+            let done = match done {
+                Value::Null => false,
+                v => v.as_bool().ok_or_else(|| format!("Item {}: `done` must be true or false.", i + 1))?,
+            };
+            Ok(ChecklistItem { text: line(text, &format!("Item {}", i + 1))?, done })
+        })
+        .collect()
+}
+
+// --- boards ------------------------------------------------------------------
+
+fn create_board(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    channel(ws, input)?;
+    let board = match &input["columns"] {
+        Value::Null => Board::blank(),
+        v => board_columns(v)?,
+    };
+    create(ws, input, ArtifactContent::Board(board))
+}
+
+fn update_board(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    of_kind(ws, id, ArtifactKind::Board)?;
+    let new_title = title(&input["title"])?;
+    let new_board = match &input["columns"] {
+        Value::Null => None,
+        v => Some(board_columns(v)?),
+    };
+    if new_title.is_none() && new_board.is_none() {
+        return Err("Nothing to change: give `title` and/or `columns`.".into());
+    }
+    update(ws, id, new_title, new_board.map(ArtifactContent::Board))
+}
+
+fn add_board_cards(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    let mut board = board(ws, id)?.clone();
+    let col = board_column(&board, &input["column"], "column")?;
+    let cards = cards(&input["cards"], board.cards())?;
+    if cards.is_empty() {
+        return Err("`cards` is empty: give at least one card to add.".into());
+    }
+    let n = cards.len();
+    board.columns[col].cards.extend(cards);
+    let done = format!("Added {} to “{}” on", plural(n, "card"), board.columns[col].name);
+    Ok(changed(ws, id, ArtifactContent::Board(board), &done))
+}
+
+fn move_board_card(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    let mut board = board(ws, id)?.clone();
+    let want = input["card"].as_str().ok_or("`card` is required: the card's text.")?;
+    let to = board_column(&board, &input["to"], "to")?;
+    let at = board
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(c, col)| col.cards.iter().position(|card| same_text(card, want)).map(|i| (c, i)));
+    let Some((col, ix)) = at else {
+        return Err(format!("No card on the board says “{}”. Nothing was changed. read_artifact shows its cards.", want.trim()));
+    };
+    if col == to {
+        return Ok(Changed {
+            id,
+            content: false,
+            title: false,
+            shown: String::new(),
+            result: format!("That card is in “{}” already; nothing changed.", board.columns[to].name),
+        });
+    }
+    let card = board.columns[col].cards[ix].clone();
+    board.move_card(col, ix, to);
+    let done = format!("Moved “{card}” from “{}” to “{}” on", board.columns[col].name, board.columns[to].name);
+    Ok(changed(ws, id, ArtifactContent::Board(board), &done))
+}
+
+/// A board from `[{"name": …, "cards": [...]}, ...]`.
+fn board_columns(v: &Value) -> Result<Board, String> {
+    let list = v.as_array().ok_or("`columns` must be an array of columns, each {\"name\": …, \"cards\": [...]}.")?;
+    if list.is_empty() {
+        return Err("`columns` is empty: a board needs at least one column.".into());
+    }
+    if list.len() > MAX_COLUMNS {
+        return Err(format!("{} columns is too many: at most {MAX_COLUMNS}.", list.len()));
+    }
+    let mut board = Board::default();
+    for (i, col) in list.iter().enumerate() {
+        let name = col["name"].as_str().map(str::trim).unwrap_or_default();
+        if name.is_empty() {
+            return Err(format!("Column {} has no name: every column needs one.", i + 1));
+        }
+        let cards = match &col["cards"] {
+            Value::Null => Vec::new(),
+            v => cards(v, board.cards())?,
+        };
+        board.columns.push(BoardColumn { name: name.to_string(), cards });
+    }
+    Ok(board)
+}
+
+/// Card texts from `v`, for a board that has `before` cards besides them.
+fn cards(v: &Value, before: usize) -> Result<Vec<String>, String> {
+    let list = texts(v, "cards", "a line of text each")?;
+    if before + list.len() > MAX_ITEMS {
+        return Err(format!("That makes {} cards, too many: a board has at most {MAX_ITEMS}.", before + list.len()));
+    }
+    list.iter().enumerate().map(|(i, t)| line(t, &format!("Card {}", i + 1))).collect()
+}
+
+/// The index of the column `v` names (ignoring case), for field `field`.
+fn board_column(board: &Board, v: &Value, field: &str) -> Result<usize, String> {
+    let name = v.as_str().map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| format!("`{field}` is required: a column's name."))?;
+    board.columns.iter().position(|c| c.name.eq_ignore_ascii_case(name)).ok_or_else(|| {
+        let names: Vec<String> = board.columns.iter().map(|c| format!("“{}”", c.name)).collect();
+        format!("The board has no column “{name}”. Its columns are {}.", names.join(", "))
     })
 }
 
 // --- checking what the agent passed ----------------------------------------
 
-/// "3 columns × 2 rows".
-fn size(t: &Table) -> String {
-    let plural = |n: usize, what: &str| if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") };
-    format!("{} × {}", plural(t.columns.len(), "column"), plural(t.rows.len(), "row"))
+/// "3 columns × 2 rows", "12 lines", "2 of 5 done", "3 columns, 7 cards".
+fn size(content: &ArtifactContent) -> String {
+    match content {
+        ArtifactContent::Table(t) => format!("{} × {}", plural(t.columns.len(), "column"), plural(t.rows.len(), "row")),
+        ArtifactContent::Document(d) if d.text.trim().is_empty() => "empty".to_string(),
+        ArtifactContent::Document(d) => plural(d.lines(), "line"),
+        ArtifactContent::Checklist(c) if c.items.is_empty() => "no items".to_string(),
+        ArtifactContent::Checklist(c) => format!("{} of {} done", c.done(), c.items.len()),
+        ArtifactContent::Board(b) => format!("{}, {}", plural(b.columns.len(), "column"), plural(b.cards(), "card")),
+    }
+}
+
+fn plural(n: usize, what: &str) -> String {
+    if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
+}
+
+/// Whether `have` is what `want` says, ignoring case and surrounding space.
+fn same_text(have: &str, want: &str) -> bool {
+    have.trim().to_lowercase() == want.trim().to_lowercase()
+}
+
+/// A checklist item's or card's text: one line, not blank.
+fn line(text: &str, what: &str) -> Result<String, String> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return Err(format!("{what} is blank: give it a few words."));
+    }
+    if text.chars().count() > MAX_ITEM {
+        return Err(format!("{what} is too long: keep it to {MAX_ITEM} characters."));
+    }
+    Ok(text)
+}
+
+/// The strings in array `v`, field `field`.
+fn texts(v: &Value, field: &str, what: &str) -> Result<Vec<String>, String> {
+    let list = v.as_array().ok_or_else(|| format!("`{field}` must be an array of strings: {what}."))?;
+    list.iter()
+        .enumerate()
+        .map(|(i, t)| t.as_str().map(str::to_string).ok_or_else(|| format!("`{field}` item {} isn't text: give strings.", i + 1)))
+        .collect()
 }
 
 /// The id in `input["id"]`, of an artifact that exists.
@@ -365,12 +796,40 @@ fn readable(ws: &Workspace, id: usize) -> Result<&ArtifactContent, String> {
     })
 }
 
-/// Table `id`'s content, for the tools that change tables.
+/// Artifact `id`'s content, for the tools that change artifacts of `kind`:
+/// an error if it is another kind.
+fn of_kind(ws: &Workspace, id: usize, kind: ArtifactKind) -> Result<&ArtifactContent, String> {
+    let content = readable(ws, id)?;
+    match content.kind() {
+        k if k == kind => Ok(content),
+        k => Err(format!(
+            "Artifact {id} “{}” is a {}, not a {}. Use update_{} and its other tools for it.",
+            ws.artifact(id).expect("checked").title,
+            k.noun(),
+            kind.noun(),
+            k.noun()
+        )),
+    }
+}
+
 fn table(ws: &Workspace, id: usize) -> Result<&Table, String> {
-    // Tables are the only kind yet. Another kind adds its arm here, an
-    // error saying "Artifact {id} “…” is a document, not a table."
-    match readable(ws, id)? {
+    match of_kind(ws, id, ArtifactKind::Table)? {
         ArtifactContent::Table(t) => Ok(t),
+        _ => unreachable!("checked"),
+    }
+}
+
+fn checklist(ws: &Workspace, id: usize) -> Result<&Checklist, String> {
+    match of_kind(ws, id, ArtifactKind::Checklist)? {
+        ArtifactContent::Checklist(c) => Ok(c),
+        _ => unreachable!("checked"),
+    }
+}
+
+fn board(ws: &Workspace, id: usize) -> Result<&Board, String> {
+    match of_kind(ws, id, ArtifactKind::Board)? {
+        ArtifactContent::Board(b) => Ok(b),
+        _ => unreachable!("checked"),
     }
 }
 
@@ -382,7 +841,7 @@ fn title(v: &Value) -> Result<Option<String>, String> {
     };
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     if title.is_empty() {
-        return Err("`title` is blank: give the table a few words saying what it holds.".into());
+        return Err("`title` is blank: give it a few words saying what it holds.".into());
     }
     if title.chars().count() > MAX_TITLE {
         return Err(format!("`title` is too long: keep it to {MAX_TITLE} characters."));
@@ -457,7 +916,144 @@ mod tests {
     fn table_of(ws: &Workspace, id: usize) -> &Table {
         match ws.artifact(id).unwrap().content.as_ref().unwrap() {
             ArtifactContent::Table(t) => t,
+            other => panic!("not a table: {other:?}"),
         }
+    }
+
+    fn content_of(ws: &Workspace, id: usize) -> &ArtifactContent {
+        ws.artifact(id).unwrap().content.as_ref().unwrap()
+    }
+
+    #[test]
+    fn a_document_is_created_read_and_rewritten() {
+        let mut ws = data::seed();
+        let made = write(&mut ws, CREATE_DOCUMENT, &json!({"channel": "general", "title": "Launch plan",
+            "text": "# Plan\n\n- ship it\n"})).unwrap();
+        assert_eq!(made.shown, "Created document “Launch plan” in #general (3 lines).");
+        assert_eq!(*content_of(&ws, made.id), ArtifactContent::Document(Document { text: "# Plan\n\n- ship it\n".into() }));
+        let listed = read(&ws, LIST_ARTIFACTS, &json!({"channel": "general"})).unwrap();
+        assert!(listed.contains(&format!("- id {}: document “Launch plan” (3 lines)", made.id)), "{listed}");
+        let shown = read(&ws, READ_ARTIFACT, &json!({"id": made.id})).unwrap();
+        assert_eq!(shown, format!("Document {} “Launch plan” in #general, 3 lines:\n# Plan\n\n- ship it\n", made.id));
+
+        let c = write(&mut ws, UPDATE_DOCUMENT, &json!({"id": made.id, "text": "Done."})).unwrap();
+        assert!(c.content && !c.title);
+        assert_eq!(c.shown, "Rewrote document “Launch plan” in #general (1 line).");
+        let c = write(&mut ws, UPDATE_DOCUMENT, &json!({"id": made.id, "text": "Done."})).unwrap();
+        assert!(!c.content && c.shown.is_empty(), "same text changes nothing");
+
+        let empty = write(&mut ws, CREATE_DOCUMENT, &json!({"channel": "general", "title": "Blank", "text": ""})).unwrap();
+        assert_eq!(read(&ws, READ_ARTIFACT, &json!({"id": empty.id})).unwrap(), format!("Document {} “Blank” in #general, empty.", empty.id));
+
+        for (name, input, want) in [
+            (CREATE_DOCUMENT, json!({"channel": "general", "title": "X"}), "`text` is required"),
+            (CREATE_DOCUMENT, json!({"channel": "general", "title": "X", "text": 3}), "`text` must be text"),
+            (CREATE_DOCUMENT, json!({"channel": "general", "title": "X", "text": "x".repeat(MAX_DOCUMENT + 1)}), "too long"),
+            (UPDATE_DOCUMENT, json!({"id": made.id}), "Nothing to change"),
+        ] {
+            let e = err(write(&mut ws, name, &input));
+            assert!(e.contains(want), "{name} {input}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_checklist_is_created_added_to_and_ticked_off() {
+        let mut ws = data::seed();
+        let made = write(&mut ws, CREATE_CHECKLIST, &json!({"channel": "general", "title": "Release",
+            "items": [{"text": "Write notes"}, {"text": " Tag  v1 ", "done": true}, "Tweet"]})).unwrap();
+        assert_eq!(made.shown, "Created checklist “Release” in #general (1 of 3 done).");
+        let id = made.id;
+        let ArtifactContent::Checklist(list) = content_of(&ws, id) else { panic!() };
+        assert_eq!(list.items[1], ChecklistItem { text: "Tag v1".into(), done: true }, "texts are tidied");
+
+        let shown = read(&ws, READ_ARTIFACT, &json!({"id": id})).unwrap();
+        let (head, body) = shown.split_once('\n').unwrap();
+        assert_eq!(head, format!("Checklist {id} “Release” in #general, 1 of 3 done:"));
+        assert_eq!(serde_json::from_str::<Value>(body).unwrap()["items"][2], json!({"text": "Tweet", "done": false}));
+
+        let c = write(&mut ws, ADD_CHECKLIST_ITEMS, &json!({"id": id, "items": [{"text": "Blog post"}]})).unwrap();
+        assert_eq!(c.shown, "Added 1 item to checklist “Release” in #general (1 of 4 done).");
+
+        let c = write(&mut ws, CHECK_ITEMS, &json!({"id": id, "items": ["write notes", "Tag v1"]})).unwrap();
+        assert_eq!(c.shown, "Ticked off 1 item in checklist “Release” in #general (2 of 4 done).", "Tag v1 was done already");
+        let c = write(&mut ws, CHECK_ITEMS, &json!({"id": id, "items": ["Tag v1"], "done": false})).unwrap();
+        assert_eq!(c.shown, "Unticked 1 item in checklist “Release” in #general (1 of 4 done).");
+        let c = write(&mut ws, CHECK_ITEMS, &json!({"id": id, "items": ["Tag v1"], "done": false})).unwrap();
+        assert!(!c.content && c.shown.is_empty());
+
+        let before = content_of(&ws, id).clone();
+        for (name, input, want) in [
+            (CHECK_ITEMS, json!({"id": id, "items": ["Write notes", "Nope"]}), "No item says “Nope”. Nothing was changed. The items are: “Write notes”"),
+            (CHECK_ITEMS, json!({"id": id, "items": []}), "`items` is empty"),
+            (ADD_CHECKLIST_ITEMS, json!({"id": id, "items": [{"text": "  "}]}), "Item 1 is blank"),
+            (ADD_CHECKLIST_ITEMS, json!({"id": id, "items": [{"done": true}]}), "Item 1 has no `text`"),
+            (ADD_CHECKLIST_ITEMS, json!({"id": id, "items": [{"text": "a", "done": "yes"}]}), "`done` must be true or false"),
+            (ADD_CHECKLIST_ITEMS, json!({"id": id, "items": vec![json!("x"); MAX_ITEMS]}), "too many"),
+            (UPDATE_CHECKLIST, json!({"id": id}), "Nothing to change"),
+        ] {
+            let e = err(write(&mut ws, name, &input));
+            assert!(e.contains(want), "{name} {input}: {e}");
+        }
+        assert_eq!(*content_of(&ws, id), before, "a call that failed changed nothing");
+
+        let c = write(&mut ws, UPDATE_CHECKLIST, &json!({"id": id, "title": "Ship", "items": []})).unwrap();
+        assert!(c.content && c.title);
+        assert_eq!(c.shown, "Renamed and rewrote checklist “Ship” in #general (no items).");
+    }
+
+    #[test]
+    fn a_board_is_created_and_its_cards_added_and_moved() {
+        let mut ws = data::seed();
+        let made = write(&mut ws, CREATE_BOARD, &json!({"channel": "general", "title": "Sprint"})).unwrap();
+        assert_eq!(made.shown, "Created board “Sprint” in #general (3 columns, 0 cards).");
+        let id = made.id;
+
+        let c = write(&mut ws, ADD_BOARD_CARDS, &json!({"id": id, "column": "to do", "cards": ["Login", "Signup"]})).unwrap();
+        assert_eq!(c.shown, "Added 2 cards to “To do” on board “Sprint” in #general (3 columns, 2 cards).");
+        let c = write(&mut ws, MOVE_BOARD_CARD, &json!({"id": id, "card": "login", "to": "Doing"})).unwrap();
+        assert_eq!(c.shown, "Moved “Login” from “To do” to “Doing” on board “Sprint” in #general (3 columns, 2 cards).");
+        let ArtifactContent::Board(b) = content_of(&ws, id) else { panic!() };
+        assert_eq!((b.columns[0].cards.as_slice(), b.columns[1].cards.as_slice()), (&["Signup".to_string()][..], &["Login".to_string()][..]));
+        let c = write(&mut ws, MOVE_BOARD_CARD, &json!({"id": id, "card": "Login", "to": "doing"})).unwrap();
+        assert!(!c.content, "already there");
+
+        let shown = read(&ws, READ_ARTIFACT, &json!({"id": id})).unwrap();
+        let (head, body) = shown.split_once('\n').unwrap();
+        assert_eq!(head, format!("Board {id} “Sprint” in #general, 3 columns, 2 cards:"));
+        assert_eq!(serde_json::from_str::<Value>(body).unwrap()["columns"][1], json!({"name": "Doing", "cards": ["Login"]}));
+
+        let before = content_of(&ws, id).clone();
+        for (name, input, want) in [
+            (ADD_BOARD_CARDS, json!({"id": id, "column": "Later", "cards": ["x"]}), "The board has no column “Later”. Its columns are “To do”, “Doing”, “Done”."),
+            (ADD_BOARD_CARDS, json!({"id": id, "column": "Done", "cards": []}), "`cards` is empty"),
+            (ADD_BOARD_CARDS, json!({"id": id, "cards": ["x"]}), "`column` is required"),
+            (MOVE_BOARD_CARD, json!({"id": id, "card": "Nope", "to": "Done"}), "No card on the board says “Nope”"),
+            (UPDATE_BOARD, json!({"id": id, "columns": []}), "at least one column"),
+            (UPDATE_BOARD, json!({"id": id, "columns": [{"name": " "}]}), "Column 1 has no name"),
+            (UPDATE_BOARD, json!({"id": id, "columns": [{"name": "A", "cards": [""]}]}), "Card 1 is blank"),
+        ] {
+            let e = err(write(&mut ws, name, &input));
+            assert!(e.contains(want), "{name} {input}: {e}");
+        }
+        assert_eq!(*content_of(&ws, id), before, "a call that failed changed nothing");
+
+        let c = write(&mut ws, UPDATE_BOARD, &json!({"id": id, "columns": [{"name": "Backlog", "cards": ["A", "B"]}, {"name": "Live"}]})).unwrap();
+        assert_eq!(c.shown, "Rewrote board “Sprint” in #general (2 columns, 2 cards).");
+    }
+
+    #[test]
+    fn each_kinds_tools_refuse_the_other_kinds() {
+        let mut ws = data::seed();
+        let doc = write(&mut ws, CREATE_DOCUMENT, &json!({"channel": "general", "title": "Notes", "text": "hi"})).unwrap().id;
+        let e = err(write(&mut ws, ADD_TABLE_ROWS, &json!({"id": doc, "rows": [["x"]]})));
+        assert_eq!(e, format!("Artifact {doc} “Notes” is a document, not a table. Use update_document and its other tools for it."));
+        for name in [UPDATE_TABLE, UPDATE_CHECKLIST, CHECK_ITEMS, UPDATE_BOARD, MOVE_BOARD_CARD] {
+            let e = err(write(&mut ws, name, &json!({"id": doc, "title": "X", "items": ["hi"], "card": "hi", "to": "Done"})));
+            assert!(e.contains("is a document, not a"), "{name}: {e}");
+        }
+        // Titles stay apart across kinds, and the error names the right tool.
+        let e = err(write(&mut ws, CREATE_BOARD, &json!({"channel": "general", "title": "notes"})));
+        assert_eq!(e, format!("#general already has a document titled “Notes” (id {doc}). Change it with update_document, or pick another title."));
     }
 
     fn err(r: Result<impl std::fmt::Debug, String>) -> String {

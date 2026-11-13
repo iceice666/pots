@@ -536,7 +536,7 @@ impl ArtifactEditor for TableEditor {
     /// on. Otherwise it is closed and the agent's text wins. The selection
     /// stays where it was, within the new table's size.
     fn replace(&mut self, content: ArtifactContent, cx: &mut Context<Self>) {
-        let ArtifactContent::Table(table) = content;
+        let ArtifactContent::Table(table) = content else { return };
         let editing = self.editing(cx);
         let text = self.input.read(cx).value().to_string();
         let same_columns = table.columns.len() == self.state.read(cx).delegate().table.columns.len();

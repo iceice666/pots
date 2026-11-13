@@ -16,8 +16,11 @@ macro_rules! secondary {
 }
 
 mod artifact;
+mod board_editor;
 mod chat;
+mod checklist_editor;
 mod composer;
+mod document_editor;
 mod render_md;
 mod selection;
 mod settings;
@@ -61,6 +64,8 @@ fn main() {
         composer::bind_keys(cx);
         chat::bind_keys(cx);
         table_editor::bind_keys(cx);
+        checklist_editor::bind_keys(cx);
+        board_editor::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
 

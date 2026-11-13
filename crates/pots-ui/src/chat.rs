@@ -3461,6 +3461,8 @@ mod tests {
             composer::bind_keys(cx);
             bind_keys(cx);
             crate::table_editor::bind_keys(cx);
+            crate::checklist_editor::bind_keys(cx);
+            crate::board_editor::bind_keys(cx);
         });
         let (app, cx) = cx.add_window_view(|window, cx| ChatApp::new(true, window, cx));
         cx.update(|window, _| window.activate_window());
@@ -3476,7 +3478,7 @@ mod tests {
     fn cell(app: &Entity<ChatApp>, id: usize, row: usize, cx: &mut gpui::VisualTestContext) -> String {
         app.read_with(cx, |app, _| match &app.ws.artifact(id).unwrap().content {
             Some(ArtifactContent::Table(t)) => t.cell(row, 0).to_string(),
-            None => panic!("no content"),
+            other => panic!("not a table: {other:?}"),
         })
     }
 
@@ -3656,7 +3658,7 @@ mod tests {
     fn table(app: &Entity<ChatApp>, id: usize, cx: &mut gpui::VisualTestContext) -> data::Table {
         app.read_with(cx, |app, _| match app.ws.artifact(id).unwrap().content.clone() {
             Some(ArtifactContent::Table(t)) => t,
-            None => panic!("no content"),
+            other => panic!("not a table: {other:?}"),
         })
     }
 
@@ -3692,6 +3694,57 @@ mod tests {
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         assert_eq!(on_disk(&home, id)["rows"][0][0], "Milk, oat");
+    }
+
+    #[gpui::test]
+    fn every_kind_is_made_opened_and_changed_by_agents_while_open(cx: &mut gpui::TestAppContext) {
+        let (app, cx, home) = mock_app(cx);
+        app.update(cx, |app, _| app.persist = true);
+        draw(cx);
+        for &kind in ArtifactKind::ALL {
+            app.update_in(cx, |app, window, cx| app.create_artifact(kind, window, cx));
+            draw(cx);
+            let id = app.read_with(cx, |app, cx| app.open_artifact_id(cx).unwrap());
+            let a = app.read_with(cx, |app, _| (app.ws.artifact(id).unwrap().title.clone(), app.ws.artifact(id).unwrap().kind));
+            assert_eq!(a, (format!("Untitled {}", kind.noun()), kind));
+            assert_eq!(on_disk(&home, id)["kind"], kind.noun(), "its file is written at once");
+            app.update_in(cx, |app, window, cx| app.show_messages(window, cx));
+        }
+
+        let reply = reply_id(&app, cx);
+        let channel = app.read_with(cx, |app, _| app.ws.channels[app.active].name.clone());
+        let (result, failed) = agent_tool(&app, reply, artifact_tools::CREATE_CHECKLIST, serde_json::json!({
+            "channel": channel, "title": "Launch", "items": [{"text": "Docs"}, {"text": "Tag"}]}), cx);
+        assert!(!failed, "{result}");
+        let id = app.read_with(cx, |app, _| *app.ws.channel_artifacts(app.active).last().unwrap());
+        app.update_in(cx, |app, window, cx| app.open_artifact(id, window, cx));
+        draw(cx);
+
+        // Open in front of the owner, an agent ticks an item: the editor shows it.
+        let (result, failed) = agent_tool(&app, reply, artifact_tools::CHECK_ITEMS, serde_json::json!({"id": id, "items": ["docs"]}), cx);
+        assert!(!failed, "{result}");
+        let shown = app.read_with(cx, |app, cx| match &app.view {
+            MainView::Artifact { frame, .. } => frame.read(cx).content(cx),
+            _ => panic!("the checklist stays open"),
+        });
+        let ArtifactContent::Checklist(list) = shown else { panic!("a checklist") };
+        assert_eq!((list.items[0].done, list.items[1].done), (true, false));
+        assert_eq!(on_disk(&home, id)["items"][0], serde_json::json!({"text": "Docs", "done": true}));
+
+        // And a document, rewritten while open.
+        let (result, _) = agent_tool(&app, reply, artifact_tools::CREATE_DOCUMENT, serde_json::json!({
+            "channel": channel, "title": "Notes", "text": "draft"}), cx);
+        let doc = app.read_with(cx, |app, _| *app.ws.channel_artifacts(app.active).last().unwrap());
+        assert!(result.contains("Created document"), "{result}");
+        app.update_in(cx, |app, window, cx| app.open_artifact(doc, window, cx));
+        draw(cx);
+        agent_tool(&app, reply, artifact_tools::UPDATE_DOCUMENT, serde_json::json!({"id": doc, "text": "final"}), cx);
+        let shown = app.read_with(cx, |app, cx| match &app.view {
+            MainView::Artifact { frame, .. } => frame.read(cx).content(cx),
+            _ => panic!("the document stays open"),
+        });
+        assert_eq!(shown, ArtifactContent::Document(data::Document { text: "final".into() }));
+        assert_eq!(on_disk(&home, doc)["text"], "final");
     }
 
     #[gpui::test]

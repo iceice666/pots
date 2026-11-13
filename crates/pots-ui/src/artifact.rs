@@ -15,7 +15,10 @@ use gpui::{
 
 use pots_agent::data::{ArtifactContent, ArtifactKind};
 
+use crate::board_editor::BoardEditor;
+use crate::checklist_editor::ChecklistEditor;
 use crate::composer::{Composer, ComposerEvent};
+use crate::document_editor::DocumentEditor;
 use crate::table_editor::TableEditor;
 use crate::theme;
 
@@ -96,6 +99,9 @@ fn editor_for(content: ArtifactContent, window: &mut Window, cx: &mut Context<Ar
     }
     match content {
         ArtifactContent::Table(table) => attach(cx.new(|cx| TableEditor::new(table, window, cx)), cx),
+        ArtifactContent::Document(document) => attach(cx.new(|cx| DocumentEditor::new(document, window, cx)), cx),
+        ArtifactContent::Checklist(list) => attach(cx.new(|cx| ChecklistEditor::new(list, window, cx)), cx),
+        ArtifactContent::Board(board) => attach(cx.new(|cx| BoardEditor::new(board, window, cx)), cx),
     }
 }
 
@@ -103,6 +109,9 @@ fn editor_for(content: ArtifactContent, window: &mut Window, cx: &mut Context<Ar
 pub fn icon(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::Table => "▦",
+        ArtifactKind::Document => "¶",
+        ArtifactKind::Checklist => "☑",
+        ArtifactKind::Board => "▥",
     }
 }
 
