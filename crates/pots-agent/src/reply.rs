@@ -10,6 +10,7 @@ use serde_json::Value;
 use pots_llm::{Api, Event, Part, Provider, Request, Role, Stop, Turn, Usage};
 
 use crate::agent::tools;
+use crate::artifact_tools;
 use crate::data::Card;
 use crate::sandbox;
 
@@ -135,6 +136,17 @@ impl Reply {
                     results.push(Part::ToolResult { id: call, content, is_error });
                     continue;
                 }
+                if name == artifact_tools::USE_ARTIFACT_TOOLS
+                    && let Some(loaded) = artifact_tools::load(&mut req.tools, &input)
+                {
+                    let (content, is_error) = match loaded {
+                        Ok(text) => (text, false),
+                        Err(e) => (e, true),
+                    };
+                    results.push(Part::ToolResult { id: call, content, is_error });
+                    continue;
+                }
+                artifact_tools::load_for(&mut req.tools, &name);
                 if name == sandbox::CHECK_MERGE_CONFLICTS {
                     let (content, is_error) = check_conflicts(conflicts.clone(), input).await?;
                     results.push(Part::ToolResult { id: call, content, is_error });
@@ -353,6 +365,72 @@ pub(crate) mod tests {
         assert!(requests[0].body.to_string().contains("\"start_task\""), "the tool was offered");
         assert!(requests[1].body.to_string().contains("Leo Okafor has the brief"), "the result went back to the model");
         assert_eq!(host.text, "\n\nStarted it.");
+    }
+
+    /// The names of the tools a recorded request offered, in any wire format.
+    fn offered(request: &pots_mock::Recorded) -> Vec<String> {
+        let tools = request.body["tools"].as_array().cloned().unwrap_or_default();
+        tools.iter().filter_map(|t| t["name"].as_str().or(t["function"]["name"].as_str()).map(String::from)).collect()
+    }
+
+    #[test]
+    fn artifact_writing_tools_come_when_asked_for() {
+        for api in WIRES {
+            let script = Script::new()
+                .tool(artifact_tools::USE_ARTIFACT_TOOLS, json!({"kinds": ["table", "checklist"]}))
+                .tool(artifact_tools::CREATE_TABLE, json!({"channel": "general", "title": "T", "columns": ["A"]}))
+                .text("Done.");
+            let server = MockServer::start(script);
+            let mut host = Recorder::new();
+            futures::executor::block_on(reply_over(&server, api, 8).run(&mut host)).unwrap();
+
+            let requests = server.requests();
+            assert_eq!(requests.len(), 3, "{api:?}");
+            let first = offered(&requests[0]);
+            assert!(first.iter().any(|t| t == artifact_tools::USE_ARTIFACT_TOOLS), "{api:?}: {first:?}");
+            assert!(!first.iter().any(|t| artifact_tools::is_write(t)), "{api:?}: no writing tools yet: {first:?}");
+            let second = offered(&requests[1]);
+            assert_eq!(second[..first.len()], first[..], "{api:?}: added after what was there");
+            for name in [artifact_tools::CREATE_TABLE, artifact_tools::ADD_TABLE_ROWS, artifact_tools::CHECK_ITEMS] {
+                assert!(second.iter().any(|t| t == name), "{api:?}: {name} in {second:?}");
+            }
+            assert!(!second.iter().any(|t| t == artifact_tools::CREATE_BOARD), "{api:?}: only what was asked for");
+            assert!(requests[1].body.to_string().contains("You can use the table tools now"), "{api:?}");
+            assert_eq!(offered(&requests[2]), second, "{api:?}: loading is once");
+            assert!(host.activities.contains(&"Getting table and checklist tools…".to_string()), "{:?}", host.activities);
+        }
+    }
+
+    #[test]
+    fn a_writing_tool_called_before_asking_brings_its_kind() {
+        let script = Script::new()
+            .tool(artifact_tools::CREATE_BOARD, json!({"channel": "general", "title": "B"}))
+            .tool(artifact_tools::USE_ARTIFACT_TOOLS, json!({"kinds": ["table", "poster"]}))
+            .text("Done.");
+        let server = MockServer::start(script);
+        let mut host = Recorder::new();
+        futures::executor::block_on(reply(&server, Api::Anthropic, 8).run(&mut host)).unwrap();
+
+        let requests = server.requests();
+        let second = offered(&requests[1]);
+        assert!(second.iter().any(|t| t == artifact_tools::MOVE_BOARD_CARD), "{second:?}");
+        assert!(!second.iter().any(|t| t == artifact_tools::CREATE_TABLE), "{second:?}");
+        let third = requests[2].body.to_string();
+        assert!(third.contains("There is no artifact kind “poster”"), "{third}");
+        let third = offered(&requests[2]);
+        assert!(!third.iter().any(|t| t == artifact_tools::CREATE_TABLE), "a failed call adds nothing: {third:?}");
+    }
+
+    #[test]
+    fn a_reply_without_the_loader_gets_no_writing_tools() {
+        // The worker's tools: reading ones only.
+        let script = Script::new().tool(artifact_tools::CREATE_TABLE, json!({"channel": "general", "title": "T"})).text("ok");
+        let server = MockServer::start(script);
+        let mut r = reply(&server, Api::Anthropic, 8);
+        r.request.tools = crate::worker::chat_tools();
+        futures::executor::block_on(r.run(&mut Recorder::new())).unwrap();
+        let second = offered(&server.requests()[1]);
+        assert!(!second.iter().any(|t| artifact_tools::is_write(t)), "{second:?}");
     }
 
     /// A reply that can ask a worker, which talks to the same mock server.

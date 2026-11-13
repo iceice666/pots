@@ -1,7 +1,8 @@
 //! The tools agents use on a channel's artifacts: list them and read any
 //! kind; create and change each kind. Writing tools are per kind
 //! (`create_table`, `update_document`, …), since each kind's content is
-//! shaped differently. Deleting is left to people.
+//! shaped differently. Deleting is left to people. Agents get a kind's
+//! writing tools when they ask for them ([`USE_ARTIFACT_TOOLS`]).
 //!
 //! The functions here only change the [`Workspace`]; the app runs the
 //! writing ones (see [`is_write`]) itself, to save the artifact's file and
@@ -73,6 +74,116 @@ pub const MAX_WHITEBOARD_ITEMS: usize = 1000;
 
 pub fn is_tool(name: &str) -> bool {
     ALL.contains(&name)
+}
+
+/// The kind of artifact writing tool `name` changes.
+pub fn kind_of(name: &str) -> Option<ArtifactKind> {
+    Some(match name {
+        CREATE_TABLE | UPDATE_TABLE | ADD_TABLE_ROWS => ArtifactKind::Table,
+        CREATE_DOCUMENT | UPDATE_DOCUMENT => ArtifactKind::Document,
+        CREATE_CHECKLIST | UPDATE_CHECKLIST | ADD_CHECKLIST_ITEMS | CHECK_ITEMS => ArtifactKind::Checklist,
+        CREATE_BOARD | UPDATE_BOARD | ADD_BOARD_CARDS | MOVE_BOARD_CARD => ArtifactKind::Board,
+        CREATE_WHITEBOARD | ADD_WHITEBOARD_ITEMS | UPDATE_WHITEBOARD_ITEMS | REMOVE_WHITEBOARD_ITEMS => {
+            ArtifactKind::Whiteboard
+        }
+        _ => return None,
+    })
+}
+
+/// The tool that offers an agent one kind's writing tools, for the rest
+/// of its reply. Agents start with only the reading tools and this one,
+/// so most replies don't carry the schemas of every kind (see
+/// `docs/artifact-tools-on-demand.md`); [`load`] runs it.
+pub const USE_ARTIFACT_TOOLS: &str = "use_artifact_tools";
+
+/// The artifact tools an agent starts a reply with: the reading ones and
+/// [`USE_ARTIFACT_TOOLS`].
+pub fn offered() -> Vec<ToolSpec> {
+    let mut tools: Vec<ToolSpec> = specs().into_iter().filter(|t| !is_write(t.name)).collect();
+    let kinds: Vec<&str> = ArtifactKind::ALL.iter().map(|k| k.noun()).collect();
+    tools.push(ToolSpec {
+        name: USE_ARTIFACT_TOOLS,
+        description: "Get the tools to create and change artifacts of these kinds, for the rest of this reply. \
+                      table: rows and columns of plain text, like a spreadsheet. document: markdown text (notes, \
+                      a plan, a spec). checklist: things to do, ticked off when done. board: a kanban board of \
+                      cards in columns. whiteboard: sticky notes, boxes and text placed freely, for brainstorming. \
+                      When you'll change an artifact you're about to read, call this in the same step as \
+                      read_artifact.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {"kinds": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": kinds}}},
+            "required": ["kinds"],
+            "additionalProperties": false
+        }),
+    });
+    tools
+}
+
+/// Whether `tools` were [offered](offered) with [`USE_ARTIFACT_TOOLS`], so
+/// writing tools are added as the agent asks for them.
+fn loads_on_demand(tools: &[ToolSpec]) -> bool {
+    tools.iter().any(|t| t.name == USE_ARTIFACT_TOOLS)
+}
+
+/// Add `kind`'s writing tools to the end of `tools` (keeping what's there,
+/// so the request's cached prefix holds): the names added.
+fn add_kind(tools: &mut Vec<ToolSpec>, kind: ArtifactKind) -> Vec<&'static str> {
+    let new: Vec<ToolSpec> = specs()
+        .into_iter()
+        .filter(|t| kind_of(t.name) == Some(kind) && !tools.iter().any(|have| have.name == t.name))
+        .collect();
+    let names = new.iter().map(|t| t.name).collect();
+    tools.extend(new);
+    names
+}
+
+/// Run a [`USE_ARTIFACT_TOOLS`] call: add the kinds it names to `tools`.
+/// `None` if `tools` weren't offered it.
+pub fn load(tools: &mut Vec<ToolSpec>, input: &Value) -> Option<Result<String, String>> {
+    if !loads_on_demand(tools) {
+        return None;
+    }
+    let names: Vec<&str> = match input["kinds"].as_array() {
+        Some(names) if !names.is_empty() => names.iter().map(|n| n.as_str().unwrap_or_default()).collect(),
+        _ => return Some(Err("`kinds` is required: a list of artifact kinds.".into())),
+    };
+    // Check every name before adding any, so a failed call adds nothing.
+    let mut kinds = Vec::new();
+    for name in names {
+        let Some(kind) = ArtifactKind::ALL.iter().copied().find(|k| k.noun() == name) else {
+            let kinds: Vec<&str> = ArtifactKind::ALL.iter().map(|k| k.noun()).collect();
+            return Some(Err(format!("There is no artifact kind “{name}”. Kinds: {}.", kinds.join(", "))));
+        };
+        kinds.push(kind);
+    }
+    let mut lines = Vec::new();
+    for kind in kinds {
+        add_kind(tools, kind);
+        let have: Vec<&str> = tools.iter().map(|t| t.name).filter(|n| kind_of(n) == Some(kind)).collect();
+        lines.push(format!("You can use the {} tools now: {}.", kind.noun(), have.join(", ")));
+    }
+    Some(Ok(lines.join("\n")))
+}
+
+/// Before running a call to writing tool `name` that the agent wasn't
+/// given yet, add that tool's kind to `tools`, so later requests describe
+/// the tools the conversation uses.
+pub fn load_for(tools: &mut Vec<ToolSpec>, name: &str) {
+    if let Some(kind) = kind_of(name).filter(|_| loads_on_demand(tools)) {
+        add_kind(tools, kind);
+    }
+}
+
+/// Give `tools` every writing tool up front, in place of
+/// [`USE_ARTIFACT_TOOLS`]: for Claude Code, whose tool list is fixed when
+/// it starts.
+pub fn load_all(tools: &mut Vec<ToolSpec>) {
+    if loads_on_demand(tools) {
+        tools.retain(|t| t.name != USE_ARTIFACT_TOOLS);
+        let have: Vec<&str> = tools.iter().map(|t| t.name).collect();
+        let missing: Vec<ToolSpec> = specs().into_iter().filter(|t| !have.contains(&t.name)).collect();
+        tools.extend(missing);
+    }
 }
 
 /// Whether tool `name` changes an artifact (the rest only read).
@@ -302,6 +413,13 @@ pub fn specs() -> Vec<ToolSpec> {
 
 /// What the UI shows while an artifact tool runs.
 pub fn activity(name: &str, input: &Value) -> Option<String> {
+    if name == USE_ARTIFACT_TOOLS {
+        let kinds: Vec<&str> = input["kinds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        return Some(match kinds.as_slice() {
+            [] => "Getting artifact tools…".to_string(),
+            kinds => format!("Getting {} tools…", kinds.join(" and ")),
+        });
+    }
     let channel = input["channel"].as_str().map(|c| c.trim_start_matches('#'));
     let id = input["id"].as_u64();
     let creating = |noun: &str, c: &str| match input["title"].as_str() {
@@ -1610,8 +1728,18 @@ mod tests {
 
     #[test]
     fn every_agent_gets_the_tools_and_the_ui_says_what_they_do() {
+        let names: Vec<&str> = specs().iter().map(|t| t.name).collect();
+        assert_eq!(names, ALL);
+        // Agents start with the reading tools; each kind's writing tools come when asked for.
         let names: Vec<&str> = tools::specs().iter().map(|t| t.name).collect();
-        assert!(ALL.iter().all(|t| names.contains(t)), "{names:?}");
+        assert!(names.ends_with(&[LIST_ARTIFACTS, READ_ARTIFACT, USE_ARTIFACT_TOOLS]), "{names:?}");
+        assert!(!names.iter().any(|t| is_write(t)), "{names:?}");
+        assert!(ALL.iter().all(|t| !is_write(t) || kind_of(t).is_some()), "every writing tool has a kind");
+        let mut all = tools::specs();
+        load_all(&mut all);
+        let names: Vec<&str> = all.iter().map(|t| t.name).collect();
+        assert!(ALL.iter().all(|t| names.contains(t)) && !names.contains(&USE_ARTIFACT_TOOLS), "{names:?}");
+        assert_eq!(tools::activity(USE_ARTIFACT_TOOLS, &json!({"kinds": ["board"]})), "Getting board tools…");
         assert_eq!(tools::activity(CREATE_TABLE, &json!({"channel": "#general", "title": "Budget"})), "Creating table “Budget” in #general…");
         assert_eq!(tools::activity(UPDATE_TABLE, &json!({"id": 3})), "Updating table 3…");
         assert_eq!(tools::activity(ADD_TABLE_ROWS, &json!({"id": 3})), "Adding rows to table 3…");

@@ -71,8 +71,10 @@ enum Incoming {
 /// Run `reply` through Claude Code to its end.
 pub async fn run(reply: Reply, host: &mut impl Host) -> Result<Outcome, String> {
     let Reply { provider, max_steps, request, mut session, mut worker, conflicts } = reply;
-    // Workspace tools are Claude Code's own; the rest are pots's.
-    let tools: Vec<ToolSpec> = request.tools.iter().filter(|t| !sandbox::is_tool(t.name)).cloned().collect();
+    // Workspace tools are Claude Code's own; the rest are pots's. Its tool
+    // list is fixed when it starts, so it gets every artifact tool now.
+    let mut tools: Vec<ToolSpec> = request.tools.iter().filter(|t| !sandbox::is_tool(t.name)).cloned().collect();
+    crate::artifact_tools::load_all(&mut tools);
     let (tx, mut rx) = mpsc::unbounded();
     let calls = tx.clone();
     let server = mcp::Server::start("127.0.0.1:0", &secret(), tools, move |call| {
@@ -734,6 +736,21 @@ done_ok"#,
         assert_eq!(host.text, "Channels: general");
         assert!(host.activities.contains(&"Looking at channels…".to_string()), "{:?}", host.activities);
         assert_eq!(host.usage, Usage { input: 12, output: 3, ..Usage::default() });
+    }
+
+    #[test]
+    fn claude_code_gets_every_artifact_tool_up_front() {
+        let dir = tempdir("artifact-tools");
+        let claude = fake_claude(
+            &dir,
+            r#"r=$(curl -s -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$url")
+case "$r" in *use_artifact_tools*) say "loader offered";; *create_whiteboard*) say "all artifact tools";; *) say "missing: $r";; esac
+done_ok"#,
+        );
+        let mut host = Recorder::new();
+        futures::executor::block_on(reply(claude).run(&mut host)).unwrap();
+        assert_eq!(host.text, "all artifact tools");
     }
 
     #[test]
