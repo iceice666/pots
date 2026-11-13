@@ -943,6 +943,22 @@ impl Workspace {
         self.threads[t].messages.iter().any(|m| m.card.as_ref().is_some_and(Card::is_open))
     }
 
+    /// Every card still waiting on the owner (a question, a merge request,
+    /// one whose merge failed), anywhere: channels, DMs and threads, archived
+    /// ones too. Newest first, as (conversation, index in it).
+    pub fn open_cards(&self) -> Vec<(Conv, usize)> {
+        let open = |m: &Message| m.card.as_ref().is_some_and(Card::is_open);
+        let channels = self.channels.iter().enumerate().flat_map(|(c, channel)| {
+            channel.messages.iter().enumerate().filter(|(_, m)| open(m)).map(move |(ix, m)| (Conv::Channel(c), ix, m.ts))
+        });
+        let threads = self.threads.iter().enumerate().flat_map(|(t, thread)| {
+            thread.messages.iter().enumerate().filter(|(_, m)| open(m)).map(move |(ix, m)| (Conv::Thread(t), ix + 1, m.ts))
+        });
+        let mut cards: Vec<_> = channels.chain(threads).collect();
+        cards.sort_by_key(|&(_, _, ts)| std::cmp::Reverse(ts));
+        cards.into_iter().map(|(conv, ix, _)| (conv, ix)).collect()
+    }
+
     /// Threads of `channel` that aren't archived, for the sidebar.
     pub fn open_threads(&self, channel: usize) -> Vec<usize> {
         let mut ts = self.channel_threads(channel);
@@ -1233,6 +1249,47 @@ mod tests {
         assert!(ws.waits_on_owner(t));
         ws.message_mut(Conv::Thread(t), ix).card = Some(choice(Some(0)));
         assert!(!ws.waits_on_owner(t));
+    }
+
+    #[test]
+    fn open_cards_gather_everything_waiting_on_the_owner() {
+        let mut ws = seed();
+        let eng = ws.find_channel("engineering").unwrap();
+        let general = ws.find_channel("general").unwrap();
+        let t = ws.channel_threads(eng)[0];
+        let merge = |outcome| Card::Merge {
+            branch: "pots/t1-a".into(),
+            source: "/tmp/a".into(),
+            summary: String::new(),
+            commits: Vec::new(),
+            repo: None,
+            conflicts: None,
+            outcome,
+            merged: None,
+        };
+        let choice = |answer| Card::Choice { question: "?".into(), options: vec!["a".into()], recommended: None, answer };
+        let mut card = |conv, card| {
+            let ix = ws.post(conv, 1, "card");
+            ws.message_mut(conv, ix).card = Some(card);
+            (conv, ix)
+        };
+        let open = card(Conv::Thread(t), merge(None));
+        let failed = card(Conv::Thread(t), merge(Some(MergeOutcome::Failed("x".into()))));
+        card(Conv::Thread(t), merge(Some(MergeOutcome::Rejected)));
+        card(Conv::Thread(t), merge(Some(MergeOutcome::Approved("abc".into()))));
+        card(Conv::Channel(general), choice(Some(0)));
+        let question = card(Conv::Channel(general), choice(None));
+        // Archiving a thread doesn't answer its cards.
+        ws.threads[t].archived = true;
+
+        let cards = ws.open_cards();
+        assert_eq!(cards.len(), 3, "{cards:?}");
+        for c in [open, failed, question] {
+            assert!(cards.contains(&c), "{c:?} in {cards:?}");
+        }
+        for &(conv, ix) in &cards {
+            assert!(ws.message(conv, ix).card.as_ref().is_some_and(Card::is_open));
+        }
     }
 
     #[test]

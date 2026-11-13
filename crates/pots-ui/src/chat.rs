@@ -111,6 +111,9 @@ enum MainView {
     Artifact { frame: Entity<ArtifactFrame>, _subscription: Subscription },
     /// An artifact whose file couldn't be read: its error, not an editor.
     Unreadable(usize),
+    /// Every card waiting on the owner, from any channel or thread, with
+    /// its buttons.
+    Inbox,
 }
 
 /// The channel dialog: creating a channel, or editing channel `editing`.
@@ -534,23 +537,30 @@ impl ChatApp {
         match hit {
             Hit::Channel(c) if c < self.ws.channels.len() => self.select_channel(c, window, cx),
             Hit::Thread(t) if t < self.ws.threads.len() => self.select_thread(t, window, cx),
-            Hit::Message(m) => {
-                let Some((conv, ix)) = self.ws.locate(m.id) else { return };
-                match conv {
-                    Conv::Channel(c) => {
-                        self.select_channel(c, window, cx);
-                        self.main.list.scroll_to_reveal_item(ix);
-                    }
-                    Conv::Thread(t) => {
-                        self.select_thread(t, window, cx);
-                        self.side.list.scroll_to_reveal_item(ix);
-                    }
-                }
-                // After switching, which clears any highlight.
-                self.highlight_message(m.id, cx);
-            }
+            Hit::Message(m) => self.go_to_message(m.id, window, cx),
             Hit::Channel(_) | Hit::Thread(_) => {}
         }
+    }
+
+    /// Open the conversation message `id` is in, scrolled to it and
+    /// highlighted for a while.
+    fn go_to_message(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((conv, ix)) = self.ws.locate(id) else { return };
+        // Selecting the channel that's already active keeps the view (an
+        // artifact, the inbox): the message is in the channel's messages.
+        self.show_messages(window, cx);
+        match conv {
+            Conv::Channel(c) => {
+                self.select_channel(c, window, cx);
+                self.main.list.scroll_to_reveal_item(ix);
+            }
+            Conv::Thread(t) => {
+                self.select_thread(t, window, cx);
+                self.side.list.scroll_to_reveal_item(ix);
+            }
+        }
+        // After switching, which clears any highlight.
+        self.highlight_message(id, cx);
     }
 
     /// Highlight message `id` for a while.
@@ -668,12 +678,27 @@ impl ChatApp {
     /// Back to the channel's messages, saving the artifact that was open.
     fn show_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.new_artifact_menu = false;
-        if let MainView::Artifact { frame, .. } = std::mem::replace(&mut self.view, MainView::Messages) {
-            if let Some(content) = frame.update(cx, |f, cx| f.flush(window, cx)) {
-                self.save_artifact(frame.read(cx).id, content);
+        match std::mem::replace(&mut self.view, MainView::Messages) {
+            MainView::Artifact { frame, .. } => {
+                if let Some(content) = frame.update(cx, |f, cx| f.flush(window, cx)) {
+                    self.save_artifact(frame.read(cx).id, content);
+                }
+                window.focus(&self.composer.read(cx).focus_handle(cx), cx);
             }
-            window.focus(&self.composer.read(cx).focus_handle(cx), cx);
+            MainView::Inbox => window.focus(&self.composer.read(cx).focus_handle(cx), cx),
+            MainView::Messages | MainView::Unreadable(_) => {}
         }
+        cx.notify();
+    }
+
+    /// Show the inbox in the main column (saving an artifact that was open).
+    fn open_inbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.view, MainView::Inbox) {
+            return;
+        }
+        self.show_messages(window, cx);
+        self.view = MainView::Inbox;
+        self.hovered = None;
         cx.notify();
     }
 
@@ -712,7 +737,7 @@ impl ChatApp {
 
     fn open_artifact_id(&self, cx: &gpui::App) -> Option<usize> {
         match &self.view {
-            MainView::Messages => None,
+            MainView::Messages | MainView::Inbox => None,
             MainView::Artifact { frame, .. } => Some(frame.read(cx).id),
             MainView::Unreadable(id) => Some(*id),
         }
@@ -1820,8 +1845,10 @@ impl ChatApp {
 
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let open = self.open_artifact_id(cx);
-        // The active channel stays marked while one of its artifacts is open,
-        // more faintly: the artifact's row is the one selected then.
+        let inbox_open = matches!(self.view, MainView::Inbox);
+        // The active channel stays marked while one of its artifacts (or the
+        // inbox) is open, more faintly: that row is the one selected then.
+        let aside = open.is_some() || inbox_open;
         let row = |ix: usize, active: bool, unread: bool| {
             div()
                 .id(("channel", ix))
@@ -1835,7 +1862,7 @@ impl ChatApp {
                 .cursor_pointer()
                 .text_size(px(15.))
                 .map(|d| {
-                    if active && open.is_some() {
+                    if active && aside {
                         d.bg(theme::sidebar_hover()).text_color(gpui::white())
                     } else if active {
                         d.bg(theme::sidebar_selected()).text_color(gpui::white())
@@ -1937,6 +1964,7 @@ impl ChatApp {
                     .flex_1()
                     .overflow_y_scroll()
                     .pb_4()
+                    .child(self.render_inbox_row(inbox_open, cx))
                     .child(section(
                         "Channels",
                         add("new-channel", "Add a channel")
@@ -2033,6 +2061,147 @@ impl ChatApp {
         })
         .group(group)
         .on_click(cx.listener(move |this, _, window, cx| this.select_thread(t, window, cx)))
+    }
+
+    /// The sidebar's Inbox, with how many cards wait on the owner.
+    fn render_inbox_row(&self, selected: bool, cx: &Context<Self>) -> impl IntoElement {
+        let waiting = self.ws.open_cards().len();
+        div()
+            .id("inbox")
+            .mx_2()
+            .mt_3()
+            .px_3()
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(15.))
+            .map(|d| match (selected, waiting > 0) {
+                (true, _) => d.bg(theme::sidebar_selected()).text_color(gpui::white()),
+                (false, true) => d.text_color(gpui::white()).font_weight(FontWeight::BOLD).hover(|s| s.bg(theme::sidebar_hover())),
+                (false, false) => d.text_color(theme::sidebar_text()).hover(|s| s.bg(theme::sidebar_hover())),
+            })
+            .child(div().w(px(14.)).child("📥"))
+            .child(div().flex_1().child("Inbox"))
+            .when(waiting > 0, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .min_w(px(20.))
+                        .h(px(18.))
+                        .px_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme::error())
+                        .text_color(gpui::white())
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::BOLD)
+                        .child(waiting.to_string()),
+                )
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.open_inbox(window, cx)))
+    }
+
+    /// The inbox: each card waiting on the owner, under where it was asked,
+    /// with its buttons. Answering here is the same as answering in place.
+    fn render_inbox(&self, cx: &Context<Self>) -> impl IntoElement {
+        let cards = self.ws.open_cards();
+        let empty = cards.is_empty();
+        let header = div()
+            .h(px(50.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_5()
+            .border_b_1()
+            .border_color(theme::border())
+            .child(div().text_size(px(18.)).font_weight(FontWeight::BOLD).child("📥 Inbox"))
+            .child(div().text_size(px(13.)).text_color(theme::muted()).child(match cards.len() {
+                0 => "Nothing waiting on you".to_string(),
+                1 => "1 waiting on you".to_string(),
+                n => format!("{n} waiting on you"),
+            }));
+        let items = cards.into_iter().filter_map(|(conv, ix)| {
+            let msg = self.ws.message(conv, ix);
+            let card = msg.card.as_ref()?;
+            let id = msg.id;
+            let author = &self.ws.users[msg.author];
+            let place = match conv {
+                Conv::Thread(t) => {
+                    let thread = &self.ws.threads[t];
+                    format!("🧵 {} · #{}", thread.name, self.ws.channels[thread.channel].name)
+                }
+                Conv::Channel(c) => match self.ws.channels[c].dm {
+                    Some(_) => format!("DM with {}", self.ws.channels[c].name),
+                    None => format!("#{}", self.ws.channels[c].name),
+                },
+            };
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_5()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .child(avatar(&author.name, author.color, 20., None))
+                            .child(div().flex_none().font_weight(FontWeight::BOLD).child(author.name.clone()))
+                            .child(div().flex_none().text_color(theme::faint()).child(data::format_time(msg.ts)))
+                            .child(
+                                div()
+                                    .id(("inbox-place", id))
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .cursor_pointer()
+                                    .text_color(theme::link())
+                                    .hover(|s| s.underline())
+                                    .tooltip(|_, cx| Tooltip::view("Go to the conversation", cx))
+                                    .child(place)
+                                    .on_click(cx.listener(move |this, _, window, cx| this.go_to_message(id, window, cx))),
+                            ),
+                    )
+                    .child(div().w_full().flex().child(self.render_card(id, card, cx))),
+            )
+        });
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(
+                div()
+                    .id("inbox-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .text_color(theme::text())
+                    .children(items)
+                    .when(empty, |d| {
+                        d.child(
+                            div()
+                                .p_6()
+                                .text_size(px(14.))
+                                .text_color(theme::muted())
+                                .child("Merge requests and questions for you show up here, whichever thread they're in."),
+                        )
+                    }),
+            )
     }
 
     /// An artifact in the sidebar's Artifacts section: click to open it,
@@ -3393,7 +3562,9 @@ impl Render for ChatApp {
                 .into_any_element(),
             MainView::Artifact { frame, .. } => frame.clone().into_any_element(),
             MainView::Unreadable(id) => self.render_unreadable(*id, cx).into_any_element(),
+            MainView::Inbox => self.render_inbox(cx).into_any_element(),
         };
+        let inbox = matches!(self.view, MainView::Inbox);
         div()
             .relative()
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
@@ -3416,7 +3587,8 @@ impl Render for ChatApp {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(self.render_header(cx))
+                            // The inbox isn't in a channel: it has a header of its own.
+                            .when(!inbox, |d| d.child(self.render_header(cx)))
                             .child(main),
                     )
                     .children(panel),
@@ -3523,6 +3695,47 @@ mod tests {
             Some(ArtifactContent::Table(t)) => t.cell(row, 0).to_string(),
             other => panic!("not a table: {other:?}"),
         })
+    }
+
+    #[gpui::test]
+    fn the_inbox_answers_cards_from_any_thread(cx: &mut gpui::TestAppContext) {
+        let (app, cx, _home) = mock_app(cx);
+        draw(cx);
+        let (t, id) = app.update(cx, |app, _| {
+            let eng = app.ws.find_channel("engineering").unwrap();
+            let t = app.ws.channel_threads(eng)[0];
+            let ix = app.ws.post(Conv::Thread(t), 1, "need a call");
+            let msg = app.ws.message_mut(Conv::Thread(t), ix);
+            msg.card = Some(Card::Choice { question: "Which?".into(), options: vec!["A".into(), "B".into()], recommended: None, answer: None });
+            let id = msg.id;
+            // Archived threads still show up: their cards aren't answered.
+            app.ws.threads[t].archived = true;
+            (t, id)
+        });
+        app.update_in(cx, |app, window, cx| app.open_inbox(window, cx));
+        draw(cx);
+        assert!(app.read_with(cx, |app, _| matches!(app.view, MainView::Inbox)));
+        assert!(app.read_with(cx, |app, _| app.ws.open_cards().iter().any(|&(c, ix)| app.ws.message(c, ix).id == id)));
+
+        // "Go to the conversation" opens the thread at the card.
+        app.update_in(cx, |app, window, cx| app.go_to_message(id, window, cx));
+        draw(cx);
+        app.read_with(cx, |app, _| {
+            assert!(matches!(app.view, MainView::Messages));
+            assert_eq!(app.panel, Panel::Thread(t));
+            assert_eq!(app.highlight, Some(id));
+        });
+
+        // Answered from the inbox, the answer lands in the thread and the card leaves the inbox.
+        app.update_in(cx, |app, window, cx| app.open_inbox(window, cx));
+        app.update(cx, |app, cx| app.answer_choice(id, 1, cx));
+        draw(cx);
+        app.read_with(cx, |app, _| {
+            assert!(!app.ws.open_cards().iter().any(|&(c, ix)| app.ws.message(c, ix).id == id));
+            let last = app.ws.message(Conv::Thread(t), app.ws.len(Conv::Thread(t)) - 1);
+            assert_eq!(last.author, app.ws.me);
+            assert!(last.source.contains("**B**"), "{}", last.source);
+        });
     }
 
     #[gpui::test]
