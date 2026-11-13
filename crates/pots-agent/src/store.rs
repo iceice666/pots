@@ -64,8 +64,8 @@ fn load_workspace_from(home: &Path) -> io::Result<Option<Workspace>> {
                 artifact.load_error = Some(format!(
                     "{} holds a {}, not a {}.",
                     artifact_path(home, artifact.id).display(),
-                    content.kind().label().to_lowercase(),
-                    artifact.kind.label().to_lowercase()
+                    content.kind().noun(),
+                    artifact.kind.noun()
                 ))
             }
             Err(e) => artifact.load_error = Some(format!("{}: {e}", artifact_path(home, artifact.id).display())),
@@ -309,6 +309,37 @@ mod tests {
         let a = back.artifact(id).unwrap();
         assert_eq!((a.title.as_str(), a.kind, a.channel), ("Books", ArtifactKind::Table, 0));
         assert_eq!(a.content.as_ref(), Some(&content));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_page_is_saved_beside_a_workspace_written_before_pages_existed() {
+        use crate::artifact_tools::{self, CREATE_PAGE, UPDATE_PAGE};
+        use serde_json::json;
+        let home = temp_home("agent-page");
+        // A workspace.json and artifact file as the app wrote them before pages.
+        let mut ws = data::empty();
+        let table = ws.add_artifact(0, ArtifactKind::Table);
+        let content = ws.artifact(table).unwrap().content.clone().unwrap();
+        super::save_artifact_in(&home, table, &content).unwrap();
+        std::fs::write(home.join("workspace.json"), serde_json::to_vec(&ws).unwrap()).unwrap();
+        let mut ws = super::load_workspace_from(&home).unwrap().unwrap();
+        assert_eq!(ws.artifact(table).unwrap().content.as_ref(), Some(&content));
+
+        let html = "<!doctype html><button onclick=\"this.textContent++\">0</button>";
+        let id = artifact_tools::write(&mut ws, CREATE_PAGE, &json!({"channel": "general", "title": "Clicker", "html": "<p>"})).unwrap().id;
+        artifact_tools::write(&mut ws, UPDATE_PAGE, &json!({"id": id, "html": html})).unwrap();
+        let content = ws.artifact(id).unwrap().content.clone().unwrap();
+        super::save_artifact_in(&home, id, &content).unwrap();
+        std::fs::write(home.join("workspace.json"), serde_json::to_vec(&ws).unwrap()).unwrap();
+
+        let file: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join(format!("artifacts/{id}.json"))).unwrap()).unwrap();
+        assert_eq!(file, json!({"kind": "page", "html": html}));
+        let back = super::load_workspace_from(&home).unwrap().unwrap();
+        let a = back.artifact(id).unwrap();
+        assert_eq!((a.title.as_str(), a.kind), ("Clicker", ArtifactKind::Page));
+        assert_eq!(a.content.as_ref(), Some(&content));
+        assert!(back.artifact(table).unwrap().load_error.is_none());
         std::fs::remove_dir_all(home).unwrap();
     }
 

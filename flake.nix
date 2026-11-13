@@ -58,6 +58,11 @@
             libxrandr
             openssl
             alsa-lib
+            # gpui-webview (wry) shows page artifacts with WebKitGTK.
+            webkitgtk_4_1
+            gtk3
+            libsoup_3
+            glib-networking
           ];
         in
         {

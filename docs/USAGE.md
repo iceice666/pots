@@ -18,6 +18,21 @@ cargo run --release -- --mock  # 只看示範資料，什麼都不會存
 | `workspace.json` | 頻道、訊息、thread |
 | `tasks/` | 每個任務的 git clone（Engineer / Reviewer 在這裡工作） |
 
+### Linux 需要的系統套件
+
+agent 做的互動式頁面（Page artifact）是用 WebKitGTK 顯示的，所以在 Linux 上 build 和執行都需要它，就算從來沒打開過頁面也一樣：
+
+```bash
+# Debian / Ubuntu（build 用；只執行的話裝不帶 -dev 的 libwebkit2gtk-4.1-0、libgtk-3-0 即可）
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+  libxkbcommon-x11-dev libfontconfig-dev pkg-config
+```
+
+用 `nix develop` 的話，`flake.nix` 已經包含這些。
+
+- 少了這些函式庫，app 會直接**啟動不了**（執行檔動態連結 webkit2gtk、gtk3、libsoup、javascriptcore）。
+- 頁面只能在 **X11 或 XWayland** 下顯示。在純 Wayland 視窗裡，頁面的位置會顯示錯誤訊息，app 其他部分照常運作。
+
 ### 沒有 API key 想先試玩
 
 ```bash

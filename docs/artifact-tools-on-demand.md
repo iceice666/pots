@@ -47,7 +47,7 @@
     "properties": {
       "kinds": {
         "type": "array", "minItems": 1,
-        "items": {"type": "string", "enum": ["table", "document", "checklist", "board", "whiteboard"]}
+        "items": {"type": "string", "enum": ["table", "document", "checklist", "board", "whiteboard", "page"]}
       }
     },
     "required": ["kinds"],

@@ -11,7 +11,7 @@
 use serde_json::{Value, json};
 
 use crate::agent::tools::channel;
-use crate::data::{ArtifactContent, ArtifactKind, Board, BoardColumn, Checklist, ChecklistItem, Document, Table, Workspace};
+use crate::data::{ArtifactContent, ArtifactKind, Board, BoardColumn, Checklist, ChecklistItem, Document, Page, Table, Workspace};
 use crate::whiteboard::{self, Color, Rect, Shape, Whiteboard};
 use pots_llm::ToolSpec;
 
@@ -34,9 +34,11 @@ pub const CREATE_WHITEBOARD: &str = "create_whiteboard";
 pub const ADD_WHITEBOARD_ITEMS: &str = "add_whiteboard_items";
 pub const UPDATE_WHITEBOARD_ITEMS: &str = "update_whiteboard_items";
 pub const REMOVE_WHITEBOARD_ITEMS: &str = "remove_whiteboard_items";
+pub const CREATE_PAGE: &str = "create_page";
+pub const UPDATE_PAGE: &str = "update_page";
 
 /// Every artifact tool, in the order agents are offered them.
-pub const ALL: [&str; 19] = [
+pub const ALL: [&str; 21] = [
     LIST_ARTIFACTS,
     READ_ARTIFACT,
     CREATE_TABLE,
@@ -56,6 +58,8 @@ pub const ALL: [&str; 19] = [
     ADD_WHITEBOARD_ITEMS,
     UPDATE_WHITEBOARD_ITEMS,
     REMOVE_WHITEBOARD_ITEMS,
+    CREATE_PAGE,
+    UPDATE_PAGE,
 ];
 
 /// The most a table made or changed by an agent may have.
@@ -71,6 +75,8 @@ pub const MAX_ITEMS: usize = 500;
 pub const MAX_ITEM: usize = 2000;
 /// The most items a whiteboard may have.
 pub const MAX_WHITEBOARD_ITEMS: usize = 1000;
+/// The longest HTML page, in characters.
+pub const MAX_PAGE: usize = 200_000;
 
 pub fn is_tool(name: &str) -> bool {
     ALL.contains(&name)
@@ -86,6 +92,7 @@ pub fn kind_of(name: &str) -> Option<ArtifactKind> {
         CREATE_WHITEBOARD | ADD_WHITEBOARD_ITEMS | UPDATE_WHITEBOARD_ITEMS | REMOVE_WHITEBOARD_ITEMS => {
             ArtifactKind::Whiteboard
         }
+        CREATE_PAGE | UPDATE_PAGE => ArtifactKind::Page,
         _ => return None,
     })
 }
@@ -106,8 +113,8 @@ pub fn offered() -> Vec<ToolSpec> {
         description: "Get the tools to create and change artifacts of these kinds, for the rest of this reply. \
                       table: rows and columns of plain text, like a spreadsheet. document: markdown text (notes, \
                       a plan, a spec). checklist: things to do, ticked off when done. board: a kanban board of \
-                      cards in columns. whiteboard: sticky notes, boxes and text placed freely, for brainstorming. \
-                      When you'll change an artifact you're about to read, call this in the same step as \
+                      cards in columns. whiteboard: sticky notes, boxes and text placed freely, for brainstorming. page: a \
+                      self-contained HTML page, shown in a web view. When you'll change an artifact you're about to read, call this in the same step as \
                       read_artifact.",
         input_schema: json!({
             "type": "object",
@@ -202,6 +209,8 @@ pub fn specs() -> Vec<ToolSpec> {
     let title = json!({"type": "string", "description": "A few words saying what it holds."});
     let new_title = json!({"type": "string", "description": "A new title."});
     let text = json!({"type": "string", "description": "The whole text, in markdown."});
+    let html = json!({"type": "string", "description": "The whole page: one self-contained HTML document, its CSS \
+                      in <style> and its JavaScript in <script>, inline."});
     let items = json!({"type": "array", "description": "The items, top to bottom.",
         "items": {"type": "object", "properties": {
             "text": {"type": "string", "description": "What is to be done, in one line."},
@@ -233,14 +242,16 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: LIST_ARTIFACTS,
-            description: "List a channel's artifacts (tables, documents, checklists and boards people keep \
-                          there, shown as tabs above its messages): each one's id, kind and title.",
+            description: "List a channel's artifacts (tables, documents, checklists, boards, whiteboards and \
+                          HTML pages people keep there, shown as tabs above its messages): each one's id, kind and \
+                          title.",
             input_schema: object(json!({"channel": channel}), &["channel"]),
         },
         ToolSpec {
             name: READ_ARTIFACT,
             description: "Read an artifact as it is now, including the owner's latest edits: a table's columns \
-                          and rows, a document's text, a checklist's items, a board's columns and cards. Read it \
+                          and rows, a document's text, a checklist's items, a board's columns and cards, a page's \
+                          HTML. Read it \
                           again before changing it: people may have edited it since.",
             input_schema: object(json!({"id": id}), &["id"]),
         },
@@ -408,6 +419,24 @@ pub fn specs() -> Vec<ToolSpec> {
                 &["id", "items"],
             ),
         },
+        ToolSpec {
+            name: CREATE_PAGE,
+            description: "Create an HTML page artifact in a channel: a new tab there showing a small interactive \
+                          page you write (a calculator, a form, a chart, a mock-up) that people open and use. Give \
+                          one self-contained HTML document with its CSS and JavaScript inline. The page is \
+                          sandboxed: it can't load anything from the network (no CDN scripts, fonts, images or \
+                          fetch; use inline SVG or data: URLs), can't leave the page or open windows, and \
+                          nothing it stores is kept, so keep its state in the page. People can't edit its source; \
+                          you change it with update_page. Returns its id.",
+            input_schema: object(json!({"channel": channel, "title": title, "html": html}), &["channel", "title", "html"]),
+        },
+        ToolSpec {
+            name: UPDATE_PAGE,
+            description: "Change an HTML page: its title, and/or replace its whole HTML. read_artifact first and \
+                          give the full new page. If it is open, it reloads with your version, losing what was \
+                          typed into it.",
+            input_schema: object(json!({"id": id, "title": new_title, "html": html}), &["id"]),
+        },
     ]
 }
 
@@ -434,10 +463,12 @@ pub fn activity(name: &str, input: &Value) -> Option<String> {
         (CREATE_CHECKLIST, Some(c), _) => creating("checklist", c),
         (CREATE_BOARD, Some(c), _) => creating("board", c),
         (CREATE_WHITEBOARD, Some(c), _) => creating("whiteboard", c),
+        (CREATE_PAGE, Some(c), _) => creating("page", c),
         (UPDATE_TABLE, _, Some(id)) => format!("Updating table {id}…"),
         (UPDATE_DOCUMENT, _, Some(id)) => format!("Updating document {id}…"),
         (UPDATE_CHECKLIST, _, Some(id)) => format!("Updating checklist {id}…"),
         (UPDATE_BOARD, _, Some(id)) => format!("Updating board {id}…"),
+        (UPDATE_PAGE, _, Some(id)) => format!("Updating page {id}…"),
         (ADD_TABLE_ROWS, _, Some(id)) => format!("Adding rows to table {id}…"),
         (ADD_CHECKLIST_ITEMS, _, Some(id)) => format!("Adding items to checklist {id}…"),
         (CHECK_ITEMS, _, Some(id)) => format!("Ticking items in checklist {id}…"),
@@ -493,6 +524,8 @@ pub fn write(ws: &mut Workspace, name: &str, input: &Value) -> Result<Changed, S
         ADD_WHITEBOARD_ITEMS => add_whiteboard_items(ws, input),
         UPDATE_WHITEBOARD_ITEMS => update_whiteboard_items(ws, input),
         REMOVE_WHITEBOARD_ITEMS => remove_whiteboard_items(ws, input),
+        CREATE_PAGE => create_page(ws, input),
+        UPDATE_PAGE => update_page(ws, input),
         _ => Err(format!("There is no tool named {name}.")),
     }
 }
@@ -532,6 +565,8 @@ fn read_artifact(ws: &Workspace, input: &Value) -> Result<String, String> {
             "{head}, first drawn first (later ones lie on top). x and y are each item's top left, in pixels:\n{}",
             json!({"items": b.items.iter().map(item_json).collect::<Vec<_>>()})
         ),
+        ArtifactContent::Page(p) if p.html.trim().is_empty() => format!("{head}."),
+        ArtifactContent::Page(p) => format!("{head}:\n{}", p.html),
     })
 }
 
@@ -711,6 +746,36 @@ fn document_text(v: &Value) -> Result<Option<String>, String> {
         return Err(format!("`text` is too long: a document has at most {MAX_DOCUMENT} characters."));
     }
     Ok(Some(text.to_string()))
+}
+
+// --- HTML pages --------------------------------------------------------------
+
+fn create_page(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    channel(ws, input)?;
+    let html = page_html(&input["html"])?.ok_or("`html` is required: the whole page, one HTML document.")?;
+    create(ws, input, ArtifactContent::Page(Page { html }))
+}
+
+fn update_page(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    of_kind(ws, id, ArtifactKind::Page)?;
+    let new_title = title(&input["title"])?;
+    let html = page_html(&input["html"])?;
+    if new_title.is_none() && html.is_none() {
+        return Err("Nothing to change: give `title` and/or `html`.".into());
+    }
+    update(ws, id, new_title, html.map(|html| ArtifactContent::Page(Page { html })))
+}
+
+fn page_html(v: &Value) -> Result<Option<String>, String> {
+    let html = match v {
+        Value::Null => return Ok(None),
+        v => v.as_str().ok_or("`html` must be text (a string): the page's HTML.")?,
+    };
+    if html.chars().count() > MAX_PAGE {
+        return Err(format!("`html` is too long: a page has at most {MAX_PAGE} characters."));
+    }
+    Ok(Some(html.to_string()))
 }
 
 // --- checklists --------------------------------------------------------------
@@ -1135,6 +1200,8 @@ fn size(content: &ArtifactContent) -> String {
         ArtifactContent::Board(b) => format!("{}, {}", plural(b.columns.len(), "column"), plural(b.cards(), "card")),
         ArtifactContent::Whiteboard(b) if b.items.is_empty() => "empty".to_string(),
         ArtifactContent::Whiteboard(b) => plural(b.items.len(), "item"),
+        ArtifactContent::Page(p) if p.html.trim().is_empty() => "empty".to_string(),
+        ArtifactContent::Page(p) => plural(p.lines(), "line"),
     }
 }
 
@@ -1216,6 +1283,7 @@ fn update_tool(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Checklist => UPDATE_CHECKLIST,
         ArtifactKind::Board => UPDATE_BOARD,
         ArtifactKind::Whiteboard => UPDATE_WHITEBOARD_ITEMS,
+        ArtifactKind::Page => UPDATE_PAGE,
     }
 }
 
@@ -1339,6 +1407,21 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_and_every_writing_tool_loads_on_demand() {
+        for name in ALL.iter().filter(|n| is_write(n)) {
+            assert!(kind_of(name).is_some(), "{name} has no kind, so use_artifact_tools can't offer it");
+        }
+        for kind in ArtifactKind::ALL {
+            let mut tools = offered();
+            let out = load(&mut tools, &json!({"kinds": [kind.noun()]})).unwrap().unwrap();
+            assert!(tools.iter().any(|t| kind_of(t.name) == Some(*kind)), "{out}");
+        }
+        let mut tools = offered();
+        load(&mut tools, &json!({"kinds": ["page"]})).unwrap().unwrap();
+        assert!(tools.iter().any(|t| t.name == CREATE_PAGE) && tools.iter().any(|t| t.name == UPDATE_PAGE));
+    }
+
+    #[test]
     fn a_document_is_created_read_and_rewritten() {
         let mut ws = data::seed();
         let made = write(&mut ws, CREATE_DOCUMENT, &json!({"channel": "general", "title": "Launch plan",
@@ -1368,6 +1451,46 @@ mod tests {
             let e = err(write(&mut ws, name, &input));
             assert!(e.contains(want), "{name} {input}: {e}");
         }
+    }
+
+    #[test]
+    fn a_page_is_created_read_and_rewritten() {
+        let mut ws = data::seed();
+        let html = "<!doctype html>\n<input id=n>\n<button onclick=\"n.value++\">+1</button>\n";
+        let made = write(&mut ws, CREATE_PAGE, &json!({"channel": "general", "title": "Counter", "html": html})).unwrap();
+        assert_eq!(made.shown, "Created page “Counter” in #general (3 lines).");
+        assert_eq!(*content_of(&ws, made.id), ArtifactContent::Page(Page { html: html.into() }));
+        let listed = read(&ws, LIST_ARTIFACTS, &json!({"channel": "general"})).unwrap();
+        assert!(listed.contains(&format!("- id {}: page “Counter” (3 lines)", made.id)), "{listed}");
+        let shown = read(&ws, READ_ARTIFACT, &json!({"id": made.id})).unwrap();
+        assert_eq!(shown, format!("HTML page {} “Counter” in #general, 3 lines:\n{html}", made.id));
+
+        let c = write(&mut ws, UPDATE_PAGE, &json!({"id": made.id, "html": "<p>v2</p>"})).unwrap();
+        assert!(c.content && !c.title);
+        assert_eq!(c.shown, "Rewrote page “Counter” in #general (1 line).");
+        assert_eq!(*content_of(&ws, made.id), ArtifactContent::Page(Page { html: "<p>v2</p>".into() }));
+        let c = write(&mut ws, UPDATE_PAGE, &json!({"id": made.id, "html": "<p>v2</p>"})).unwrap();
+        assert!(!c.content && c.shown.is_empty(), "the same page changes nothing");
+        let c = write(&mut ws, UPDATE_PAGE, &json!({"id": made.id, "title": "Tally"})).unwrap();
+        assert!(c.title && !c.content);
+
+        for (name, input, want) in [
+            (CREATE_PAGE, json!({"channel": "general", "title": "X"}), "`html` is required"),
+            (CREATE_PAGE, json!({"channel": "general", "title": "X", "html": ["<p>"]}), "`html` must be text"),
+            (CREATE_PAGE, json!({"channel": "general", "title": "X", "html": "x".repeat(MAX_PAGE + 1)}), "too long"),
+            (CREATE_PAGE, json!({"channel": "general", "title": "tally", "html": "<p>"}), "already has a page titled “Tally”"),
+            (UPDATE_PAGE, json!({"id": made.id}), "Nothing to change"),
+        ] {
+            let e = err(write(&mut ws, name, &input));
+            assert!(e.contains(want), "{name}: {e}");
+        }
+        // The page tools only change pages, and other kinds' tools leave pages alone.
+        let doc = write(&mut ws, CREATE_DOCUMENT, &json!({"channel": "general", "title": "Notes", "text": "hi"})).unwrap().id;
+        let e = err(write(&mut ws, UPDATE_PAGE, &json!({"id": doc, "html": "<p>"})));
+        assert_eq!(e, format!("Artifact {doc} “Notes” is a document, not a page. Use update_document and its other tools for it."));
+        let e = err(write(&mut ws, UPDATE_DOCUMENT, &json!({"id": made.id, "text": "x"})));
+        assert!(e.contains("is a page, not a document. Use update_page"), "{e}");
+        assert_eq!(activity(UPDATE_PAGE, &json!({"id": 4})).as_deref(), Some("Updating page 4…"));
     }
 
     #[test]

@@ -275,12 +275,14 @@ pub enum ArtifactKind {
     Checklist,
     Board,
     Whiteboard,
+    /// A self-contained HTML page an agent writes, shown in a web view.
+    Page,
 }
 
 impl ArtifactKind {
     /// Every kind, in the order the app offers them.
     pub const ALL: &[ArtifactKind] =
-        &[ArtifactKind::Document, ArtifactKind::Table, ArtifactKind::Checklist, ArtifactKind::Board, ArtifactKind::Whiteboard];
+        &[ArtifactKind::Document, ArtifactKind::Table, ArtifactKind::Checklist, ArtifactKind::Board, ArtifactKind::Whiteboard, ArtifactKind::Page];
 
     /// The kind's name, as shown in the app ("Table").
     pub fn label(self) -> &'static str {
@@ -290,6 +292,7 @@ impl ArtifactKind {
             ArtifactKind::Checklist => "Checklist",
             ArtifactKind::Board => "Board",
             ArtifactKind::Whiteboard => "Whiteboard",
+            ArtifactKind::Page => "HTML page",
         }
     }
 
@@ -301,6 +304,7 @@ impl ArtifactKind {
             ArtifactKind::Checklist => "checklist",
             ArtifactKind::Board => "board",
             ArtifactKind::Whiteboard => "whiteboard",
+            ArtifactKind::Page => "page",
         }
     }
 }
@@ -311,7 +315,8 @@ impl ArtifactKind {
 /// `{"kind": "document", "text": "..."}`,
 /// `{"kind": "checklist", "items": [{"text": "...", "done": false}, ...]}`,
 /// `{"kind": "board", "columns": [{"name": "...", "cards": ["...", ...]}, ...]}`,
-/// `{"kind": "whiteboard", "items": [{"id": 1, "shape": "note", "x": 0, ...}, ...]}`.
+/// `{"kind": "whiteboard", "items": [{"id": 1, "shape": "note", "x": 0, ...}, ...]}`,
+/// `{"kind": "page", "html": "<!doctype html>..."}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ArtifactContent {
@@ -320,6 +325,7 @@ pub enum ArtifactContent {
     Checklist(Checklist),
     Board(Board),
     Whiteboard(Whiteboard),
+    Page(Page),
 }
 
 impl ArtifactContent {
@@ -331,6 +337,7 @@ impl ArtifactContent {
             ArtifactKind::Checklist => ArtifactContent::Checklist(Checklist::default()),
             ArtifactKind::Board => ArtifactContent::Board(Board::blank()),
             ArtifactKind::Whiteboard => ArtifactContent::Whiteboard(Whiteboard::default()),
+            ArtifactKind::Page => ArtifactContent::Page(Page::default()),
         }
     }
 
@@ -341,6 +348,7 @@ impl ArtifactContent {
             ArtifactContent::Checklist(_) => ArtifactKind::Checklist,
             ArtifactContent::Board(_) => ArtifactKind::Board,
             ArtifactContent::Whiteboard(_) => ArtifactKind::Whiteboard,
+            ArtifactContent::Page(_) => ArtifactKind::Page,
         }
     }
 }
@@ -356,6 +364,22 @@ impl Document {
     /// How many lines it has: none when empty.
     pub fn lines(&self) -> usize {
         self.text.lines().count()
+    }
+}
+
+/// An interactive page: one self-contained HTML document (its CSS and
+/// scripts inline), written by an agent and shown in a web view. It is
+/// untrusted: the app gives it no way to reach the app or the network.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Page {
+    #[serde(default)]
+    pub html: String,
+}
+
+impl Page {
+    /// How many lines its source has: none when empty.
+    pub fn lines(&self) -> usize {
+        self.html.lines().count()
     }
 }
 
@@ -930,7 +954,7 @@ impl Workspace {
     /// A new, blank artifact of `kind` in `channel`, titled "Untitled
     /// table" (numbered if the channel has one by that name). Returns its id.
     pub fn add_artifact(&mut self, channel: usize, kind: ArtifactKind) -> usize {
-        let base = format!("Untitled {}", kind.label().to_lowercase());
+        let base = format!("Untitled {}", kind.noun());
         let taken = |title: &str| self.artifacts.iter().any(|a| a.channel == channel && a.title == title);
         let title = std::iter::once(base.clone())
             .chain((2..).map(|n| format!("{base} {n}")))
@@ -1290,6 +1314,9 @@ mod tests {
             })
         );
         assert_eq!(read(r#"{"kind":"board","columns":[{"name":"x"}]}"#), ArtifactContent::Board(Board { columns: vec![BoardColumn::new("x")] }));
+        assert_eq!(read(r#"{"kind":"page"}"#), ArtifactContent::Page(Page::default()));
+        let page = ArtifactContent::Page(Page { html: "<button onclick=\"n++\">+</button>".into() });
+        assert_eq!(serde_json::to_value(&page).unwrap(), serde_json::json!({"kind": "page", "html": "<button onclick=\"n++\">+</button>"}));
     }
 
     #[test]
