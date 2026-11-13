@@ -1,6 +1,6 @@
-//! The main workspace view: top bar, sidebar, channel header, the channel's
-//! tabs (its messages and its artifacts), message list, composer, and the
-//! Discord-style thread panel.
+//! The main workspace view: top bar, sidebar (channels with their threads,
+//! the open channel's artifacts, direct messages), channel header, message
+//! list or open artifact, composer, and the Discord-style thread panel.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -11,7 +11,7 @@ use gpui::{
     AnyElement, AnyView, AsyncApp, ClipboardItem, Context, Entity, EntityInputHandler, FocusHandle, Focusable,
     FontWeight, HighlightStyle, KeyBinding, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ScrollHandle, SharedString, StyledText, Subscription, Task, WeakEntity, Window,
-    actions, canvas, div, list, prelude::*, px, rgb,
+    actions, anchored, canvas, deferred, div, list, prelude::*, px, rgb,
 };
 
 use pots_agent::agent::{self, Agents};
@@ -149,7 +149,7 @@ pub struct ChatApp {
     /// The workspace menu (under the workspace name) is open.
     menu: bool,
     view: MainView,
-    /// The menu of kinds under the tabs' "+" is open.
+    /// The menu of kinds under the sidebar Artifacts section's "+" is open.
     new_artifact_menu: bool,
     /// The artifact whose deletion is waiting to be confirmed.
     confirm_delete: Option<usize>,
@@ -383,6 +383,10 @@ impl ChatApp {
     }
 
     fn select_channel(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // Back from one of its artifacts, its messages are as they were left.
+        if ix == self.active && !matches!(self.view, MainView::Messages) {
+            return self.show_messages(window, cx);
+        }
         // Going to a channel (again) shows its messages.
         self.show_messages(window, cx);
         self.active = ix;
@@ -719,6 +723,19 @@ impl ChatApp {
         self.open_artifact(id, window, cx);
         if let MainView::Artifact { frame, .. } = &self.view {
             frame.update(cx, |f, cx| f.start_rename(window, cx));
+        }
+    }
+
+    /// Artifact `id` from the sidebar: going to its channel first, then
+    /// opening it (with its title ready to be renamed, if `rename`).
+    fn select_artifact(&mut self, id: usize, rename: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(channel) = self.ws.artifact(id).map(|a| a.channel) else { return };
+        if channel != self.active {
+            self.select_channel(channel, window, cx);
+        }
+        match rename {
+            true => self.rename_artifact(id, window, cx),
+            false => self.open_artifact(id, window, cx),
         }
     }
 
@@ -1078,7 +1095,7 @@ impl ChatApp {
     /// artifact's editor has that isn't saved yet (a cell being typed in
     /// included) is saved first, so the agent reads the latest version and
     /// adds to it rather than to an older one. A change is saved at once,
-    /// shown in the tabs (without switching to it: the owner may be busy
+    /// shown in the sidebar (without switching to it: the owner may be busy
     /// elsewhere) and in the editor if it's open there, and said under the
     /// reply, so the owner sees what the agent did.
     fn artifact_tool(&mut self, id: usize, name: &str, input: &serde_json::Value, cx: &mut Context<Self>) -> (String, bool) {
@@ -1785,7 +1802,10 @@ impl ChatApp {
     }
 
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let row = |ix: usize, selected: bool, unread: bool| {
+        let open = self.open_artifact_id(cx);
+        // The active channel stays marked while one of its artifacts is open,
+        // more faintly: the artifact's row is the one selected then.
+        let row = |ix: usize, active: bool, unread: bool| {
             div()
                 .id(("channel", ix))
                 .mx_2()
@@ -1798,7 +1818,9 @@ impl ChatApp {
                 .cursor_pointer()
                 .text_size(px(15.))
                 .map(|d| {
-                    if selected {
+                    if active && open.is_some() {
+                        d.bg(theme::sidebar_hover()).text_color(gpui::white())
+                    } else if active {
                         d.bg(theme::sidebar_selected()).text_color(gpui::white())
                     } else if unread {
                         d.text_color(gpui::white())
@@ -1820,9 +1842,31 @@ impl ChatApp {
                 .text_color(theme::sidebar_heading())
                 .child(format!("▾  {label}"))
         };
+        // A section's "+", at the end of its heading.
+        let add = |id: &'static str, tip: &'static str| {
+            div()
+                .id(id)
+                .relative()
+                .mt_3()
+                .size(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(18.))
+                .text_color(theme::sidebar_heading())
+                .hover(|s| s.bg(theme::sidebar_hover()).text_color(gpui::white()))
+                .tooltip(move |_, cx| Tooltip::view(tip, cx))
+                .child("+")
+        };
+        let section = |label: &'static str, add: gpui::Stateful<gpui::Div>| {
+            div().flex().items_center().justify_between().pr_3().child(heading(label)).child(add)
+        };
 
         let channels = self.ws.channels.iter().enumerate().filter(|(_, c)| c.dm.is_none());
         let dms = self.ws.channels.iter().enumerate().filter_map(|(i, c)| c.dm.map(|u| (i, c, u)));
+        let artifacts = self.ws.channel_artifacts(self.active);
 
         div()
             .w(px(260.))
@@ -1876,41 +1920,22 @@ impl ChatApp {
                     .flex_1()
                     .overflow_y_scroll()
                     .pb_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .pr_3()
-                            .child(heading("Channels"))
-                            .child(
-                                div()
-                                    .id("new-channel")
-                                    .mt_3()
-                                    .size(px(24.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_size(px(18.))
-                                    .text_color(theme::sidebar_heading())
-                                    .hover(|s| s.bg(theme::sidebar_hover()).text_color(gpui::white()))
-                                    .tooltip(|_, cx| Tooltip::view("Add a channel", cx))
-                                    .child("+")
-                                    .on_click(cx.listener(|this, _, window, cx| this.open_channel_dialog(None, window, cx))),
-                            ),
-                    )
+                    .child(section(
+                        "Channels",
+                        add("new-channel", "Add a channel")
+                            .on_click(cx.listener(|this, _, window, cx| this.open_channel_dialog(None, window, cx))),
+                    ))
                     .children(channels.map(|(i, c)| {
                         // Unlike Slack, Discord lists a channel's active threads under it.
                         let threads = self.ws.open_threads(i);
                         let last = threads.len().saturating_sub(1);
+                        let active = i == self.active;
                         div()
                             .flex()
                             .flex_col()
                             .child(
-                                row(i, i == self.active, c.unread)
-                                    .child(div().w(px(14.)).text_color(if i == self.active { gpui::white().into() } else { theme::sidebar_heading() }).child("#"))
+                                row(i, active, c.unread)
+                                    .child(div().w(px(14.)).text_color(if active { gpui::white().into() } else { theme::sidebar_heading() }).child("#"))
                                     .child(c.name.clone()),
                             )
                             .children(
@@ -1920,6 +1945,9 @@ impl ChatApp {
                                     .map(|(k, t)| self.render_thread_row(t, k == last, cx)),
                             )
                     }))
+                    // The open channel's artifacts (it may be a DM).
+                    .child(section("Artifacts", self.render_new_artifact_button(add("new-artifact", "New artifact"), cx)))
+                    .children(artifacts.into_iter().map(|id| self.render_artifact_row(id, open == Some(id), cx)))
                     .child(heading("Direct messages"))
                     .children(dms.map(|(i, c, u)| {
                         let user = &self.ws.users[u];
@@ -1954,7 +1982,6 @@ impl ChatApp {
     /// A thread nested under its channel, joined by a tree connector.
     fn render_thread_row(&self, t: usize, last: bool, cx: &Context<Self>) -> impl IntoElement {
         let selected = self.panel == Panel::Thread(t);
-        let line = theme::thread_line();
         let group: SharedString = format!("thread-row-{t}").into();
         let archive = div()
             .id(("archive-thread-row", t))
@@ -1975,62 +2002,69 @@ impl ChatApp {
                 cx.stop_propagation();
                 this.set_archived(t, true, cx);
             }));
-        div()
-            .id(("thread", t))
-            .group(group)
-            .relative()
-            .h(px(28.))
-            .mx_2()
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .when(!last, |d| {
-                d.child(div().absolute().left(px(16.)).top_0().bottom_0().border_l_1().border_color(line))
-            })
-            .child(
+        tree_row(("thread", t).into(), last, selected, |d| {
+            d.child(
                 div()
-                    .absolute()
-                    .left(px(16.))
-                    .top(px(-4.))
-                    .w(px(10.))
-                    .h(px(18.))
-                    .border_l_1()
-                    .border_b_1()
-                    .rounded_bl(px(6.))
-                    .border_color(line),
-            )
-            .child(
-                div()
-                    .ml(px(30.))
                     .flex_1()
                     .min_w_0()
-                    .h(px(26.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded_md()
-                    .text_size(px(14.))
-                    .map(|d| {
-                        if selected {
-                            d.bg(theme::sidebar_selected()).text_color(gpui::white())
-                        } else {
-                            d.text_color(theme::sidebar_text()).hover(|s| s.bg(theme::sidebar_hover()))
-                        }
-                    })
-                    .pr_1()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(self.ws.threads[t].name.clone()),
-                    )
-                    .child(archive),
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(self.ws.threads[t].name.clone()),
             )
-            .on_click(cx.listener(move |this, _, window, cx| this.select_thread(t, window, cx)))
+            .child(archive)
+        })
+        .group(group)
+        .on_click(cx.listener(move |this, _, window, cx| this.select_thread(t, window, cx)))
+    }
+
+    /// An artifact in the sidebar's Artifacts section: click to open it,
+    /// double-click to rename it.
+    fn render_artifact_row(&self, id: usize, selected: bool, cx: &Context<Self>) -> impl IntoElement {
+        let (icon, title) = match self.ws.artifact(id) {
+            Some(a) if a.load_error.is_some() => ("⚠", a.title.clone()),
+            Some(a) => (artifact::icon(a.kind), a.title.clone()),
+            None => ("", String::new()),
+        };
+        div()
+            .id(("artifact", id))
+            .mx_2()
+            .px_3()
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(15.))
+            .map(|d| match selected {
+                true => d.bg(theme::sidebar_selected()).text_color(gpui::white()),
+                false => d.text_color(theme::sidebar_text()).hover(|s| s.bg(theme::sidebar_hover())),
+            })
+            .child(div().flex_none().w(px(14.)).text_size(px(13.)).child(icon))
+            .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(title))
+            .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
+                this.select_artifact(id, e.click_count() == 2, window, cx);
+            }))
+    }
+
+    /// The Artifacts section's "+" (`button`), with its menu of kinds when
+    /// open: a new artifact in the open channel.
+    fn render_new_artifact_button(&self, button: gpui::Stateful<gpui::Div>, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let open = self.new_artifact_menu;
+        button
+            .when(open, |d| d.bg(theme::sidebar_hover()).text_color(gpui::white()))
+            // While the menu is open, a press anywhere outside it (this
+            // button too) closes it; a click here would reopen it.
+            .when(!open, |d| d.on_click(cx.listener(|this, _, _, cx| this.toggle_new_artifact_menu(cx))))
+            .when(open, |d| {
+                d.child(deferred(
+                    anchored()
+                        .offset(gpui::point(px(0.), px(26.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(self.render_new_artifact_menu(cx)),
+                ))
+            })
     }
 
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -2156,92 +2190,10 @@ impl ChatApp {
             )
     }
 
-    /// The channel's tabs, under its header: its messages, then each of its
-    /// artifacts, then "+" to make one.
-    fn render_tabs(&self, cx: &Context<Self>) -> impl IntoElement {
-        let open = self.open_artifact_id(cx);
-        let tab = |id: gpui::ElementId, selected: bool| {
-            div()
-                .id(id)
-                .flex_none()
-                .max_w(px(220.))
-                .h_full()
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_1()
-                .cursor_pointer()
-                .text_size(px(13.))
-                .border_b_2()
-                .map(|d| match selected {
-                    true => d.border_color(theme::link()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD),
-                    false => d.border_color(gpui::transparent_black()).text_color(theme::muted()).hover(|s| s.text_color(theme::text())),
-                })
-        };
-        let artifacts = self.ws.channel_artifacts(self.active).into_iter().filter_map(|id| {
-            let a = self.ws.artifact(id)?;
-            let broken = a.load_error.is_some();
-            Some(
-                tab(("artifact-tab", id).into(), open == Some(id))
-                    .child(div().flex_none().child(if broken { "⚠" } else { artifact::icon(a.kind) }))
-                    .child(div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(a.title.clone()))
-                    .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
-                        if e.click_count() == 2 {
-                            this.rename_artifact(id, window, cx);
-                        } else {
-                            this.open_artifact(id, window, cx);
-                        }
-                    })),
-            )
-        });
-        div()
-            .h(px(34.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_4()
-            .border_b_1()
-            .border_color(theme::border())
-            .child(
-                tab("messages-tab".into(), open.is_none())
-                    .child("Messages")
-                    .on_click(cx.listener(|this, _, window, cx| this.show_messages(window, cx))),
-            )
-            .children(artifacts)
-            .child(
-                div()
-                    .id("new-artifact")
-                    .relative()
-                    .flex_none()
-                    .size(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(16.))
-                    .text_color(theme::muted())
-                    .hover(|s| s.bg(theme::reaction_bg()).text_color(theme::text()))
-                    .when(self.new_artifact_menu, |d| d.bg(theme::reaction_bg()))
-                    .tooltip(|_, cx| Tooltip::view("New artifact", cx))
-                    .child("+")
-                    // While the menu is open, a press anywhere outside it
-                    // (this button too) closes it; a click here would reopen it.
-                    .when(!self.new_artifact_menu, |d| {
-                        d.on_click(cx.listener(|this, _, _, cx| this.toggle_new_artifact_menu(cx)))
-                    })
-                    .when(self.new_artifact_menu, |d| d.child(self.render_new_artifact_menu(cx))),
-            )
-    }
-
-    /// The kinds of artifact the tabs' "+" can make.
+    /// The kinds of artifact the sidebar Artifacts section's "+" can make.
     fn render_new_artifact_menu(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .id("new-artifact-menu")
-            .absolute()
-            .top(px(28.))
-            .left_0()
             .w(px(200.))
             .py_1()
             .flex()
@@ -3227,6 +3179,53 @@ fn archived_tag() -> impl IntoElement {
         .child("Archived")
 }
 
+/// A sidebar row nested under its channel, joined to it by a tree connector
+/// (which runs on down past it unless it's the `last`). `content` fills in
+/// the row's box.
+fn tree_row(id: gpui::ElementId, last: bool, selected: bool, content: impl FnOnce(gpui::Div) -> gpui::Div) -> gpui::Stateful<gpui::Div> {
+    let line = theme::thread_line();
+    let row = div()
+        .ml(px(30.))
+        .flex_1()
+        .min_w_0()
+        .h(px(26.))
+        .px_2()
+        .pr_1()
+        .flex()
+        .items_center()
+        .gap_1()
+        .rounded_md()
+        .text_size(px(14.))
+        .map(|d| match selected {
+            true => d.bg(theme::sidebar_selected()).text_color(gpui::white()),
+            false => d.text_color(theme::sidebar_text()).hover(|s| s.bg(theme::sidebar_hover())),
+        });
+    div()
+        .id(id)
+        .relative()
+        .h(px(28.))
+        .mx_2()
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .when(!last, |d| {
+            d.child(div().absolute().left(px(16.)).top_0().bottom_0().border_l_1().border_color(line))
+        })
+        .child(
+            div()
+                .absolute()
+                .left(px(16.))
+                .top(px(-4.))
+                .w(px(10.))
+                .h(px(18.))
+                .border_l_1()
+                .border_b_1()
+                .rounded_bl(px(6.))
+                .border_color(line),
+        )
+        .child(content(row))
+}
+
 /// The action bar that floats over the top-right of a hovered message.
 fn render_toolbar(ix: usize, cx: &Context<ChatApp>) -> impl IntoElement {
     div()
@@ -3376,7 +3375,6 @@ impl Render for ChatApp {
                             .flex()
                             .flex_col()
                             .child(self.render_header(cx))
-                            .child(self.render_tabs(cx))
                             .child(main),
                     )
                     .children(panel),
@@ -3543,6 +3541,31 @@ mod tests {
         assert!(app.read_with(cx, |app, cx| app.ws.artifact(id).is_none() && app.open_artifact_id(cx).is_none()));
     }
 
+    #[gpui::test]
+    fn an_artifact_in_the_sidebar_opens_in_its_own_channel(cx: &mut gpui::TestAppContext) {
+        let (app, cx, _home) = mock_app(cx);
+        let id = new_table(&app, cx);
+        let channel = app.read_with(cx, |app, _| app.active);
+        let other = app.read_with(cx, |app, _| app.ws.find_channel("general").unwrap());
+        assert_ne!(channel, other);
+        app.update_in(cx, |app, window, cx| app.select_channel(other, window, cx));
+        draw(cx);
+
+        // From another channel, it goes to the artifact's channel first.
+        app.update_in(cx, |app, window, cx| app.select_artifact(id, false, window, cx));
+        draw(cx);
+        assert_eq!(app.read_with(cx, |app, cx| (app.active, app.open_artifact_id(cx))), (channel, Some(id)));
+
+        // Its channel's row brings back the messages.
+        app.update_in(cx, |app, window, cx| app.select_channel(channel, window, cx));
+        draw(cx);
+        assert_eq!(app.read_with(cx, |app, cx| (app.active, app.open_artifact_id(cx))), (channel, None));
+
+        // The Artifacts section lists the open channel's only.
+        app.update_in(cx, |app, window, cx| app.select_channel(other, window, cx));
+        assert!(!app.read_with(cx, |app, _| app.ws.channel_artifacts(app.active).contains(&id)));
+    }
+
     /// A new table, open with its first cell selected and nothing saved
     /// in it yet.
     fn new_table(app: &Entity<ChatApp>, cx: &mut gpui::VisualTestContext) -> usize {
@@ -3638,7 +3661,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_agents_table_shows_up_as_a_tab_without_taking_the_view(cx: &mut gpui::TestAppContext) {
+    fn an_agents_table_shows_up_in_the_sidebar_without_taking_the_view(cx: &mut gpui::TestAppContext) {
         let (app, cx, home) = mock_app(cx);
         app.update(cx, |app, _| app.persist = true);
         draw(cx);
