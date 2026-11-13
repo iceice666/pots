@@ -15,4 +15,5 @@ pub mod reply;
 pub mod sandbox;
 pub mod search;
 pub mod store;
+pub mod whiteboard;
 pub mod worker;

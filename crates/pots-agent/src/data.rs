@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use pots_llm::Usage;
 use crate::markdown::{self, Block};
+pub use crate::whiteboard::Whiteboard;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -273,12 +274,13 @@ pub enum ArtifactKind {
     Document,
     Checklist,
     Board,
+    Whiteboard,
 }
 
 impl ArtifactKind {
     /// Every kind, in the order the app offers them.
     pub const ALL: &[ArtifactKind] =
-        &[ArtifactKind::Document, ArtifactKind::Table, ArtifactKind::Checklist, ArtifactKind::Board];
+        &[ArtifactKind::Document, ArtifactKind::Table, ArtifactKind::Checklist, ArtifactKind::Board, ArtifactKind::Whiteboard];
 
     /// The kind's name, as shown in the app ("Table").
     pub fn label(self) -> &'static str {
@@ -287,6 +289,7 @@ impl ArtifactKind {
             ArtifactKind::Document => "Document",
             ArtifactKind::Checklist => "Checklist",
             ArtifactKind::Board => "Board",
+            ArtifactKind::Whiteboard => "Whiteboard",
         }
     }
 
@@ -297,6 +300,7 @@ impl ArtifactKind {
             ArtifactKind::Document => "document",
             ArtifactKind::Checklist => "checklist",
             ArtifactKind::Board => "board",
+            ArtifactKind::Whiteboard => "whiteboard",
         }
     }
 }
@@ -306,7 +310,8 @@ impl ArtifactKind {
 /// `{"kind": "table", "columns": [...], "rows": [[...], ...]}`,
 /// `{"kind": "document", "text": "..."}`,
 /// `{"kind": "checklist", "items": [{"text": "...", "done": false}, ...]}`,
-/// `{"kind": "board", "columns": [{"name": "...", "cards": ["...", ...]}, ...]}`.
+/// `{"kind": "board", "columns": [{"name": "...", "cards": ["...", ...]}, ...]}`,
+/// `{"kind": "whiteboard", "items": [{"id": 1, "shape": "note", "x": 0, ...}, ...]}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ArtifactContent {
@@ -314,6 +319,7 @@ pub enum ArtifactContent {
     Document(Document),
     Checklist(Checklist),
     Board(Board),
+    Whiteboard(Whiteboard),
 }
 
 impl ArtifactContent {
@@ -324,6 +330,7 @@ impl ArtifactContent {
             ArtifactKind::Document => ArtifactContent::Document(Document::default()),
             ArtifactKind::Checklist => ArtifactContent::Checklist(Checklist::default()),
             ArtifactKind::Board => ArtifactContent::Board(Board::blank()),
+            ArtifactKind::Whiteboard => ArtifactContent::Whiteboard(Whiteboard::default()),
         }
     }
 
@@ -333,6 +340,7 @@ impl ArtifactContent {
             ArtifactContent::Document(_) => ArtifactKind::Document,
             ArtifactContent::Checklist(_) => ArtifactKind::Checklist,
             ArtifactContent::Board(_) => ArtifactKind::Board,
+            ArtifactContent::Whiteboard(_) => ArtifactKind::Whiteboard,
         }
     }
 }
@@ -652,8 +660,8 @@ impl Table {
     }
 }
 
-/// Something made and kept in a channel: a table, document, checklist or
-/// board. The metadata lives in `workspace.json`; the content
+/// Something made and kept in a channel: a table, document, checklist,
+/// board or whiteboard. The metadata lives in `workspace.json`; the content
 /// is in its own file (see `store`), loaded with the workspace.
 #[derive(Serialize, Deserialize)]
 pub struct Artifact {

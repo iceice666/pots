@@ -26,6 +26,7 @@ mod selection;
 mod settings;
 mod table_editor;
 mod theme;
+mod whiteboard_editor;
 
 use gpui::{
     App, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions,
@@ -66,6 +67,7 @@ fn main() {
         table_editor::bind_keys(cx);
         checklist_editor::bind_keys(cx);
         board_editor::bind_keys(cx);
+        whiteboard_editor::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
 

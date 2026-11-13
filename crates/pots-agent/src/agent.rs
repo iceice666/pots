@@ -1586,7 +1586,7 @@ mod tests {
         let conv = Conv::Thread(t);
         let ix = ws.post(conv, ws.me, "@Engineer go");
         let names = |a: usize| agents.request(a, &ws, conv, ix + 1).tools.iter().map(|t| t.name).collect::<Vec<_>>();
-        let chat = ["pass", "list_channels", "read_channel", "ask_owner", "list_artifacts", "read_artifact", "create_table", "update_table", "add_table_rows", "create_document", "update_document", "create_checklist", "update_checklist", "add_checklist_items", "check_items", "create_board", "update_board", "add_board_cards", "move_board_card"];
+        let chat = ["pass", "list_channels", "read_channel", "ask_owner", "list_artifacts", "read_artifact", "create_table", "update_table", "add_table_rows", "create_document", "update_document", "create_checklist", "update_checklist", "add_checklist_items", "check_items", "create_board", "update_board", "add_board_cards", "move_board_card", "create_whiteboard", "add_whiteboard_items", "update_whiteboard_items", "remove_whiteboard_items"];
         assert_eq!(
             names(0),
             [&chat[..], &["start_task", "post_in_thread", "check_merge_conflicts", "record_decision"]].concat(),
@@ -1639,7 +1639,7 @@ mod tests {
         );
         assert!(req.system.starts_with("Be useful.\n\n# Where you are"));
         assert!(req.system.contains("your direct messages with the owner"));
-        assert_eq!(req.tools.len(), 23);
+        assert_eq!(req.tools.len(), 27);
     }
 
     #[test]

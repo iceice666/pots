@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::agent::tools::channel;
 use crate::data::{ArtifactContent, ArtifactKind, Board, BoardColumn, Checklist, ChecklistItem, Document, Table, Workspace};
+use crate::whiteboard::{self, Color, Rect, Shape, Whiteboard};
 use pots_llm::ToolSpec;
 
 pub const LIST_ARTIFACTS: &str = "list_artifacts";
@@ -28,9 +29,13 @@ pub const CREATE_BOARD: &str = "create_board";
 pub const UPDATE_BOARD: &str = "update_board";
 pub const ADD_BOARD_CARDS: &str = "add_board_cards";
 pub const MOVE_BOARD_CARD: &str = "move_board_card";
+pub const CREATE_WHITEBOARD: &str = "create_whiteboard";
+pub const ADD_WHITEBOARD_ITEMS: &str = "add_whiteboard_items";
+pub const UPDATE_WHITEBOARD_ITEMS: &str = "update_whiteboard_items";
+pub const REMOVE_WHITEBOARD_ITEMS: &str = "remove_whiteboard_items";
 
 /// Every artifact tool, in the order agents are offered them.
-pub const ALL: [&str; 15] = [
+pub const ALL: [&str; 19] = [
     LIST_ARTIFACTS,
     READ_ARTIFACT,
     CREATE_TABLE,
@@ -46,6 +51,10 @@ pub const ALL: [&str; 15] = [
     UPDATE_BOARD,
     ADD_BOARD_CARDS,
     MOVE_BOARD_CARD,
+    CREATE_WHITEBOARD,
+    ADD_WHITEBOARD_ITEMS,
+    UPDATE_WHITEBOARD_ITEMS,
+    REMOVE_WHITEBOARD_ITEMS,
 ];
 
 /// The most a table made or changed by an agent may have.
@@ -59,6 +68,8 @@ pub const MAX_DOCUMENT: usize = 100_000;
 pub const MAX_ITEMS: usize = 500;
 /// The longest checklist item or board card, in characters.
 pub const MAX_ITEM: usize = 2000;
+/// The most items a whiteboard may have.
+pub const MAX_WHITEBOARD_ITEMS: usize = 1000;
 
 pub fn is_tool(name: &str) -> bool {
     ALL.contains(&name)
@@ -90,6 +101,21 @@ pub fn specs() -> Vec<ToolSpec> {
             "name": {"type": "string", "description": "The column's name, like “To do”."},
             "cards": {"type": "array", "items": {"type": "string"}, "description": "Its cards, top to bottom: a line of text each."}
         }, "required": ["name"], "additionalProperties": false}});
+    let shapes: Vec<&str> = Shape::ALL.iter().map(|s| s.name()).collect();
+    let colors: Vec<&str> = Color::ALL.iter().map(|c| c.name()).collect();
+    let item_id = json!({"type": "integer", "minimum": 1, "description": "An item's id, from read_artifact."});
+    let wb_items = json!({"type": "array", "minItems": 1, "description": "The items to put on the board.",
+        "items": {"type": "object", "properties": {
+            "type": {"type": "string", "enum": shapes, "description": "note (a sticky note, the default), box, round_box, or text (no border)."},
+            "text": {"type": "string", "description": "What it says. Notes and boxes wrap it; keep it short."},
+            "color": {"type": "string", "enum": colors, "description": "Default yellow."},
+            "near": {"type": ["integer", "string"], "description": "Put it beside this item: an item's id, or the `key` of an item given earlier in this call. Without `near`, `x` and `y` it goes in the next free place."},
+            "key": {"type": "string", "description": "A name for this item, so later items in this call can be put `near` it."},
+            "x": {"type": "number", "description": "Left edge, in pixels. Usually leave it out: placing keeps items from overlapping."},
+            "y": {"type": "number", "description": "Top edge, in pixels. Give it with `x`."},
+            "w": {"type": "number", "description": "Width, in pixels. A note is 160 × 120."},
+            "h": {"type": "number", "description": "Height, in pixels."}
+        }, "additionalProperties": false}});
     let object = |properties: Value, required: &[&str]| {
         json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
     };
@@ -228,6 +254,49 @@ pub fn specs() -> Vec<ToolSpec> {
                 &["id", "card", "to"],
             ),
         },
+        ToolSpec {
+            name: CREATE_WHITEBOARD,
+            description: "Create a whiteboard artifact in a channel: a new tab there, an endless board of sticky \
+                          notes, boxes and text that people move around freely, for brainstorming, sketching a \
+                          plan or grouping ideas. Items you give are placed so they don't overlap. Returns its id \
+                          and the items' ids.",
+            input_schema: object(json!({"channel": channel, "title": title, "items": wb_items}), &["channel", "title"]),
+        },
+        ToolSpec {
+            name: ADD_WHITEBOARD_ITEMS,
+            description: "Add notes, boxes or text to a whiteboard, keeping what's there. Group related ideas \
+                          with `near` (beside an item) and color, rather than coordinates. Returns the new items' ids.",
+            input_schema: object(json!({"id": id, "items": wb_items}), &["id", "items"]),
+        },
+        ToolSpec {
+            name: UPDATE_WHITEBOARD_ITEMS,
+            description: "Change a whiteboard: its title, and/or items on it, by their ids from read_artifact: \
+                          what they say, their color or type, where they are, or their size. Only what you give \
+                          changes.",
+            input_schema: object(
+                json!({
+                    "id": id,
+                    "title": new_title,
+                    "changes": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+                        "item": item_id,
+                        "text": {"type": "string"},
+                        "color": {"type": "string", "enum": colors},
+                        "type": {"type": "string", "enum": shapes},
+                        "x": {"type": "number"}, "y": {"type": "number"},
+                        "w": {"type": "number"}, "h": {"type": "number"}
+                    }, "required": ["item"], "additionalProperties": false}}
+                }),
+                &["id"],
+            ),
+        },
+        ToolSpec {
+            name: REMOVE_WHITEBOARD_ITEMS,
+            description: "Take items off a whiteboard, by their ids from read_artifact.",
+            input_schema: object(
+                json!({"id": id, "items": {"type": "array", "minItems": 1, "items": item_id, "description": "The items' ids."}}),
+                &["id", "items"],
+            ),
+        },
     ]
 }
 
@@ -246,6 +315,7 @@ pub fn activity(name: &str, input: &Value) -> Option<String> {
         (CREATE_DOCUMENT, Some(c), _) => creating("document", c),
         (CREATE_CHECKLIST, Some(c), _) => creating("checklist", c),
         (CREATE_BOARD, Some(c), _) => creating("board", c),
+        (CREATE_WHITEBOARD, Some(c), _) => creating("whiteboard", c),
         (UPDATE_TABLE, _, Some(id)) => format!("Updating table {id}…"),
         (UPDATE_DOCUMENT, _, Some(id)) => format!("Updating document {id}…"),
         (UPDATE_CHECKLIST, _, Some(id)) => format!("Updating checklist {id}…"),
@@ -255,6 +325,9 @@ pub fn activity(name: &str, input: &Value) -> Option<String> {
         (CHECK_ITEMS, _, Some(id)) => format!("Ticking items in checklist {id}…"),
         (ADD_BOARD_CARDS, _, Some(id)) => format!("Adding cards to board {id}…"),
         (MOVE_BOARD_CARD, _, Some(id)) => format!("Moving a card on board {id}…"),
+        (ADD_WHITEBOARD_ITEMS, _, Some(id)) => format!("Adding to whiteboard {id}…"),
+        (UPDATE_WHITEBOARD_ITEMS, _, Some(id)) => format!("Changing whiteboard {id}…"),
+        (REMOVE_WHITEBOARD_ITEMS, _, Some(id)) => format!("Taking items off whiteboard {id}…"),
         _ => return None,
     })
 }
@@ -298,6 +371,10 @@ pub fn write(ws: &mut Workspace, name: &str, input: &Value) -> Result<Changed, S
         UPDATE_BOARD => update_board(ws, input),
         ADD_BOARD_CARDS => add_board_cards(ws, input),
         MOVE_BOARD_CARD => move_board_card(ws, input),
+        CREATE_WHITEBOARD => create_whiteboard(ws, input),
+        ADD_WHITEBOARD_ITEMS => add_whiteboard_items(ws, input),
+        UPDATE_WHITEBOARD_ITEMS => update_whiteboard_items(ws, input),
+        REMOVE_WHITEBOARD_ITEMS => remove_whiteboard_items(ws, input),
         _ => Err(format!("There is no tool named {name}.")),
     }
 }
@@ -332,6 +409,11 @@ fn read_artifact(ws: &Workspace, input: &Value) -> Result<String, String> {
         ArtifactContent::Document(d) => format!("{head}:\n{}", d.text),
         ArtifactContent::Checklist(c) => format!("{head}:\n{}", json!({"items": c.items})),
         ArtifactContent::Board(b) => format!("{head}:\n{}", json!({"columns": b.columns})),
+        ArtifactContent::Whiteboard(b) if b.items.is_empty() => format!("{head}."),
+        ArtifactContent::Whiteboard(b) => format!(
+            "{head}, first drawn first (later ones lie on top). x and y are each item's top left, in pixels:\n{}",
+            json!({"items": b.items.iter().map(item_json).collect::<Vec<_>>()})
+        ),
     })
 }
 
@@ -425,12 +507,12 @@ fn changed(ws: &mut Workspace, id: usize, content: ArtifactContent, done: &str) 
 fn title_free(ws: &Workspace, c: usize, title: &str, except: Option<usize>) -> Result<(), String> {
     match ws.artifacts.iter().find(|a| a.channel == c && Some(a.id) != except && a.title.eq_ignore_ascii_case(title)) {
         Some(a) => Err(format!(
-            "#{} already has a {} titled “{}” (id {}). Change it with update_{}, or pick another title.",
+            "#{} already has a {} titled “{}” (id {}). Change it with {}, or pick another title.",
             ws.channels[c].name,
             a.kind.noun(),
             a.title,
             a.id,
-            a.kind.noun()
+            update_tool(a.kind)
         )),
         None => Ok(()),
     }
@@ -728,6 +810,200 @@ fn board_column(board: &Board, v: &Value, field: &str) -> Result<usize, String> 
     })
 }
 
+// --- whiteboards -------------------------------------------------------------
+
+fn create_whiteboard(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    channel(ws, input)?;
+    let mut board = Whiteboard::default();
+    let ids = match &input["items"] {
+        Value::Null => Vec::new(),
+        v => add_items(&mut board, v)?,
+    };
+    let mut made = create(ws, input, ArtifactContent::Whiteboard(board))?;
+    made.result.push_str(&ids_said(&ids));
+    Ok(made)
+}
+
+fn add_whiteboard_items(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    let mut board = whiteboard_of(ws, id)?.clone();
+    let ids = add_items(&mut board, &input["items"])?;
+    let mut c = changed(ws, id, ArtifactContent::Whiteboard(board), &format!("Added {} to", plural(ids.len(), "item")));
+    c.result.push_str(&ids_said(&ids));
+    Ok(c)
+}
+
+fn update_whiteboard_items(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    let mut board = whiteboard_of(ws, id)?.clone();
+    let new_title = title(&input["title"])?;
+    let list = match (&input["changes"], &new_title) {
+        (Value::Null, Some(_)) => return update(ws, id, new_title, None),
+        (v, _) => v.as_array().ok_or("`changes` must be an array: {\"item\": id, …what changes} each.")?,
+    };
+    if list.is_empty() {
+        return Err("`changes` is empty: give at least one item to change.".into());
+    }
+    for (n, change) in list.iter().enumerate() {
+        let what = format!("Change {}", n + 1);
+        let item = change["item"].as_u64().ok_or_else(|| format!("{what} has no `item`: an item's id, from read_artifact."))?;
+        let shape = shape_of(&change["type"], &what)?;
+        let color = color_of(&change["color"], &what)?;
+        let text = text_of(&change["text"], &what)?;
+        let num = |k: &str| number(&change[k], &format!("{what}: `{k}`"));
+        let (x, y, w, h) = (num("x")?, num("y")?, num("w")?, num("h")?);
+        let i = board.item_mut(item).ok_or_else(|| format!("{what}: the board has no item {item}. Nothing was changed. read_artifact shows its items."))?;
+        if let Some(shape) = shape {
+            i.shape = shape;
+        }
+        if let Some(color) = color {
+            i.color = color;
+        }
+        if let Some(text) = text {
+            i.text = text;
+        }
+        i.x = x.map_or(i.x, whiteboard::clamp_coord);
+        i.y = y.map_or(i.y, whiteboard::clamp_coord);
+        (i.w, i.h) = whiteboard::clamp_size(w.unwrap_or(i.w), h.unwrap_or(i.h));
+        if i.shape == Shape::Text && i.text.trim().is_empty() {
+            return Err(format!("{what}: text with nothing in it would be invisible. Remove it with remove_whiteboard_items instead."));
+        }
+    }
+    if new_title.is_some() {
+        return update(ws, id, new_title, Some(ArtifactContent::Whiteboard(board)));
+    }
+    if Some(&ArtifactContent::Whiteboard(board.clone())) == ws.artifact(id).expect("checked").content.as_ref() {
+        let title = ws.artifact(id).expect("checked").title.clone();
+        return Ok(Changed { id, content: false, title: false, shown: String::new(), result: format!("Whiteboard {id} “{title}” already says that; nothing changed.") });
+    }
+    Ok(changed(ws, id, ArtifactContent::Whiteboard(board), &format!("Changed {} on", plural(list.len(), "item"))))
+}
+
+fn remove_whiteboard_items(ws: &mut Workspace, input: &Value) -> Result<Changed, String> {
+    let id = artifact_id(ws, input)?;
+    let mut board = whiteboard_of(ws, id)?.clone();
+    let list = input["items"].as_array().ok_or("`items` must be an array of item ids, from read_artifact.")?;
+    if list.is_empty() {
+        return Err("`items` is empty: give the ids of the items to take off.".into());
+    }
+    for v in list {
+        let item = v.as_u64().ok_or("`items` holds item ids: numbers, from read_artifact.")?;
+        if !board.remove(item) {
+            return Err(format!("The board has no item {item}. Nothing was changed. read_artifact shows its items."));
+        }
+    }
+    Ok(changed(ws, id, ArtifactContent::Whiteboard(board), &format!("Took {} off", plural(list.len(), "item"))))
+}
+
+/// Put the items `v` describes on `board`, placing those without `x` and
+/// `y`. Returns their ids, in order.
+fn add_items(board: &mut Whiteboard, v: &Value) -> Result<Vec<u64>, String> {
+    let list = v.as_array().ok_or("`items` must be an array of items, each {\"type\": …, \"text\": …}.")?;
+    if list.is_empty() {
+        return Err("`items` is empty: give at least one item to add.".into());
+    }
+    if board.items.len() + list.len() > MAX_WHITEBOARD_ITEMS {
+        return Err(format!(
+            "That makes {} items, too many: a whiteboard has at most {MAX_WHITEBOARD_ITEMS}.",
+            board.items.len() + list.len()
+        ));
+    }
+    let mut keys: Vec<(String, u64)> = Vec::new();
+    let mut ids = Vec::new();
+    for (n, item) in list.iter().enumerate() {
+        let what = format!("Item {}", n + 1);
+        if !item.is_object() {
+            return Err(format!("{what} isn't an object: give each item as {{\"type\": …, \"text\": …}}."));
+        }
+        let shape = shape_of(&item["type"], &what)?.unwrap_or_default();
+        let color = color_of(&item["color"], &what)?.unwrap_or_default();
+        let text = text_of(&item["text"], &what)?.unwrap_or_default();
+        if shape == Shape::Text && text.trim().is_empty() {
+            return Err(format!("{what} is text with nothing in it: give it `text`."));
+        }
+        let (dw, dh) = shape.default_size();
+        let num = |k: &str| number(&item[k], &format!("{what}: `{k}`"));
+        let (w, h) = whiteboard::clamp_size(num("w")?.unwrap_or(dw), num("h")?.unwrap_or(dh));
+        let near = match &item["near"] {
+            Value::Null => None,
+            Value::String(k) => Some(keys.iter().find(|(key, _)| key == k.trim()).map(|&(_, id)| id).ok_or_else(|| {
+                format!("{what}: `near` is “{k}”, but no item before it in this call has that `key`.")
+            })?),
+            v => {
+                let near = v.as_u64().ok_or_else(|| format!("{what}: `near` is an item's id, or an earlier item's `key`."))?;
+                board.item(near).ok_or_else(|| format!("{what}: `near` is {near}, but the board has no item {near}."))?;
+                Some(near)
+            }
+        };
+        let (x, y) = match (num("x")?, num("y")?) {
+            (Some(x), Some(y)) => (x, y),
+            (None, None) => board.place(w, h, near),
+            _ => return Err(format!("{what}: give `x` and `y` together, or neither.")),
+        };
+        let id = board.add_sized(shape, Rect { x, y, w, h }, &text, color);
+        if let Some(key) = item["key"].as_str() {
+            keys.push((key.trim().to_string(), id));
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+/// " New items' ids: 4, 5, 6."
+fn ids_said(ids: &[u64]) -> String {
+    match ids {
+        [] => String::new(),
+        [id] => format!(" The new item's id: {id}."),
+        ids => format!(" New items' ids, in the order given: {}.", ids.iter().map(u64::to_string).collect::<Vec<_>>().join(", ")),
+    }
+}
+
+/// An item as read_artifact shows it: whole pixels, no color on text.
+fn item_json(i: &whiteboard::WhiteboardItem) -> Value {
+    let mut v = json!({"id": i.id, "type": i.shape.name(), "text": i.text,
+        "x": i.x.round() as i64, "y": i.y.round() as i64, "w": i.w.round() as i64, "h": i.h.round() as i64});
+    if i.shape != Shape::Text {
+        v["color"] = json!(i.color.name());
+    }
+    v
+}
+
+fn shape_of(v: &Value, what: &str) -> Result<Option<Shape>, String> {
+    match v {
+        Value::Null => Ok(None),
+        v => v.as_str().and_then(Shape::from_name).map(Some).ok_or_else(|| {
+            let names: Vec<&str> = Shape::ALL.iter().map(|s| s.name()).collect();
+            format!("{what}: `type` is one of {}.", names.join(", "))
+        }),
+    }
+}
+
+fn color_of(v: &Value, what: &str) -> Result<Option<Color>, String> {
+    match v {
+        Value::Null => Ok(None),
+        v => v.as_str().and_then(Color::from_name).map(Some).ok_or_else(|| {
+            let names: Vec<&str> = Color::ALL.iter().map(|c| c.name()).collect();
+            format!("{what}: `color` is one of {}.", names.join(", "))
+        }),
+    }
+}
+
+fn text_of(v: &Value, what: &str) -> Result<Option<String>, String> {
+    match v {
+        Value::Null => Ok(None),
+        Value::String(s) if s.chars().count() > MAX_ITEM => Err(format!("{what}: `text` is too long: keep it to {MAX_ITEM} characters.")),
+        Value::String(s) => Ok(Some(s.trim().to_string())),
+        _ => Err(format!("{what}: `text` must be text (a string).")),
+    }
+}
+
+fn number(v: &Value, what: &str) -> Result<Option<f32>, String> {
+    match v {
+        Value::Null => Ok(None),
+        v => v.as_f64().map(|n| Some(n as f32)).ok_or_else(|| format!("{what} must be a number.")),
+    }
+}
+
 // --- checking what the agent passed ----------------------------------------
 
 /// "3 columns × 2 rows", "12 lines", "2 of 5 done", "3 columns, 7 cards".
@@ -739,6 +1015,8 @@ fn size(content: &ArtifactContent) -> String {
         ArtifactContent::Checklist(c) if c.items.is_empty() => "no items".to_string(),
         ArtifactContent::Checklist(c) => format!("{} of {} done", c.done(), c.items.len()),
         ArtifactContent::Board(b) => format!("{}, {}", plural(b.columns.len(), "column"), plural(b.cards(), "card")),
+        ArtifactContent::Whiteboard(b) if b.items.is_empty() => "empty".to_string(),
+        ArtifactContent::Whiteboard(b) => plural(b.items.len(), "item"),
     }
 }
 
@@ -803,12 +1081,23 @@ fn of_kind(ws: &Workspace, id: usize, kind: ArtifactKind) -> Result<&ArtifactCon
     match content.kind() {
         k if k == kind => Ok(content),
         k => Err(format!(
-            "Artifact {id} “{}” is a {}, not a {}. Use update_{} and its other tools for it.",
+            "Artifact {id} “{}” is a {}, not a {}. Use {} and its other tools for it.",
             ws.artifact(id).expect("checked").title,
             k.noun(),
             kind.noun(),
-            k.noun()
+            update_tool(k)
         )),
+    }
+}
+
+/// The tool that changes artifacts of `kind`.
+fn update_tool(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Table => UPDATE_TABLE,
+        ArtifactKind::Document => UPDATE_DOCUMENT,
+        ArtifactKind::Checklist => UPDATE_CHECKLIST,
+        ArtifactKind::Board => UPDATE_BOARD,
+        ArtifactKind::Whiteboard => UPDATE_WHITEBOARD_ITEMS,
     }
 }
 
@@ -822,6 +1111,13 @@ fn table(ws: &Workspace, id: usize) -> Result<&Table, String> {
 fn checklist(ws: &Workspace, id: usize) -> Result<&Checklist, String> {
     match of_kind(ws, id, ArtifactKind::Checklist)? {
         ArtifactContent::Checklist(c) => Ok(c),
+        _ => unreachable!("checked"),
+    }
+}
+
+fn whiteboard_of(ws: &Workspace, id: usize) -> Result<&Whiteboard, String> {
+    match of_kind(ws, id, ArtifactKind::Whiteboard)? {
+        ArtifactContent::Whiteboard(b) => Ok(b),
         _ => unreachable!("checked"),
     }
 }
@@ -1039,6 +1335,92 @@ mod tests {
 
         let c = write(&mut ws, UPDATE_BOARD, &json!({"id": id, "columns": [{"name": "Backlog", "cards": ["A", "B"]}, {"name": "Live"}]})).unwrap();
         assert_eq!(c.shown, "Rewrote board “Sprint” in #general (2 columns, 2 cards).");
+    }
+
+    fn whiteboard_of_ws(ws: &Workspace, id: usize) -> &Whiteboard {
+        match content_of(ws, id) {
+            ArtifactContent::Whiteboard(b) => b,
+            other => panic!("not a whiteboard: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_whiteboard_is_made_with_items_placed_beside_each_other() {
+        let mut ws = data::seed();
+        let made = write(&mut ws, CREATE_WHITEBOARD, &json!({"channel": "general", "title": "Ideas", "items": [
+            {"text": "Pros", "type": "box", "color": "green", "key": "pros"},
+            {"text": "Fast", "near": "pros"},
+            {"text": "Cons", "type": "box", "color": "pink", "x": 0, "y": 400},
+            {"type": "text", "text": "Q4 plan", "x": 0, "y": -80, "w": 300}
+        ]})).unwrap();
+        let id = made.id;
+        assert_eq!(made.shown, "Created whiteboard “Ideas” in #general (4 items).");
+        assert!(made.result.ends_with("New items' ids, in the order given: 1, 2, 3, 4."), "{}", made.result);
+        let b = whiteboard_of_ws(&ws, id);
+        let (pros, fast, cons) = (b.item(1).unwrap(), b.item(2).unwrap(), b.item(3).unwrap());
+        assert_eq!((pros.shape, pros.color), (Shape::Box, Color::Green));
+        assert_eq!((fast.x, fast.y), (pros.x + pros.w + whiteboard::GAP, pros.y), "beside the item it's near");
+        assert_eq!((cons.x, cons.y), (0., 400.));
+        assert_eq!(b.item(4).unwrap().w, 300.);
+
+        let shown = read(&ws, READ_ARTIFACT, &json!({"id": id})).unwrap();
+        let (head, body) = shown.split_once('\n').unwrap();
+        assert!(head.starts_with(&format!("Whiteboard {id} “Ideas” in #general, 4 items, first drawn first")), "{head}");
+        let items = &serde_json::from_str::<Value>(body).unwrap()["items"];
+        assert_eq!(items[0], json!({"id": 1, "type": "box", "text": "Pros", "color": "green", "x": 0, "y": 0, "w": 180, "h": 90}));
+        assert!(items[3].get("color").is_none(), "text has no color: {}", items[3]);
+
+        let c = write(&mut ws, ADD_WHITEBOARD_ITEMS, &json!({"id": id, "items": [{"text": "Cheap", "near": 2}]})).unwrap();
+        assert_eq!(c.shown, "Added 1 item to whiteboard “Ideas” in #general (5 items).");
+        assert!(c.result.ends_with("The new item's id: 5."), "{}", c.result);
+        let b = whiteboard_of_ws(&ws, id);
+        assert!(b.items.iter().filter(|i| i.id != 5).all(|i| !i.rect().near(&b.item(5).unwrap().rect(), 1.)), "it lands on no other");
+    }
+
+    #[test]
+    fn whiteboard_items_are_changed_and_removed_by_id() {
+        let mut ws = data::seed();
+        let id = write(&mut ws, CREATE_WHITEBOARD, &json!({"channel": "general", "title": "Map",
+            "items": [{"text": "a"}, {"text": "b"}]})).unwrap().id;
+        let c = write(&mut ws, UPDATE_WHITEBOARD_ITEMS, &json!({"id": id, "changes": [
+            {"item": 1, "text": "A!", "color": "blue", "x": 500},
+            {"item": 2, "type": "round_box", "w": 10}
+        ]})).unwrap();
+        assert_eq!(c.shown, "Changed 2 items on whiteboard “Map” in #general (2 items).");
+        let b = whiteboard_of_ws(&ws, id);
+        let (a, bb) = (b.item(1).unwrap(), b.item(2).unwrap());
+        assert_eq!((a.text.as_str(), a.color, a.x, a.y), ("A!", Color::Blue, 500., 0.), "only what's given changes");
+        assert_eq!((bb.shape, bb.w), (Shape::RoundBox, whiteboard::MIN_W), "sizes are kept within bounds");
+        let c = write(&mut ws, UPDATE_WHITEBOARD_ITEMS, &json!({"id": id, "changes": [{"item": 1, "text": "A!"}]})).unwrap();
+        assert!(!c.content && c.shown.is_empty(), "same text changes nothing");
+        let c = write(&mut ws, UPDATE_WHITEBOARD_ITEMS, &json!({"id": id, "title": "Mind map"})).unwrap();
+        assert!(c.title && !c.content);
+
+        let before = content_of(&ws, id).clone();
+        for (name, input, want) in [
+            (UPDATE_WHITEBOARD_ITEMS, json!({"id": id, "changes": [{"item": 1, "text": "x"}, {"item": 9, "text": "y"}]}), "Change 2: the board has no item 9. Nothing was changed."),
+            (UPDATE_WHITEBOARD_ITEMS, json!({"id": id, "changes": [{"item": 1, "color": "teal"}]}), "`color` is one of yellow, blue, green, pink, purple, gray"),
+            (UPDATE_WHITEBOARD_ITEMS, json!({"id": id, "changes": [{"item": 1, "type": "text", "text": " "}]}), "would be invisible"),
+            (UPDATE_WHITEBOARD_ITEMS, json!({"id": id}), "`changes` must be an array"),
+            (ADD_WHITEBOARD_ITEMS, json!({"id": id, "items": [{"type": "circle"}]}), "`type` is one of note, box, round_box, text"),
+            (ADD_WHITEBOARD_ITEMS, json!({"id": id, "items": [{"text": "x", "x": 3}]}), "give `x` and `y` together"),
+            (ADD_WHITEBOARD_ITEMS, json!({"id": id, "items": [{"text": "x", "near": "nope"}]}), "no item before it in this call has that `key`"),
+            (ADD_WHITEBOARD_ITEMS, json!({"id": id, "items": [{"text": "x", "near": 77}]}), "the board has no item 77"),
+            (ADD_WHITEBOARD_ITEMS, json!({"id": id, "items": [{"type": "text"}]}), "text with nothing in it"),
+            (ADD_WHITEBOARD_ITEMS, json!({"id": id, "items": [{"text": "x", "w": "big"}]}), "`w` must be a number"),
+            (ADD_WHITEBOARD_ITEMS, json!({"id": id, "items": vec![json!({"text": "x"}); MAX_WHITEBOARD_ITEMS]}), "too many"),
+            (REMOVE_WHITEBOARD_ITEMS, json!({"id": id, "items": [1, 5]}), "The board has no item 5. Nothing was changed."),
+            (REMOVE_WHITEBOARD_ITEMS, json!({"id": id, "items": []}), "`items` is empty"),
+        ] {
+            let e = err(write(&mut ws, name, &input));
+            assert!(e.contains(want), "{name} {input}: {e}");
+        }
+        assert_eq!(*content_of(&ws, id), before, "a call that failed changed nothing");
+
+        let c = write(&mut ws, REMOVE_WHITEBOARD_ITEMS, &json!({"id": id, "items": [2]})).unwrap();
+        assert_eq!(c.shown, "Took 1 item off whiteboard “Mind map” in #general (1 item).");
+        let c = write(&mut ws, ADD_WHITEBOARD_ITEMS, &json!({"id": id, "items": [{"text": "c"}]})).unwrap();
+        assert!(c.result.ends_with("id: 3."), "ids aren't reused: {}", c.result);
     }
 
     #[test]

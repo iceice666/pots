@@ -20,6 +20,7 @@ use crate::checklist_editor::ChecklistEditor;
 use crate::composer::{Composer, ComposerEvent};
 use crate::document_editor::DocumentEditor;
 use crate::table_editor::TableEditor;
+use crate::whiteboard_editor::WhiteboardEditor;
 use crate::theme;
 
 /// How long after a change the frame saves, so a burst of edits is one write.
@@ -102,6 +103,7 @@ fn editor_for(content: ArtifactContent, window: &mut Window, cx: &mut Context<Ar
         ArtifactContent::Document(document) => attach(cx.new(|cx| DocumentEditor::new(document, window, cx)), cx),
         ArtifactContent::Checklist(list) => attach(cx.new(|cx| ChecklistEditor::new(list, window, cx)), cx),
         ArtifactContent::Board(board) => attach(cx.new(|cx| BoardEditor::new(board, window, cx)), cx),
+        ArtifactContent::Whiteboard(board) => attach(cx.new(|cx| WhiteboardEditor::new(board, window, cx)), cx),
     }
 }
 
@@ -112,6 +114,7 @@ pub fn icon(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Document => "¶",
         ArtifactKind::Checklist => "☑",
         ArtifactKind::Board => "▥",
+        ArtifactKind::Whiteboard => "◩",
     }
 }
 

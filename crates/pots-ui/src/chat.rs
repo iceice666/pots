@@ -3463,6 +3463,7 @@ mod tests {
             crate::table_editor::bind_keys(cx);
             crate::checklist_editor::bind_keys(cx);
             crate::board_editor::bind_keys(cx);
+            crate::whiteboard_editor::bind_keys(cx);
         });
         let (app, cx) = cx.add_window_view(|window, cx| ChatApp::new(true, window, cx));
         cx.update(|window, _| window.activate_window());
