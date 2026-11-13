@@ -19,6 +19,7 @@ use crate::board_editor::BoardEditor;
 use crate::checklist_editor::ChecklistEditor;
 use crate::composer::{Composer, ComposerEvent};
 use crate::document_editor::DocumentEditor;
+use crate::page_view::PageView;
 use crate::table_editor::TableEditor;
 use crate::whiteboard_editor::WhiteboardEditor;
 use crate::theme;
@@ -52,6 +53,10 @@ pub trait ArtifactEditor: Render + Focusable + EventEmitter<EditorEvent> {
     /// say), where typing goes on. No window needed: an agent's tool call
     /// has none.
     fn replace(&mut self, content: ArtifactContent, cx: &mut Context<Self>);
+    /// Whether something of the app's (a dialog, a menu) is drawn over
+    /// the editor. Only an editor showing a native view on top of the
+    /// window (a page's web view) has to care.
+    fn set_covered(&mut self, _covered: bool, _cx: &mut Context<Self>) {}
 }
 
 /// An editor of any kind, as the frame holds it.
@@ -62,6 +67,7 @@ trait AnyEditor {
     fn commit(&self, window: &mut Window, cx: &mut App) -> bool;
     fn focus(&self, window: &mut Window, cx: &mut App);
     fn replace(&self, content: ArtifactContent, cx: &mut App);
+    fn set_covered(&self, covered: bool, cx: &mut App);
 }
 
 impl<E: ArtifactEditor> AnyEditor for Entity<E> {
@@ -88,6 +94,10 @@ impl<E: ArtifactEditor> AnyEditor for Entity<E> {
     fn replace(&self, content: ArtifactContent, cx: &mut App) {
         self.update(cx, |e, cx| e.replace(content, cx));
     }
+
+    fn set_covered(&self, covered: bool, cx: &mut App) {
+        self.update(cx, |e, cx| e.set_covered(covered, cx));
+    }
 }
 
 /// The editor for `content`'s kind. A new kind adds its arm here.
@@ -104,6 +114,7 @@ fn editor_for(content: ArtifactContent, window: &mut Window, cx: &mut Context<Ar
         ArtifactContent::Checklist(list) => attach(cx.new(|cx| ChecklistEditor::new(list, window, cx)), cx),
         ArtifactContent::Board(board) => attach(cx.new(|cx| BoardEditor::new(board, window, cx)), cx),
         ArtifactContent::Whiteboard(board) => attach(cx.new(|cx| WhiteboardEditor::new(board, window, cx)), cx),
+        ArtifactContent::Page(page) => attach(cx.new(|cx| PageView::new(page, window, cx)), cx),
     }
 }
 
@@ -115,6 +126,7 @@ pub fn icon(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Checklist => "☑",
         ArtifactKind::Board => "▥",
         ArtifactKind::Whiteboard => "◩",
+        ArtifactKind::Page => "⧉",
     }
 }
 
@@ -175,6 +187,11 @@ impl ArtifactFrame {
     #[cfg(test)]
     pub fn content(&self, cx: &App) -> ArtifactContent {
         self.editor.content(cx)
+    }
+
+    /// Whether one of the app's overlays is drawn over the editor.
+    pub fn set_covered(&self, covered: bool, cx: &mut App) {
+        self.editor.set_covered(covered, cx);
     }
 
     pub fn focus_editor(&self, window: &mut Window, cx: &mut App) {

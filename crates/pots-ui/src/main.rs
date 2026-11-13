@@ -21,6 +21,7 @@ mod chat;
 mod checklist_editor;
 mod composer;
 mod document_editor;
+mod page_view;
 mod render_md;
 mod selection;
 mod settings;

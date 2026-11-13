@@ -64,8 +64,8 @@ fn load_workspace_from(home: &Path) -> io::Result<Option<Workspace>> {
                 artifact.load_error = Some(format!(
                     "{} holds a {}, not a {}.",
                     artifact_path(home, artifact.id).display(),
-                    content.kind().label().to_lowercase(),
-                    artifact.kind.label().to_lowercase()
+                    content.kind().noun(),
+                    artifact.kind.noun()
                 ))
             }
             Err(e) => artifact.load_error = Some(format!("{}: {e}", artifact_path(home, artifact.id).display())),

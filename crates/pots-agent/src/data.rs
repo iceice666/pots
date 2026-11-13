@@ -954,7 +954,7 @@ impl Workspace {
     /// A new, blank artifact of `kind` in `channel`, titled "Untitled
     /// table" (numbered if the channel has one by that name). Returns its id.
     pub fn add_artifact(&mut self, channel: usize, kind: ArtifactKind) -> usize {
-        let base = format!("Untitled {}", kind.label().to_lowercase());
+        let base = format!("Untitled {}", kind.noun());
         let taken = |title: &str| self.artifacts.iter().any(|a| a.channel == channel && a.title == title);
         let title = std::iter::once(base.clone())
             .chain((2..).map(|n| format!("{base} {n}")))

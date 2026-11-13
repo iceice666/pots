@@ -1214,7 +1214,7 @@ pub mod tools {
             }
             for id in ws.channel_artifacts(c) {
                 let a = ws.artifact(id).expect("listed");
-                out.push_str(&format!("  {} {id} “{}”\n", a.kind.label().to_lowercase(), a.title));
+                out.push_str(&format!("  {} {id} “{}”\n", a.kind.noun(), a.title));
             }
         }
         out
