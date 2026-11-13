@@ -3337,7 +3337,10 @@ impl Render for ChatApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let MainView::Artifact { frame, .. } = &self.view {
             // A page's web view lies on top of everything drawn here: it
-            // steps aside while an overlay is open.
+            // steps aside while an overlay is open. Worked out here rather
+            // than in each overlay's setter, so one added later can't be
+            // missed by a setter that forgets to tell the page; it has to
+            // join this list (the `an_open_page_steps_aside…` test).
             let covered = self.dialog.is_some()
                 || self.menu
                 || self.settings.is_some()
@@ -3590,6 +3593,47 @@ mod tests {
         cx.simulate_keystrokes("enter"); // keep the default title
         draw(cx);
         app.read_with(cx, |app, cx| app.open_artifact_id(cx).unwrap())
+    }
+
+    #[gpui::test]
+    fn an_open_page_steps_aside_for_the_apps_overlays(cx: &mut gpui::TestAppContext) {
+        let (app, cx, _home) = mock_app(cx);
+        draw(cx);
+        app.update_in(cx, |app, window, cx| app.create_artifact(ArtifactKind::Page, window, cx));
+        draw(cx);
+        cx.simulate_keystrokes("enter"); // keep the default title
+        draw(cx);
+        let id = app.read_with(cx, |app, cx| app.open_artifact_id(cx).unwrap());
+        let covered = |cx: &mut gpui::VisualTestContext| {
+            app.read_with(cx, |app, cx| match &app.view {
+                MainView::Artifact { frame, .. } => frame.read(cx).covered(cx),
+                _ => panic!("the page isn't open"),
+            })
+        };
+        assert!(!covered(cx));
+
+        // An overlay hides it until the next draw after it closes. A new
+        // overlay goes in the list in `ChatApp::render`.
+        app.update_in(cx, |app, window, cx| app.open_search(window, cx));
+        draw(cx);
+        assert!(covered(cx), "under the search");
+        app.update_in(cx, |app, window, cx| app.close_search(window, cx));
+        draw(cx);
+        assert!(!covered(cx));
+
+        app.update_in(cx, |app, window, cx| app.ask_delete_artifact(id, window, cx));
+        draw(cx);
+        assert!(covered(cx), "under the delete confirmation");
+        app.update_in(cx, |app, window, cx| app.cancel_delete_artifact(window, cx));
+        draw(cx);
+        assert!(!covered(cx));
+
+        app.update(cx, |app, cx| app.toggle_new_artifact_menu(cx));
+        draw(cx);
+        assert!(covered(cx), "under the new-artifact menu");
+        app.update(cx, |app, cx| app.toggle_new_artifact_menu(cx));
+        draw(cx);
+        assert!(!covered(cx));
     }
 
     #[gpui::test]

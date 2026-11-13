@@ -57,6 +57,11 @@ pub trait ArtifactEditor: Render + Focusable + EventEmitter<EditorEvent> {
     /// the editor. Only an editor showing a native view on top of the
     /// window (a page's web view) has to care.
     fn set_covered(&mut self, _covered: bool, _cx: &mut Context<Self>) {}
+    /// What `set_covered` last said, for an editor that keeps it.
+    #[cfg(test)]
+    fn covered(&self) -> bool {
+        false
+    }
 }
 
 /// An editor of any kind, as the frame holds it.
@@ -68,6 +73,8 @@ trait AnyEditor {
     fn focus(&self, window: &mut Window, cx: &mut App);
     fn replace(&self, content: ArtifactContent, cx: &mut App);
     fn set_covered(&self, covered: bool, cx: &mut App);
+    #[cfg(test)]
+    fn covered(&self, cx: &App) -> bool;
 }
 
 impl<E: ArtifactEditor> AnyEditor for Entity<E> {
@@ -97,6 +104,11 @@ impl<E: ArtifactEditor> AnyEditor for Entity<E> {
 
     fn set_covered(&self, covered: bool, cx: &mut App) {
         self.update(cx, |e, cx| e.set_covered(covered, cx));
+    }
+
+    #[cfg(test)]
+    fn covered(&self, cx: &App) -> bool {
+        self.read(cx).covered()
     }
 }
 
@@ -192,6 +204,12 @@ impl ArtifactFrame {
     /// Whether one of the app's overlays is drawn over the editor.
     pub fn set_covered(&self, covered: bool, cx: &mut App) {
         self.editor.set_covered(covered, cx);
+    }
+
+    /// Whether the editor was last told it is covered.
+    #[cfg(test)]
+    pub fn covered(&self, cx: &App) -> bool {
+        self.editor.covered(cx)
     }
 
     pub fn focus_editor(&self, window: &mut Window, cx: &mut App) {

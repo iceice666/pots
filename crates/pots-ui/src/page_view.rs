@@ -203,6 +203,11 @@ impl ArtifactEditor for PageView {
         }
         cx.notify();
     }
+
+    #[cfg(test)]
+    fn covered(&self) -> bool {
+        self.covered
+    }
 }
 
 impl Focusable for PageView {
