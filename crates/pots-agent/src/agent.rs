@@ -395,7 +395,9 @@ impl Agents {
         let caller = &self.list[a].config.name;
         // One checkout per asking agent, so two agents' asks never share one.
         let name = format!("{}-{caller}", worker::NAME);
-        let env = |repo: PathBuf, task: &str| {
+        // Asked from a channel (or about one), the worker looks at the project's
+        // default branch; asked from a thread, at that task's work.
+        let env = |repo: PathBuf, task: &str, default_branch: bool| {
             sandbox::Env::new(
                 WorkspaceMode::Scratch,
                 sandbox::find_docker(self.sandbox.docker.as_deref()),
@@ -405,12 +407,13 @@ impl Agents {
                 task,
                 &name,
             )
+            .on_default_branch(default_branch)
         };
         let channels = (0..ws.channels.len())
             .filter(|&c| ws.channels[c].dm.is_none())
             .filter_map(|c| {
                 let repo = ws.channels[c].repo.as_deref().map(expand_home)?;
-                Some((ws.channels[c].name.to_lowercase(), env(repo, &task_key(ws, Conv::Channel(c)))))
+                Some((ws.channels[c].name.to_lowercase(), env(repo, &task_key(ws, Conv::Channel(c)), true)))
             })
             .collect();
         let prompt = match w.config.system_prompt.trim() {
@@ -435,7 +438,7 @@ impl Agents {
                 extra: w.config.extra_body(),
             },
             claude_code: w.provider.api == Api::ClaudeCode,
-            env: self.repo(ws, conv).map(|repo| env(repo, &task_key(ws, conv))),
+            env: self.repo(ws, conv).map(|repo| env(repo, &task_key(ws, conv), matches!(conv, Conv::Channel(_)))),
             channels,
             problem: w.missing_key.clone(),
             spent: Default::default(),

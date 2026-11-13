@@ -36,6 +36,10 @@ pub struct Env {
     pub branch: String,
     pub agent: String,
     pub container: String,
+    /// A scratch checkout of the project's default branch, never of the
+    /// task's branch: for questions asked in a channel, which are about the
+    /// project as it is, not about whatever an engineer once left there.
+    pub default_branch: bool,
 }
 
 impl Env {
@@ -50,7 +54,14 @@ impl Env {
             branch: format!("pots/{task}"),
             container: format!("pots-agent-{task}-{agent_slug}"),
             agent: agent.to_string(),
+            default_branch: false,
         }
+    }
+
+    /// See [`default_branch`](Self::default_branch).
+    pub fn on_default_branch(mut self, yes: bool) -> Self {
+        self.default_branch = yes;
+        self
     }
 
     /// The writer's clone (shared by the task).
@@ -114,6 +125,14 @@ impl Env {
                  Anything you change there is thrown away.",
                 image = self.image,
                 branch = self.branch,
+            ),
+            WorkspaceMode::Scratch if self.default_branch => format!(
+                "# Your workspace\n\
+                 You have a Linux container (image `{image}`). /workspace is a throwaway checkout of the project's \
+                 default branch as it is now, refreshed every time you're asked. Work that hasn't been committed \
+                 there isn't in it. Use {review_tools} to look around, build and run things. Anything you change \
+                 there is thrown away and nobody sees it: your final answer is all that comes back.",
+                image = self.image,
             ),
             WorkspaceMode::Scratch => format!(
                 "# Your workspace\n\
@@ -307,6 +326,9 @@ impl Session {
             // approved task branches. Best effort: a moved project doesn't
             // stop work on the task.
             let _ = git(&dir, &["fetch", "--quiet", "--prune", "origin"]);
+            // `fetch` leaves `origin/HEAD` where the clone found it: follow
+            // the project's default branch if it moved (a rename, a rewrite).
+            let _ = git(&dir, &["remote", "set-head", "origin", "--auto"]);
             // Reviewers take the clone's own default branch as `base`: keep
             // it at the project's, so a rebased branch shows only its work.
             if let Ok(default) = git(&dir, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
@@ -324,7 +346,9 @@ impl Session {
     fn prepare_reviewer(&self) -> Result<(), String> {
         let dir = self.env.host_dir();
         let writer = self.env.writer_dir();
-        let has_writer = writer.join(".git").exists();
+        // The writer's clone is only refreshed when the engineer is asked, so
+        // a checkout of the default branch comes from the project itself.
+        let has_writer = !self.env.default_branch && writer.join(".git").exists();
         let source = if has_writer { &writer } else { &self.env.repo };
         if !dir.join(".git").exists() {
             clone(source, &dir)?;
@@ -332,6 +356,12 @@ impl Session {
         }
         git(&dir, &["remote", "set-url", "origin", &source.display().to_string()])?;
         git(&dir, &["fetch", "--quiet", "--prune", "origin"])?;
+        if !has_writer {
+            // `origin/HEAD` is set once, at clone time (and from the writer's
+            // clone, if that was the source then): point it at the project's
+            // default branch as it is now. A project with no commits has none.
+            let _ = git(&dir, &["remote", "set-head", "origin", "--auto"]);
+        }
         let (head, base) = if has_writer {
             // The writer's default branch is where the task started.
             let default = git(&writer, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
@@ -1299,6 +1329,54 @@ mod tests {
 
         let names: Vec<_> = specs(WorkspaceMode::Scratch).iter().map(|s| s.name).collect();
         assert_eq!(names, ["bash", "read_file"], "no merge requests and no file edits");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_channel_scratch_follows_the_project_not_an_old_channel_clone() {
+        let tmp = std::env::temp_dir().join(format!("pots-sandbox-channel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let commit = |dir: &Path, msg: &str| {
+            git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", msg]).unwrap();
+        };
+        let last = |dir: &Path| git(dir, &["log", "-1", "--format=%s"]).unwrap().trim().to_string();
+        git(&repo, &["init", "--quiet", "-b", "old"]).unwrap();
+        commit(&repo, "old start");
+        let tasks = tmp.join("tasks");
+        let env = |mode, agent| Env::new(mode, "docker".into(), "img".into(), repo.clone(), &tasks, "c-general", agent);
+
+        // An engineer once worked in the channel itself, outside any thread,
+        // and a checkout taken from that clone shows their commit.
+        let writer = Session::new(env(WorkspaceMode::Write, "Engineer"));
+        writer.prepare_writer().unwrap();
+        let wdir = writer.env.writer_dir();
+        commit(&wdir, "inventory");
+        let stale = Session::new(env(WorkspaceMode::Scratch, "Worker-PM"));
+        stale.prepare_reviewer().unwrap();
+        assert_eq!(last(&stale.env.host_dir()), "inventory");
+
+        // The owner starts a new history on `main` and drops the old branch.
+        git(&repo, &["checkout", "--quiet", "--orphan", "main"]).unwrap();
+        commit(&repo, "new start");
+        git(&repo, &["branch", "--quiet", "-D", "old"]).unwrap();
+
+        // Asked in the channel, the same checkout now shows the project's
+        // default branch as it is, though the channel's clone never moved.
+        let scratch = Session::new(env(WorkspaceMode::Scratch, "Worker-PM").on_default_branch(true));
+        assert_eq!(scratch.env.host_dir(), stale.env.host_dir());
+        scratch.prepare_reviewer().unwrap();
+        let sdir = scratch.env.host_dir();
+        assert_eq!(last(&sdir), "new start");
+        assert_eq!(git(&sdir, &["symbolic-ref", "refs/remotes/origin/HEAD"]).unwrap().trim(), "refs/remotes/origin/main");
+        assert!(scratch.env.describe().contains("default branch as it is now"));
+        assert_eq!(last(&wdir), "inventory", "the channel's clone is left alone");
+
+        // The engineer's clone follows the new default branch next time too.
+        writer.prepare_writer().unwrap();
+        assert_eq!(git(&wdir, &["symbolic-ref", "refs/remotes/origin/HEAD"]).unwrap().trim(), "refs/remotes/origin/main");
+        assert_eq!(git(&wdir, &["log", "-1", "--format=%s", "main"]).unwrap().trim(), "new start");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
