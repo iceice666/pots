@@ -193,7 +193,7 @@ Engineer 用 `task_done` 回報任務完成（status 是 done），或你按 **A
 3. Engineer 在自己的容器裡改 code、跑測試、commit，然後 @Reviewer。
 4. Reviewer checkout 那個 branch 來審：
    - 需要修改 → @Engineer，回到第 3 步。
-   - 沒問題 → 呼叫 `request_merge`，thread 裡出現 🔀 **Merge request** 卡片，列出這個 branch 的 commit。同時 Pots 會叫 PM 到 #general 跟你回報哪個任務可以收了（見下方「PM 的回報」）。
+   - 沒問題 → 呼叫 `request_merge`，thread 裡出現 🔀 **Merge request** 卡片，列出這個 branch 的 commit。卡片也會出現在側欄最上面的 📥 **Inbox**，不用進 thread 就能按（見下方「Inbox」）。同時 Pots 會叫 PM 到 #general 跟你回報哪個任務可以收了（見下方「PM 的回報」）。
 5. 你按 **Approve**：Pots 先把 branch 以同名 branch（`pots/...`）fetch 到專案 repo，接著在下面這些條件**全部**成立時，直接把它 merge 進你 checkout 的預設 branch（等同在 repo 裡跑 `git merge --no-edit pots/...`，可以 fast-forward 就 fast-forward，不行就用 git 預設訊息建 merge commit）：
    - 專案 repo 有 working tree（不是 bare repo），而且 checkout 在預設 branch 上（也就是任務 clone 時的 `origin/HEAD`），不是別的 branch 或 detached HEAD；
    - 已追蹤的檔案沒有未 commit 的改動（untracked 檔案不算），也沒有進行到一半的 merge、rebase、cherry-pick 或 revert；
@@ -240,6 +240,12 @@ PM 不會自動知道你在自己的 repo merge 了什麼：merge 完想讓它�
 ### agent 問你問題
 
 agent 需要你做決定時（範圍、優先順序、取捨），會用 `ask_owner` 在訊息下方放 2–4 個選項按鈕，推薦的那個前面會有 ★。點按鈕就等於用那個選項 @ 回覆它。
+
+### Inbox
+
+側欄最上面的 📥 **Inbox** 收集所有在等你的卡片：還沒回答的選擇卡、還沒處理的 merge request（包括 Approve 後 fetch 失敗、要重按的），不管在哪個 channel、DM 或 thread，已封存的 thread 也算。有東西在等時旁邊會有紅色數字。
+
+點開後每張卡片都帶著原本的按鈕，最新的在上面。在這裡按 **Approve**／**Reject** 或選項，跟在原本的 thread 裡按完全一樣：回覆會發在原本的 thread，PM 照常回報。卡片上方的「🧵 thread · #channel」可以跳到原本的對話，那則訊息會短暫標亮。回答完的卡片就會從 Inbox 消失。
 
 ## 其他
 
